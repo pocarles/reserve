@@ -11,6 +11,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     store: self.store,
     actions: DashboardActions(
       refreshAll: { [weak self] in self?.store.refreshAll() },
+      connectAnthropic: { [weak self] in self?.store.connectAnthropic() },
       openSettings: { [weak self] in self?.showSettings() },
       quit: { NSApplication.shared.terminate(nil) }))
 
@@ -50,6 +51,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }.count
     let actionsPresent =
       identifiers.contains("refresh-all")
+      && identifiers.contains("connect-anthropic")
       && identifiers.contains("open-settings")
       && identifiers.contains("quit-app")
     let logosPresent = ProviderID.allCases.allSatisfy {
@@ -63,17 +65,23 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let dashboardFits =
       self.dashboardController.preferredContentSize.width == 444
       && self.dashboardController.preferredContentSize.height == 748
+    let oauthURLParsingIsSafe =
+      UsageStore.claudeAuthorizationURL(
+        in: "Authenticate at https://claude.com/cai/oauth/authorize?code=sample")?.host
+      == "claude.com"
+      && UsageStore.claudeAuthorizationURL(
+        in: "https://example.com/oauth/authorize?code=not-trusted") == nil
     guard providerCards == ProviderID.allCases.count, actionsPresent, logosPresent,
-      !hasScrollView, contentFits, dashboardFits
+      !hasScrollView, contentFits, dashboardFits, oauthURLParsingIsSafe
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits), oauthURL=\(oauthURLParsingIsSafe)"
       )
     }
     return (
       true,
-      "dashboard has \(providerCards) provider cards with logos, economics, resets, no scrolling, and all actions"
+      "dashboard has \(providerCards) provider cards with logos, quota-first layout, reset details, economics, safe Claude OAuth action, and no scrolling"
     )
   }
 

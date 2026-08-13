@@ -1,7 +1,7 @@
 import Foundation
 
-enum BinaryLocator {
-  static func find(
+public enum BinaryLocator {
+  public static func find(
     _ name: String, environment: [String: String] = ProcessInfo.processInfo.environment
   ) -> String? {
     let home = FileManager.default.homeDirectoryForCurrentUser.path

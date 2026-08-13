@@ -53,7 +53,7 @@ public struct AnthropicProvider: UsageProvider {
         }
       #endif
       throw UsageProviderError.unauthorized(
-        "Claude authentication expired. Run `claude auth login` and refresh.")
+        "Claude authentication expired. Click Connect to sign in again.")
     }
 
     var windows: [UsageWindow] = []
@@ -132,7 +132,7 @@ public struct AnthropicProvider: UsageProvider {
       await self.rateLimitGate.clear()
     case 401:
       throw UsageProviderError.unauthorized(
-        "Claude authentication expired. Run `claude auth login` and refresh.")
+        "Claude authentication expired. Click Connect to sign in again.")
     case 429:
       let retryAt = Self.conservativeRetryDate(
         retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
@@ -230,11 +230,11 @@ enum ClaudeCredentialLoader {
       if self.keychainItemExistsWithoutPrompt() {
         if !allowKeychainRead { throw UsageProviderError.keychainConsentRequired }
         throw UsageProviderError.credentialsNotFound(
-          "Claude Keychain credentials are unusable. Run `claude auth login` and refresh.")
+          "Claude Keychain credentials are unusable. Click Connect to sign in again.")
       }
     #endif
     throw UsageProviderError.credentialsNotFound(
-      "Claude OAuth credentials were not found. Run `claude auth login` first.")
+      "Claude OAuth credentials were not found. Click Connect to sign in.")
   }
 
   static func decode(data: Data, source: String) throws -> ClaudeCredentials {

@@ -101,7 +101,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
       self.note("Off by default. Background checks never show a Keychain authentication prompt."))
     stack.addArrangedSubview(
       self.note(
-        "If Claude is signed out or expired, run `claude auth login` in Terminal, then Refresh All."
+        "If Claude is signed out or expired, click Connect in the dashboard to open Claude's browser sign-in."
       ))
 
     stack.addArrangedSubview(self.heading("Monthly subscription costs"))

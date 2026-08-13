@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import UsageBarCore
 
@@ -7,6 +8,7 @@ struct ProviderViewState: Identifiable {
   var snapshot: UsageSnapshot?
   var error: String?
   var isRefreshing = false
+  var isConnecting = false
   var localUsage: LocalUsageSummary?
   var subscriptionCostUSD: Double = 0
 
@@ -28,6 +30,12 @@ final class UsageStore {
   private let defaults: UserDefaults
   private var schedulerTask: Task<Void, Never>?
   private var startupTask: Task<Void, Never>?
+  private var claudeLoginProcess: Process?
+  private var claudeLoginTimeoutTask: Task<Void, Never>?
+  private var claudeLoginInput: Pipe?
+  private var claudeLoginOutput: Pipe?
+  private var claudeLoginOutputBuffer = Data()
+  private var openedClaudeLoginURL = false
 
   init(defaults: UserDefaults = .standard, startAutomatically: Bool = true) {
     self.defaults = defaults
@@ -46,6 +54,8 @@ final class UsageStore {
   deinit {
     self.schedulerTask?.cancel()
     self.startupTask?.cancel()
+    self.claudeLoginTimeoutTask?.cancel()
+    if self.claudeLoginProcess?.isRunning == true { self.claudeLoginProcess?.terminate() }
   }
 
   var orderedStates: [ProviderViewState] {
@@ -98,6 +108,68 @@ final class UsageStore {
   func refresh(_ provider: ProviderID) {
     guard self.beginRefresh(provider) else { return }
     Task { await self.performRefresh(provider) }
+  }
+
+  func connectAnthropic() {
+    guard self.claudeLoginProcess?.isRunning != true else { return }
+    guard let executable = BinaryLocator.find("claude") else {
+      self.states[.anthropic]?.error = "Claude Code is not installed."
+      self.changed()
+      return
+    }
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = ["auth", "login", "--claudeai"]
+    process.environment = ProcessInfo.processInfo.environment
+    process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+    let input = Pipe()
+    let output = Pipe()
+    process.standardInput = input
+    process.standardOutput = output
+    process.standardError = output
+    process.terminationHandler = { [weak self] completed in
+      Task { @MainActor [weak self] in
+        self?.finishAnthropicLogin(status: completed.terminationStatus)
+      }
+    }
+
+    do {
+      try process.run()
+      self.claudeLoginProcess = process
+      self.claudeLoginInput = input
+      self.claudeLoginOutput = output
+      self.claudeLoginOutputBuffer = Data()
+      self.openedClaudeLoginURL = false
+      output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        let data = handle.availableData
+        guard !data.isEmpty else { return }
+        Task { @MainActor [weak self] in self?.consumeClaudeLoginOutput(data) }
+      }
+      self.states[.anthropic]?.isConnecting = true
+      self.states[.anthropic]?.error = nil
+      self.changed()
+      self.claudeLoginTimeoutTask?.cancel()
+      self.claudeLoginTimeoutTask = Task { [weak self, weak process] in
+        try? await Task.sleep(for: .seconds(300))
+        guard !Task.isCancelled, process?.isRunning == true else { return }
+        process?.terminate()
+        await MainActor.run {
+          self?.states[.anthropic]?.error = "Claude sign-in timed out. Click Connect to try again."
+          self?.states[.anthropic]?.isConnecting = false
+          self?.changed()
+        }
+      }
+      Task { [weak input] in
+        try? await Task.sleep(for: .milliseconds(300))
+        try? input?.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
+      }
+    } catch {
+      self.states[.anthropic]?.error =
+        "Could not start Claude sign-in: \(error.localizedDescription)"
+      self.states[.anthropic]?.isConnecting = false
+      self.changed()
+    }
   }
 
   func setEnabled(_ provider: ProviderID, enabled: Bool) {
@@ -213,6 +285,56 @@ final class UsageStore {
 
   private func changed() {
     self.onChange?()
+  }
+
+  private func finishAnthropicLogin(status: Int32) {
+    self.claudeLoginTimeoutTask?.cancel()
+    self.claudeLoginTimeoutTask = nil
+    self.claudeLoginProcess = nil
+    self.claudeLoginOutput?.fileHandleForReading.readabilityHandler = nil
+    try? self.claudeLoginInput?.fileHandleForWriting.close()
+    try? self.claudeLoginOutput?.fileHandleForReading.close()
+    self.claudeLoginInput = nil
+    self.claudeLoginOutput = nil
+    self.claudeLoginOutputBuffer = Data()
+    self.openedClaudeLoginURL = false
+    self.states[.anthropic]?.isConnecting = false
+    if status == 0 {
+      self.claudeKeychainReadAllowed = true
+      self.states[.anthropic]?.error = nil
+      self.refresh(.anthropic)
+    } else if self.states[.anthropic]?.error == nil {
+      self.states[.anthropic]?.error = "Claude sign-in was not completed. Click Connect to retry."
+      self.changed()
+    }
+  }
+
+  private func consumeClaudeLoginOutput(_ data: Data) {
+    guard !self.openedClaudeLoginURL else { return }
+    let remainingCapacity = max(0, 65_536 - self.claudeLoginOutputBuffer.count)
+    self.claudeLoginOutputBuffer.append(data.prefix(remainingCapacity))
+    guard let output = String(data: self.claudeLoginOutputBuffer, encoding: .utf8),
+      let url = Self.claudeAuthorizationURL(in: output)
+    else { return }
+    self.openedClaudeLoginURL = true
+    NSWorkspace.shared.open(url)
+  }
+
+  static func claudeAuthorizationURL(in output: String) -> URL? {
+    let pattern = #"https://[^\s\u001B<>\"]+"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let range = NSRange(output.startIndex..., in: output)
+    for match in regex.matches(in: output, range: range) {
+      guard let swiftRange = Range(match.range, in: output) else { continue }
+      let text = String(output[swiftRange]).trimmingCharacters(
+        in: CharacterSet(charactersIn: "'(),.;"))
+      guard let url = URL(string: text),
+        ["claude.com", "claude.ai", "platform.claude.com"].contains(url.host?.lowercased()),
+        url.path.contains("oauth")
+      else { continue }
+      return url
+    }
+    return nil
   }
 
   private func loadCacheAndStart() async {

@@ -28,6 +28,11 @@ session files directly and keeps only daily aggregates.
 - `claude` logged into the Anthropic subscription
 - Grok Build 1.0.0 or newer, authenticated using `grok login`
 
+When Claude needs authentication, its Connect button runs the installed
+`claude auth login --claudeai` flow and opens the generated Anthropic OAuth URL
+in the default browser. The temporary login URL is held in memory only, restricted
+to Claude-owned HTTPS hosts, and is never logged or cached.
+
 Anthropic's subscription usage endpoint is not a documented public API and may
 rate limit callers. Usage Bar persists a backoff of at least 15 minutes after a
 429 and retains the last successful snapshot.
@@ -61,10 +66,12 @@ actions, checkboxes, and the refresh picker without changing any setting.
 
 The popover fits its complete dashboard without scrolling. Its overview shows the
 number of enabled providers, their combined 30-day tokens, API-equivalent value,
-and net savings versus configured monthly subscriptions. Each provider card shows
-its logo, token total, API value, subscription cost, savings, highest active quota,
-number of reset windows, and nearest reset. Subscription costs are editable in
-Settings because plan names and billing arrangements vary.
+and net savings versus configured monthly subscriptions. Each provider card leads
+with its weekly usage percentage and next reset, followed by the progress bar and
+any additional reset windows. Token totals, API value, and savings sit below that
+quota information; the plan name and subscription cost are plain text beside the
+provider identity. Subscription costs are editable in Settings because plan names
+and billing arrangements vary.
 
 API value is an estimate, not a provider bill. OpenAI and Anthropic calculations
 use the observed input, cache, cache-write, and output mix when available. Grok's

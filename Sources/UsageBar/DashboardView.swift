@@ -4,6 +4,7 @@ import UsageBarCore
 @MainActor
 struct DashboardActions {
   let refreshAll: () -> Void
+  let connectAnthropic: () -> Void
   let openSettings: () -> Void
   let quit: () -> Void
 }
@@ -79,7 +80,9 @@ final class UsageDashboardView: NSView {
     stack.addArrangedSubview(DashboardSummaryView(states: states))
 
     for state in states {
-      let card = ProviderDashboardCard(state: state, now: now, isScanning: isRefreshing)
+      let card = ProviderDashboardCard(
+        state: state, now: now, isScanning: isRefreshing,
+        connectAnthropic: actions.connectAnthropic)
       card.identifier = NSUserInterfaceItemIdentifier("provider-card-\(state.provider.rawValue)")
       stack.addArrangedSubview(card)
     }
@@ -205,7 +208,12 @@ private final class DashboardMetric: NSView {
 
 @MainActor
 private final class ProviderDashboardCard: NSView {
-  init(state: ProviderViewState, now: Date, isScanning: Bool) {
+  init(
+    state: ProviderViewState,
+    now: Date,
+    isScanning: Bool,
+    connectAnthropic: @escaping () -> Void
+  ) {
     super.init(frame: .zero)
     self.wantsLayer = true
     self.layer?.backgroundColor = DashboardPalette.card.cgColor
@@ -227,20 +235,36 @@ private final class ProviderDashboardCard: NSView {
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
     ])
 
-    stack.addArrangedSubview(Self.header(state: state))
-    stack.addArrangedSubview(EconomicsRow(state: state, isScanning: isScanning))
+    stack.addArrangedSubview(
+      Self.header(state: state, connectAnthropic: connectAnthropic))
     stack.addArrangedSubview(QuotaRow(state: state, now: now))
+    stack.addArrangedSubview(EconomicsRow(state: state, isScanning: isScanning))
   }
 
   required init?(coder: NSCoder) { nil }
 
-  private static func header(state: ProviderViewState) -> NSView {
+  private static func header(
+    state: ProviderViewState,
+    connectAnthropic: @escaping () -> Void
+  ) -> NSView {
     let logo = ProviderLogo(provider: state.provider)
     let name = DashboardLabel(
       state.provider.displayName, size: 13, weight: .semibold, color: DashboardPalette.text)
+    let planName = state.snapshot?.planName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let plan = DashboardLabel(
+      "\((planName?.isEmpty == false ? planName : nil) ?? "Plan") · \(DashboardFormat.money(state.subscriptionCostUSD))/month",
+      size: 8.5, color: DashboardPalette.muted)
+    let identity = NSStackView(views: [name, plan])
+    identity.orientation = .vertical
+    identity.alignment = .leading
+    identity.spacing = 1
+
     let status: String
     let statusColor: NSColor
-    if state.isRefreshing {
+    if state.isConnecting {
+      status = "Connecting…"
+      statusColor = state.provider.accent
+    } else if state.isRefreshing {
       status = "Refreshing"
       statusColor = state.provider.accent
     } else if state.snapshot != nil && state.error == nil {
@@ -253,19 +277,28 @@ private final class ProviderDashboardCard: NSView {
       status = "Connect"
       statusColor = DashboardPalette.warning
     }
-    let stateLabel = DashboardLabel("●  \(status)", size: 9, weight: .medium, color: statusColor)
-    let identity = NSStackView(views: [name, stateLabel])
-    identity.orientation = .vertical
-    identity.alignment = .leading
-    identity.spacing = 1
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
     let row = NSStackView(views: [logo, identity, spacer])
     row.orientation = .horizontal
     row.alignment = .centerY
     row.spacing = 9
-    if let plan = state.snapshot?.planName, !plan.isEmpty {
-      row.addArrangedSubview(PillLabel(text: plan.uppercased()))
+    if state.provider == .anthropic, state.needsConnection, !state.isConnecting,
+      !state.isRefreshing
+    {
+      let connect = DashboardTextButton(
+        title: "Connect", symbol: "person.crop.circle.badge.plus", action: connectAnthropic)
+      connect.identifier = NSUserInterfaceItemIdentifier("connect-anthropic")
+      connect.contentTintColor = DashboardPalette.warning
+      row.addArrangedSubview(connect)
+    } else {
+      let statusLabel = DashboardLabel(
+        "●  \(status)", size: 9, weight: .medium, color: statusColor)
+      statusLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+      statusLabel.widthAnchor.constraint(
+        equalToConstant: max(42, statusLabel.intrinsicContentSize.width + 2)
+      ).isActive = true
+      row.addArrangedSubview(statusLabel)
     }
     row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
     return row
@@ -280,7 +313,6 @@ private final class EconomicsRow: NSView {
     let api = usage.map {
       DashboardFormat.money($0.apiEquivalentCostUSD, approximate: $0.isCostEstimate)
     }
-    let plan = DashboardFormat.money(state.subscriptionCostUSD)
     let saved = usage.map {
       DashboardFormat.savings($0.apiEquivalentCostUSD - state.subscriptionCostUSD)
     }
@@ -289,7 +321,6 @@ private final class EconomicsRow: NSView {
         label: "TOKENS",
         value: usage.map { DashboardFormat.tokens($0.totalTokens) } ?? (isScanning ? "…" : "—")),
       EconomicsMetric(label: "API VALUE", value: api ?? (isScanning ? "…" : "—")),
-      EconomicsMetric(label: "PLAN", value: plan),
       EconomicsMetric(label: "SAVED", value: saved ?? "—", highlight: true),
     ])
     row.orientation = .horizontal
@@ -303,7 +334,7 @@ private final class EconomicsRow: NSView {
       row.topAnchor.constraint(equalTo: self.topAnchor),
       row.bottomAnchor.constraint(equalTo: self.bottomAnchor),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth),
-      self.heightAnchor.constraint(equalToConstant: 40),
+      self.heightAnchor.constraint(equalToConstant: 34),
     ])
   }
 
@@ -322,7 +353,7 @@ private final class EconomicsMetric: NSView {
     for label in [heading, value] {
       label.alignment = .center
       label.lineBreakMode = .byClipping
-      label.widthAnchor.constraint(equalToConstant: 88).isActive = true
+      label.widthAnchor.constraint(equalToConstant: 118).isActive = true
     }
     let stack = NSStackView(views: [heading, value])
     stack.orientation = .vertical
@@ -343,60 +374,75 @@ private final class EconomicsMetric: NSView {
 private final class QuotaRow: NSView {
   init(state: ProviderViewState, now: Date) {
     super.init(frame: .zero)
-    let divider = NSView()
-    divider.wantsLayer = true
-    divider.layer?.backgroundColor = DashboardPalette.border.cgColor
-    divider.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(divider)
-
     let windows = state.snapshot?.windows ?? []
-    let highest = windows.max(by: { $0.usedPercent < $1.usedPercent })
-    let resetDates = windows.compactMap(\.resetsAt).filter { $0 > now }
-    let next = resetDates.min()
-    let title: String
-    let detail: String
-    if let highest {
-      title = "\(highest.label)  ·  \(String(format: "%.0f%%", highest.usedPercent)) used"
-      let count = resetDates.count
-      let noun = count == 1 ? "reset window" : "reset windows"
-      detail =
-        next.map {
-          "\(count) \(noun) · next \(DashboardFormat.countdown(to: $0, now: now)) · \(DashboardFormat.shortDate($0))"
-        } ?? "\(count) \(noun) · next reset unavailable"
-    } else {
-      title = "Quota unavailable"
-      detail = state.error ?? "Connect this provider to read reset windows."
-    }
-    let heading = DashboardLabel(title, size: 9.5, weight: .medium, color: DashboardPalette.text)
-    let detailLabel = DashboardLabel(
-      detail, size: 8.5,
-      color: state.error == nil ? DashboardPalette.muted : DashboardPalette.warning)
-    detailLabel.lineBreakMode = .byTruncatingTail
-    let labels = NSStackView(views: [heading, detailLabel])
-    labels.orientation = .vertical
-    labels.alignment = .leading
-    labels.spacing = 2
-    labels.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(labels)
+    let primary =
+      windows.first { $0.label.localizedCaseInsensitiveCompare("Weekly") == .orderedSame }
+      ?? windows.max(by: { $0.usedPercent < $1.usedPercent })
+    let percentage = DashboardLabel(
+      primary.map { String(format: "%.0f%%", $0.usedPercent) } ?? "—",
+      size: 26, weight: .semibold, color: DashboardPalette.text)
+    percentage.font = .monospacedDigitSystemFont(ofSize: 26, weight: .semibold)
+    percentage.widthAnchor.constraint(equalToConstant: 74).isActive = true
 
-    let bar = RoundedProgressView(value: highest?.usedPercent ?? 0, color: state.provider.accent)
-    bar.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(bar)
+    let resetDescription: String
+    if let primary {
+      if let reset = primary.resetsAt, reset > now {
+        resetDescription =
+          "\(primary.label) · Next reset \(DashboardFormat.countdown(to: reset, now: now)) on \(DashboardFormat.shortDate(reset))"
+      } else {
+        resetDescription = "\(primary.label) · Next reset unavailable"
+      }
+    } else {
+      resetDescription =
+        state.isConnecting
+        ? "Complete Claude sign-in in your browser"
+        : state.error ?? "Connect this provider to read subscription limits"
+    }
+    let resetLabel = DashboardLabel(
+      resetDescription, size: 9.5, weight: .medium,
+      color: state.error == nil ? DashboardPalette.muted : DashboardPalette.warning)
+    resetLabel.lineBreakMode = .byTruncatingTail
+    let headline = NSStackView(views: [percentage, resetLabel])
+    headline.orientation = .horizontal
+    headline.alignment = .centerY
+    headline.spacing = 7
+    headline.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive =
+      true
+
+    let bar = RoundedProgressView(value: primary?.usedPercent ?? 0, color: state.provider.accent)
+    bar.heightAnchor.constraint(equalToConstant: 5).isActive = true
+    bar.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+
+    let stack = NSStackView(views: [headline, bar])
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = 5
+    for window
+      in windows
+      .filter({ $0.id != primary?.id })
+      .sorted(by: { ($0.resetsAt ?? .distantFuture) < ($1.resetsAt ?? .distantFuture) })
+    {
+      let expiration =
+        window.resetsAt.map {
+          "resets \(DashboardFormat.countdown(to: $0, now: now)) on \(DashboardFormat.shortDate($0))"
+        } ?? "reset unavailable"
+      let additional = DashboardLabel(
+        "↳ \(window.label) · \(String(format: "%.0f%%", window.usedPercent)) · \(expiration)",
+        size: 8.5, color: DashboardPalette.muted)
+      additional.lineBreakMode = .byTruncatingTail
+      additional.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth)
+        .isActive =
+        true
+      stack.addArrangedSubview(additional)
+    }
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(stack)
     NSLayoutConstraint.activate([
-      divider.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      divider.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      divider.topAnchor.constraint(equalTo: self.topAnchor),
-      divider.heightAnchor.constraint(equalToConstant: 1),
-      labels.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      labels.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      labels.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 7),
-      bar.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      bar.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      bar.topAnchor.constraint(equalTo: labels.bottomAnchor, constant: 5),
-      bar.heightAnchor.constraint(equalToConstant: 5),
-      bar.bottomAnchor.constraint(equalTo: self.bottomAnchor),
+      stack.leadingAnchor.constraint(equalTo: self.leadingAnchor),
+      stack.trailingAnchor.constraint(equalTo: self.trailingAnchor),
+      stack.topAnchor.constraint(equalTo: self.topAnchor),
+      stack.bottomAnchor.constraint(equalTo: self.bottomAnchor),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth),
-      self.heightAnchor.constraint(equalToConstant: 47),
     ])
   }
 
@@ -500,29 +546,6 @@ private final class DashboardFooterView: NSView {
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
       self.heightAnchor.constraint(equalToConstant: 28),
     ])
-  }
-
-  required init?(coder: NSCoder) { nil }
-}
-
-@MainActor
-private final class PillLabel: NSTextField {
-  init(text: String) {
-    super.init(frame: .zero)
-    self.stringValue = text
-    self.isEditable = false
-    self.isSelectable = false
-    self.isBezeled = false
-    self.drawsBackground = true
-    self.backgroundColor = DashboardPalette.surfaceRaised
-    self.textColor = DashboardPalette.muted
-    self.font = .systemFont(ofSize: 8, weight: .medium)
-    self.alignment = .center
-    self.wantsLayer = true
-    self.layer?.cornerRadius = 6
-    let measured = (text as NSString).size(withAttributes: [.font: self.font as Any]).width
-    self.widthAnchor.constraint(equalToConstant: min(118, max(38, measured + 18))).isActive = true
-    self.heightAnchor.constraint(equalToConstant: 21).isActive = true
   }
 
   required init?(coder: NSCoder) { nil }
@@ -657,6 +680,15 @@ extension ProviderID {
     case .anthropic: "anthropic"
     case .grok: "grok"
     }
+  }
+}
+
+extension ProviderViewState {
+  fileprivate var needsConnection: Bool {
+    guard self.provider == .anthropic else { return false }
+    guard let error = self.error?.lowercased() else { return self.snapshot == nil }
+    return self.snapshot == nil
+      || ["auth", "credential", "keychain", "sign in"].contains { error.contains($0) }
   }
 }
 
