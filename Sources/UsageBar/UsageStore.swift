@@ -18,7 +18,6 @@ struct ProviderViewState: Identifiable {
 final class UsageStore {
   private(set) var states: [ProviderID: ProviderViewState]
   private(set) var isRefreshingAll = false
-  private(set) var lastRefreshCompletedAt: Date?
   var onChange: (() -> Void)?
 
   private let cache = SnapshotCache()
@@ -50,7 +49,9 @@ final class UsageStore {
   }
 
   var statusSymbol: String {
-    let values = self.states.values.compactMap { $0.snapshot?.highestUsedPercent }
+    let values = self.orderedStates
+      .filter { self.isEnabled($0.provider) }
+      .compactMap { $0.snapshot?.highestUsedPercent }
     guard let highest = values.max() else { return "gauge.with.dots.needle.0percent" }
     switch highest {
     case 90...: return "gauge.with.dots.needle.100percent"
@@ -80,11 +81,13 @@ final class UsageStore {
   func refreshAll(manual: Bool = true) {
     guard !self.isRefreshingAll else { return }
     if !manual, ProcessInfo.processInfo.isLowPowerModeEnabled { return }
+    self.isRefreshingAll = true
+    self.changed()
     Task { await self.performRefreshAll() }
   }
 
   func refresh(_ provider: ProviderID) {
-    guard self.states[provider]?.isRefreshing != true else { return }
+    guard self.beginRefresh(provider) else { return }
     Task { await self.performRefresh(provider) }
   }
 
@@ -135,21 +138,24 @@ final class UsageStore {
   }
 
   private func performRefreshAll() async {
-    self.isRefreshingAll = true
-    self.changed()
     defer {
       self.isRefreshingAll = false
-      self.lastRefreshCompletedAt = Date()
       self.changed()
     }
     for provider in ProviderID.allCases where self.isEnabled(provider) {
+      guard self.beginRefresh(provider) else { continue }
       await self.performRefresh(provider)
     }
   }
 
-  private func performRefresh(_ provider: ProviderID) async {
+  private func beginRefresh(_ provider: ProviderID) -> Bool {
+    guard self.states[provider]?.isRefreshing != true else { return false }
     self.states[provider]?.isRefreshing = true
     self.changed()
+    return true
+  }
+
+  private func performRefresh(_ provider: ProviderID) async {
     defer {
       self.states[provider]?.isRefreshing = false
       self.changed()
@@ -167,7 +173,7 @@ final class UsageStore {
       self.states[provider]?.error = nil
       await self.persistSnapshots()
     } catch {
-      self.states[provider]?.error = error.localizedDescription
+      self.states[provider]?.error = String(error.localizedDescription.prefix(500))
     }
   }
 

@@ -9,7 +9,6 @@ final class JSONRPCProcess: @unchecked Sendable {
   private let continuation: AsyncStream<Data>.Continuation
   private let writeLock = NSLock()
   private var nextID = 1
-  private var stderrTail = Data()
 
   init(executable: String, arguments: [String], environment: [String: String]) throws {
     var streamContinuation: AsyncStream<Data>.Continuation!
@@ -53,13 +52,12 @@ final class JSONRPCProcess: @unchecked Sendable {
       }
     }
 
-    self.errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
+    self.errors.fileHandleForReading.readabilityHandler = { handle in
       let data = handle.availableData
       if data.isEmpty {
         handle.readabilityHandler = nil
         return
       }
-      self?.appendStderr(data)
     }
   }
 
@@ -89,7 +87,7 @@ final class JSONRPCProcess: @unchecked Sendable {
               (error["message"] as? String)
               ?? (error["data"] as? String)
               ?? "unknown JSON-RPC error"
-            throw UsageProviderError.processFailed(text)
+            throw UsageProviderError.processFailed(String(text.prefix(512)))
           }
           return SendableJSON(value: message)
         }
@@ -129,8 +127,9 @@ final class JSONRPCProcess: @unchecked Sendable {
     try? self.input.fileHandleForWriting.close()
     if self.process.isRunning {
       self.process.terminate()
-      DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { [weak process] in
-        if process?.isRunning == true { kill(process!.processIdentifier, SIGKILL) }
+      let process = self.process
+      DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
       }
     }
     self.continuation.finish()
@@ -169,32 +168,13 @@ final class JSONRPCProcess: @unchecked Sendable {
       }
       return object
     }
-    let suffix = self.stderrDescription()
-    throw UsageProviderError.processFailed(
-      suffix.isEmpty
-        ? "Provider process closed unexpectedly." : "Provider process closed: \(suffix)")
+    throw UsageProviderError.processFailed("Provider process closed unexpectedly.")
   }
 
   private func integerID(_ value: Any?) -> Int? {
     if let value = value as? Int { return value }
     if let value = value as? NSNumber { return value.intValue }
     return nil
-  }
-
-  private func appendStderr(_ data: Data) {
-    self.writeLock.lock()
-    defer { self.writeLock.unlock() }
-    self.stderrTail.append(data)
-    if self.stderrTail.count > 4096 {
-      self.stderrTail = self.stderrTail.suffix(4096)
-    }
-  }
-
-  private func stderrDescription() -> String {
-    self.writeLock.lock()
-    defer { self.writeLock.unlock() }
-    return String(data: self.stderrTail, encoding: .utf8)?
-      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
   }
 }
 

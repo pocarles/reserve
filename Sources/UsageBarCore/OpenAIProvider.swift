@@ -31,13 +31,15 @@ public struct OpenAIProvider: UsageProvider {
     let response = try rpc.decodeResult(OpenAIRateLimitsResponse.self, from: limitMessage)
     let selected = response.rateLimitsByLimitId?["codex"] ?? response.rateLimits
 
-    var account: OpenAIAccountResponse?
-    if let message = try? await rpc.request(
-      method: "account/read",
-      params: ["refreshToken": false],
-      timeout: .seconds(3))
+    var planName = selected.planType
+    if planName?.isEmpty ?? true,
+      let message = try? await rpc.request(
+        method: "account/read",
+        params: ["refreshToken": false],
+        timeout: .seconds(3)),
+      let account = try? rpc.decodeResult(OpenAIAccountResponse.self, from: message)
     {
-      account = try? rpc.decodeResult(OpenAIAccountResponse.self, from: message)
+      planName = account.account?.planType
     }
 
     var windows: [UsageWindow] = []
@@ -56,8 +58,7 @@ public struct OpenAIProvider: UsageProvider {
 
     return UsageSnapshot(
       provider: .openAI,
-      planName: account?.account?.planType ?? selected.planType,
-      accountLabel: account?.account?.email,
+      planName: planName,
       windows: windows,
       source: "Codex app-server")
   }
@@ -163,8 +164,6 @@ struct OpenAIAccountResponse: Decodable, Sendable {
   let account: Account?
 
   struct Account: Decodable, Sendable {
-    let type: String?
-    let email: String?
     let planType: String?
   }
 }

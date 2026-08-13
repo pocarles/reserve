@@ -40,19 +40,34 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       titles.contains("Refresh All")
       && titles.contains("Settings…")
       && titles.contains("Quit Usage Bar")
-    guard providerViews == expectedProviders, actionsPresent else {
+    let resetView = UsageWindowView(
+      window: UsageWindow(
+        id: "self-test",
+        label: "Weekly",
+        usedPercent: 42,
+        resetsAt: Date().addingTimeInterval(3600)))
+    let resetDeadlinePresent = resetView.subviews.compactMap { $0 as? NSTextField }
+      .contains { $0.stringValue.hasPrefix("Resets ") }
+    guard providerViews == expectedProviders, actionsPresent, resetDeadlinePresent else {
       return (
         false,
-        "menu providers=\(providerViews)/\(expectedProviders), actions=\(actionsPresent)"
+        "menu providers=\(providerViews)/\(expectedProviders), actions=\(actionsPresent), resets=\(resetDeadlinePresent)"
       )
     }
-    return (true, "status menu has \(providerViews) provider cards and all actions")
+    return (
+      true,
+      "status menu has \(providerViews) provider cards, reset deadlines, and all actions"
+    )
   }
 
   private func updateStatusIcon() {
-    self.statusItem.button?.image = NSImage(
-      systemSymbolName: self.store.statusSymbol,
-      accessibilityDescription: "AI subscription usage")
+    let image =
+      NSImage(
+        systemSymbolName: self.store.statusSymbol,
+        accessibilityDescription: "AI subscription usage")
+      ?? NSImage(named: NSImage.statusAvailableName)
+    image?.isTemplate = true
+    self.statusItem.button?.image = image
   }
 
   private func rebuild(_ menu: NSMenu) {
@@ -101,7 +116,7 @@ private final class ProviderMenuView: NSView {
     let width: CGFloat = 318
     let windowCount = max(1, state.snapshot?.windows.count ?? 0)
     let errorHeight: CGFloat = state.error == nil ? 0 : 34
-    let height: CGFloat = 54 + CGFloat(windowCount * 38) + errorHeight
+    let height: CGFloat = 54 + CGFloat(windowCount * 52) + errorHeight
     super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
 
     let stack = NSStackView()
@@ -160,7 +175,7 @@ private final class ProviderMenuView: NSView {
 @MainActor
 private final class UsageWindowView: NSView {
   init(window: UsageWindow) {
-    super.init(frame: NSRect(x: 0, y: 0, width: 290, height: 31))
+    super.init(frame: NSRect(x: 0, y: 0, width: 290, height: 45))
     let label = NSTextField(labelWithString: window.label)
     label.font = .systemFont(ofSize: 10)
     label.textColor = .secondaryLabelColor
@@ -179,9 +194,18 @@ private final class UsageWindowView: NSView {
     bar.isIndeterminate = false
     bar.translatesAutoresizingMaskIntoConstraints = false
 
+    let reset = NSTextField(
+      labelWithString: window.resetsAt.map {
+        "Resets \($0.formatted(date: .abbreviated, time: .shortened))"
+      } ?? "Reset time unavailable")
+    reset.font = .systemFont(ofSize: 9)
+    reset.textColor = .tertiaryLabelColor
+    reset.translatesAutoresizingMaskIntoConstraints = false
+
     self.addSubview(label)
     self.addSubview(value)
     self.addSubview(bar)
+    self.addSubview(reset)
     NSLayoutConstraint.activate([
       label.leadingAnchor.constraint(equalTo: self.leadingAnchor),
       label.topAnchor.constraint(equalTo: self.topAnchor),
@@ -191,8 +215,10 @@ private final class UsageWindowView: NSView {
       bar.trailingAnchor.constraint(equalTo: self.trailingAnchor),
       bar.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 4),
       bar.heightAnchor.constraint(equalToConstant: 5),
+      reset.leadingAnchor.constraint(equalTo: self.leadingAnchor),
+      reset.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 3),
       self.widthAnchor.constraint(equalToConstant: 290),
-      self.heightAnchor.constraint(equalToConstant: 31),
+      self.heightAnchor.constraint(equalToConstant: 45),
     ])
   }
 

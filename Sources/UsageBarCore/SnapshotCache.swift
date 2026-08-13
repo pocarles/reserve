@@ -22,10 +22,26 @@ public actor SnapshotCache {
   }
 
   public func load() -> [ProviderID: UsageSnapshot] {
-    guard let data = try? Data(contentsOf: self.fileURL), data.count <= self.maximumBytes,
+    let directory = self.fileURL.deletingLastPathComponent()
+    try? FileManager.default.setAttributes(
+      [.posixPermissions: NSNumber(value: Int16(0o700))],
+      ofItemAtPath: directory.path)
+    try? FileManager.default.setAttributes(
+      [.posixPermissions: NSNumber(value: Int16(0o600))],
+      ofItemAtPath: self.fileURL.path)
+    guard let data = BoundedFileReader.read(self.fileURL, maximumBytes: self.maximumBytes),
       let snapshots = try? self.decoder.decode([UsageSnapshot].self, from: data)
     else { return [:] }
-    return Dictionary(uniqueKeysWithValues: snapshots.map { ($0.provider, $0) })
+    var newestByProvider: [ProviderID: UsageSnapshot] = [:]
+    for snapshot in snapshots {
+      if let existing = newestByProvider[snapshot.provider],
+        existing.fetchedAt >= snapshot.fetchedAt
+      {
+        continue
+      }
+      newestByProvider[snapshot.provider] = snapshot
+    }
+    return newestByProvider
   }
 
   public func save(_ snapshots: [ProviderID: UsageSnapshot]) throws {
@@ -36,6 +52,9 @@ public actor SnapshotCache {
     }
     let directory = self.fileURL.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: NSNumber(value: Int16(0o700))],
+      ofItemAtPath: directory.path)
     try data.write(to: self.fileURL, options: [.atomic])
     try FileManager.default.setAttributes(
       [.posixPermissions: NSNumber(value: Int16(0o600))],

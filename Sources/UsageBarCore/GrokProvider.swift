@@ -7,10 +7,10 @@ public struct GrokProvider: UsageProvider {
 
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
-    session: URLSession = .shared
+    session: URLSession? = nil
   ) {
     self.environment = environment
-    self.session = session
+    self.session = session ?? ProviderHTTPSession.shared
   }
 
   public func fetch() async throws -> UsageSnapshot {
@@ -31,7 +31,7 @@ public struct GrokProvider: UsageProvider {
 
     let rpc = try JSONRPCProcess(
       executable: executable,
-      arguments: ["agent", "stdio"],
+      arguments: ["agent", "--no-leader", "stdio"],
       environment: self.environment)
     defer { rpc.shutdown() }
 
@@ -88,7 +88,6 @@ public struct GrokProvider: UsageProvider {
     return UsageSnapshot(
       provider: .grok,
       planName: response.subscriptionTier,
-      accountLabel: nil,
       windows: [
         UsageWindow(
           id: "usage-pool",
@@ -107,6 +106,8 @@ public struct GrokProvider: UsageProvider {
     }
     var request = URLRequest(url: url)
     request.timeoutInterval = 15
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    request.httpShouldHandleCookies = false
     request.setValue("Bearer \(credentials.key)", forHTTPHeaderField: "Authorization")
     request.setValue("xai-grok-cli", forHTTPHeaderField: "X-XAI-Token-Auth")
     request.setValue(credentials.userID, forHTTPHeaderField: "x-userid")
@@ -136,6 +137,9 @@ public struct GrokProvider: UsageProvider {
     default:
       throw UsageProviderError.unavailable("Grok billing request returned HTTP \(http.statusCode).")
     }
+    guard data.count <= 1_048_576 else {
+      throw UsageProviderError.invalidResponse("Grok response exceeded 1 MB")
+    }
     do {
       return try JSONDecoder().decode(GrokBillingEnvelope.self, from: data)
     } catch {
@@ -152,12 +156,12 @@ public struct GrokProvider: UsageProvider {
   }
 }
 
-private struct GrokCredentials: Sendable {
+struct GrokCredentials: Sendable {
   let key: String
   let userID: String
 }
 
-private enum GrokCredentialLoader {
+enum GrokCredentialLoader {
   static func load(environment: [String: String]) throws -> GrokCredentials {
     let root: URL
     if let configured = environment["GROK_HOME"], !configured.isEmpty {
@@ -166,31 +170,35 @@ private enum GrokCredentialLoader {
       root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok")
     }
     let url = root.appendingPathComponent("auth.json")
-    guard let data = try? Data(contentsOf: url),
+    guard let data = BoundedFileReader.read(url, maximumBytes: 1_048_576),
       let entries = try? JSONDecoder().decode([String: GrokCredentialEntry].self, from: data)
     else {
       throw UsageProviderError.credentialsNotFound(
         "Grok credentials were not found. Run `grok login` first.")
     }
-    let ordered = entries.sorted { lhs, rhs in
-      lhs.key.hasPrefix("https://auth.x.ai::") && !rhs.key.hasPrefix("https://auth.x.ai::")
-    }
-    let selected = ordered.map(\.value).first { entry in
-      guard let expiresAt = UsageDateParser.iso8601(entry.expiresAt) else { return true }
-      return expiresAt > Date()
-    }
-    guard let selected,
-      let key = selected.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
-      let userID = selected.userID?.trimmingCharacters(in: .whitespacesAndNewlines), !userID.isEmpty
-    else {
+    guard let credentials = self.select(entries: entries, now: Date()) else {
       throw UsageProviderError.unauthorized(
         "Grok authentication expired. Run `grok login` and refresh.")
     }
-    return GrokCredentials(key: key, userID: userID)
+    return credentials
+  }
+
+  static func select(entries: [String: GrokCredentialEntry], now: Date) -> GrokCredentials? {
+    let ordered = entries.sorted { lhs, rhs in
+      lhs.key.hasPrefix("https://auth.x.ai::") && !rhs.key.hasPrefix("https://auth.x.ai::")
+    }
+    for entry in ordered.map(\.value) {
+      if let expiresAt = UsageDateParser.iso8601(entry.expiresAt), expiresAt <= now { continue }
+      guard let key = entry.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
+        let userID = entry.userID?.trimmingCharacters(in: .whitespacesAndNewlines), !userID.isEmpty
+      else { continue }
+      return GrokCredentials(key: key, userID: userID)
+    }
+    return nil
   }
 }
 
-private struct GrokCredentialEntry: Decodable {
+struct GrokCredentialEntry: Decodable {
   let key: String?
   let userID: String?
   let expiresAt: String?
@@ -304,13 +312,6 @@ struct GrokUsagePeriod: Decodable, Sendable {
 
 struct GrokCent: Decodable, Sendable {
   let val: Int
-
-  init(from decoder: Decoder) throws {
-    let container = try decoder.container(keyedBy: CodingKeys.self)
-    self.val = try container.decodeIfPresent(Int.self, forKey: .val) ?? 0
-  }
-
-  enum CodingKeys: String, CodingKey { case val }
 }
 
 struct GrokLegacyUsage: Decodable, Sendable {

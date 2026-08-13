@@ -28,8 +28,8 @@ for the duration of a bounded refresh.
 - Grok Build 1.0.0 or newer, authenticated using `grok login`
 
 Anthropic's subscription usage endpoint is not a documented public API and may
-rate limit callers. Usage Bar waits at least 15 minutes after a 429 and retains the
-last successful snapshot.
+rate limit callers. Usage Bar persists a backoff of at least 15 minutes after a
+429 and retains the last successful snapshot.
 
 ## Build and run
 
@@ -39,7 +39,8 @@ make run
 ```
 
 `make run` creates an ad-hoc signed `UsageBar.app` in the repository and opens it.
-The generated app is ignored by Git.
+The generated app is ignored by Git and includes the project license and
+third-party notices in its Resources directory.
 
 To test a provider without the menu UI:
 
@@ -50,6 +51,7 @@ swift run usagebar-probe grok
 ```
 
 The probe prints snapshots and errors only. It never prints credential material.
+The Anthropic probe honors the same explicit Keychain-consent setting as the app.
 
 `make check` also runs a native AppKit UI self-test. It constructs the real status
 menu and settings window, then verifies all provider cards, actions, checkboxes,
@@ -64,14 +66,15 @@ The cache lives at:
 ```
 
 It is capped at 100 KB and contains only usage percentages, reset dates, provider
-and plan labels, the OpenAI account label, fetch time, and source name. OAuth
-tokens, cookies, authorization headers, raw provider responses, and subprocess
-logs are never cached.
+and plan labels, fetch time, and source name. OAuth tokens, account identifiers,
+cookies, authorization headers, raw provider responses, and subprocess logs are
+never cached.
 
 Claude Code may store its OAuth credential in macOS Keychain rather than
 `~/.claude/.credentials.json`. Reading that foreign Keychain item is disabled by
-default and requires explicit consent in Usage Bar settings. Background reads use
-the no-UI Keychain policy and will not present an authentication prompt.
+default and requires explicit consent in Usage Bar settings. Consented reads use
+Apple's `/usr/bin/security` helper with direct arguments and a five-second hard
+timeout; credential JSON remains in memory only and is never logged or cached.
 
 ## Resource contract
 

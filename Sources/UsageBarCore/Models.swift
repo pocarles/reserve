@@ -15,13 +15,6 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
     }
   }
 
-  public var symbolName: String {
-    switch self {
-    case .openAI: "circle.hexagongrid"
-    case .anthropic: "brain.head.profile"
-    case .grok: "xmark"
-    }
-  }
 }
 
 public struct UsageWindow: Codable, Equatable, Sendable, Identifiable {
@@ -50,7 +43,6 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public var id: ProviderID { self.provider }
   public let provider: ProviderID
   public let planName: String?
-  public let accountLabel: String?
   public let windows: [UsageWindow]
   public let fetchedAt: Date
   public let source: String
@@ -58,14 +50,12 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public init(
     provider: ProviderID,
     planName: String? = nil,
-    accountLabel: String? = nil,
     windows: [UsageWindow],
     fetchedAt: Date = Date(),
     source: String
   ) {
     self.provider = provider
     self.planName = planName
-    self.accountLabel = accountLabel
     self.windows = windows
     self.fetchedAt = fetchedAt
     self.source = source

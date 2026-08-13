@@ -14,15 +14,18 @@ public struct AnthropicProvider: UsageProvider {
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     allowKeychainRead: Bool = false,
-    session: URLSession = .shared
+    session: URLSession? = nil
   ) {
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
-    self.session = session
+    self.session = session ?? ProviderHTTPSession.shared
   }
 
   public func fetch() async throws -> UsageSnapshot {
-    let credentials = try ClaudeCredentialLoader.load(
+    if let retryAt = await ClaudeRateLimitGate.shared.activeBlock(), retryAt > Date() {
+      throw UsageProviderError.rateLimited(retryAt: retryAt)
+    }
+    let credentials = try await ClaudeCredentialLoader.load(
       environment: self.environment,
       allowKeychainRead: self.allowKeychainRead)
     let response: ClaudeUsageResponse
@@ -39,17 +42,19 @@ public struct AnthropicProvider: UsageProvider {
     }
 
     var windows: [UsageWindow] = []
-    if let fiveHour = response.fiveHour {
-      windows.append(fiveHour.window(id: "five-hour", label: "5 hours"))
+    if let fiveHour = response.fiveHour?.window(id: "five-hour", label: "5 hours") {
+      windows.append(fiveHour)
     }
-    if let sevenDay = response.sevenDay {
-      windows.append(sevenDay.window(id: "weekly", label: "Weekly"))
+    if let sevenDay = response.sevenDay?.window(id: "weekly", label: "Weekly") {
+      windows.append(sevenDay)
     }
-    if let sonnet = response.sevenDaySonnet {
-      windows.append(sonnet.window(id: "sonnet-weekly", label: "Sonnet weekly"))
+    if let sonnet = response.sevenDaySonnet?.window(
+      id: "sonnet-weekly", label: "Sonnet weekly")
+    {
+      windows.append(sonnet)
     }
-    if let opus = response.sevenDayOpus {
-      windows.append(opus.window(id: "opus-weekly", label: "Opus weekly"))
+    if let opus = response.sevenDayOpus?.window(id: "opus-weekly", label: "Opus weekly") {
+      windows.append(opus)
     }
     if let limits = response.limits {
       for (index, limit) in limits.enumerated() where limit.isActive != false {
@@ -74,22 +79,20 @@ public struct AnthropicProvider: UsageProvider {
     }
     return UsageSnapshot(
       provider: .anthropic,
-      planName: credentials.subscriptionType
+      planName: ClaudePlanFormatter.plan(from: credentials.subscriptionType)
         ?? ClaudePlanFormatter.plan(from: credentials.rateLimitTier),
-      accountLabel: nil,
       windows: windows,
       source: credentials.source)
   }
 
   private func fetchUsage(accessToken: String) async throws -> ClaudeUsageResponse {
-    if let retryAt = await ClaudeRateLimitGate.shared.blockedUntil, retryAt > Date() {
-      throw UsageProviderError.rateLimited(retryAt: retryAt)
-    }
     guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
       throw UsageProviderError.invalidResponse("invalid Anthropic endpoint")
     }
     var request = URLRequest(url: url)
     request.timeoutInterval = 15
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    request.httpShouldHandleCookies = false
     request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
     request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -115,12 +118,16 @@ public struct AnthropicProvider: UsageProvider {
       throw UsageProviderError.unauthorized(
         "Claude authentication expired. Run `claude login` and refresh.")
     case 429:
-      let retryAt = Self.retryDate(from: http) ?? Date().addingTimeInterval(15 * 60)
+      let retryAt = Self.conservativeRetryDate(
+        retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
       await ClaudeRateLimitGate.shared.block(until: retryAt)
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     default:
       throw UsageProviderError.unavailable(
         "Anthropic usage request returned HTTP \(http.statusCode).")
+    }
+    guard data.count <= 1_048_576 else {
+      throw UsageProviderError.invalidResponse("Anthropic response exceeded 1 MB")
     }
     do {
       return try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
@@ -129,23 +136,41 @@ public struct AnthropicProvider: UsageProvider {
     }
   }
 
-  private static func retryDate(from response: HTTPURLResponse) -> Date? {
-    guard let value = response.value(forHTTPHeaderField: "Retry-After") else { return nil }
-    if let seconds = TimeInterval(value) { return Date().addingTimeInterval(max(0, seconds)) }
+  static func conservativeRetryDate(retryAfter value: String?, now: Date = Date()) -> Date {
+    let minimum = now.addingTimeInterval(15 * 60)
+    guard let value else { return minimum }
+    if let seconds = TimeInterval(value) {
+      return max(minimum, now.addingTimeInterval(max(0, seconds)))
+    }
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.timeZone = TimeZone(secondsFromGMT: 0)
     formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
-    return formatter.date(from: value)
+    guard let providerDate = formatter.date(from: value) else { return minimum }
+    return max(minimum, providerDate)
   }
 }
 
 actor ClaudeRateLimitGate {
   static let shared = ClaudeRateLimitGate()
-  private(set) var blockedUntil: Date?
+  private let defaults: UserDefaults
+  private let key = "anthropic.rateLimitBlockedUntil"
 
-  func block(until date: Date) { self.blockedUntil = date }
-  func clear() { self.blockedUntil = nil }
+  init(defaults: UserDefaults = UserDefaults(suiteName: "com.pocarles.usagebar") ?? .standard) {
+    self.defaults = defaults
+  }
+
+  func activeBlock(now: Date = Date()) -> Date? {
+    guard let date = self.defaults.object(forKey: self.key) as? Date else { return nil }
+    guard date > now else {
+      self.defaults.removeObject(forKey: self.key)
+      return nil
+    }
+    return date
+  }
+
+  func block(until date: Date) { self.defaults.set(date, forKey: self.key) }
+  func clear() { self.defaults.removeObject(forKey: self.key) }
 }
 
 struct ClaudeCredentials: Sendable {
@@ -156,20 +181,19 @@ struct ClaudeCredentials: Sendable {
 }
 
 enum ClaudeCredentialLoader {
-  static func load(environment: [String: String], allowKeychainRead: Bool) throws
+  static func load(environment: [String: String], allowKeychainRead: Bool) async throws
     -> ClaudeCredentials
   {
     #if canImport(Security)
       if allowKeychainRead,
-        let data = try self.keychainDataWithoutPrompt(),
-        let credentials = try? self.decode(data: data, source: "Claude Keychain")
+        let credentials = try await self.keychainCredentialsWithoutPrompt()
       {
         return credentials
       }
     #endif
 
     for url in self.credentialURLs(environment: environment) {
-      if let data = try? Data(contentsOf: url),
+      if let data = BoundedFileReader.read(url, maximumBytes: 1_048_576),
         let credentials = try? self.decode(data: data, source: "Claude OAuth file")
       {
         return credentials
@@ -177,8 +201,10 @@ enum ClaudeCredentialLoader {
     }
 
     #if canImport(Security)
-      if !allowKeychainRead && self.keychainItemExistsWithoutPrompt() {
-        throw UsageProviderError.keychainConsentRequired
+      if self.keychainItemExistsWithoutPrompt() {
+        if !allowKeychainRead { throw UsageProviderError.keychainConsentRequired }
+        throw UsageProviderError.credentialsNotFound(
+          "Claude Keychain credentials are unusable. Run `claude login` and refresh.")
       }
     #endif
     throw UsageProviderError.credentialsNotFound(
@@ -226,24 +252,27 @@ enum ClaudeCredentialLoader {
       return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
     }
 
-    private static func keychainDataWithoutPrompt() throws -> Data? {
-      let context = LAContext()
-      context.interactionNotAllowed = true
-      let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "Claude Code-credentials",
-        kSecMatchLimit as String: kSecMatchLimitOne,
-        kSecReturnData as String: true,
-        kSecUseAuthenticationContext as String: context,
-      ]
-      var result: CFTypeRef?
-      let status = SecItemCopyMatching(query as CFDictionary, &result)
-      switch status {
-      case errSecSuccess: return result as? Data
-      case errSecItemNotFound, errSecInteractionNotAllowed: return nil
-      default:
-        throw UsageProviderError.unavailable("Claude Keychain read failed with status \(status).")
+    private static func keychainCredentialsWithoutPrompt() async throws -> ClaudeCredentials? {
+      let output: String
+      do {
+        output = try await ProcessRunner.output(
+          executable: "/usr/bin/security",
+          arguments: [
+            "find-generic-password",
+            "-w",
+            "-s",
+            "Claude Code-credentials",
+          ],
+          environment: ProcessInfo.processInfo.environment,
+          timeout: .seconds(5))
+      } catch let error as UsageProviderError {
+        if case .timedOut = error {
+          throw UsageProviderError.timedOut("Claude Keychain read")
+        }
+        return nil
       }
+      guard let data = output.data(using: .utf8), data.count <= 1_048_576 else { return nil }
+      return try? self.decode(data: data, source: "Claude Keychain")
     }
   #endif
 }
@@ -296,11 +325,12 @@ struct ClaudeUsageWindow: Decodable, Sendable {
     case resetsAt = "resets_at"
   }
 
-  func window(id: String, label: String) -> UsageWindow {
-    UsageWindow(
+  func window(id: String, label: String) -> UsageWindow? {
+    guard let utilization else { return nil }
+    return UsageWindow(
       id: id,
       label: label,
-      usedPercent: self.utilization ?? 0,
+      usedPercent: utilization,
       windowMinutes: id == "five-hour" ? 300 : 10080,
       resetsAt: UsageDateParser.iso8601(self.resetsAt))
   }

@@ -5,6 +5,9 @@ import UsageBarCore
 @main
 struct UsageBarProbe {
   static func main() async {
+    let appDefaults = UserDefaults(suiteName: "com.pocarles.usagebar")
+    let allowClaudeKeychainRead =
+      appDefaults?.bool(forKey: "anthropic.keychainReadAllowed") ?? false
     let argument = CommandLine.arguments.dropFirst().first
     let selected: [ProviderID]
     switch argument?.lowercased() {
@@ -24,7 +27,7 @@ struct UsageBarProbe {
       let fetcher: any UsageProvider =
         switch provider {
         case .openAI: OpenAIProvider()
-        case .anthropic: AnthropicProvider()
+        case .anthropic: AnthropicProvider(allowKeychainRead: allowClaudeKeychainRead)
         case .grok: GrokProvider()
         }
       do {

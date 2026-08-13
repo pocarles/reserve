@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum ProcessRunner {
@@ -17,38 +18,61 @@ enum ProcessRunner {
     process.standardError = stderr
     try process.run()
 
-    return try await withThrowingTaskGroup(of: ProcessOutput.self) { group in
+    let stdoutTask = Task.detached {
+      Self.capture(stdout.fileHandleForReading, maximumBytes: 65_536)
+    }
+    let stderrTask = Task.detached {
+      Self.capture(stderr.fileHandleForReading, maximumBytes: 0)
+    }
+
+    let status = try await withThrowingTaskGroup(of: Int32.self) { group in
       group.addTask {
         process.waitUntilExit()
-        let out = stdout.fileHandleForReading.readDataToEndOfFile()
-        let err = stderr.fileHandleForReading.readDataToEndOfFile()
-        return ProcessOutput(status: process.terminationStatus, stdout: out, stderr: err)
+        return process.terminationStatus
       }
       group.addTask {
         try await Task.sleep(for: timeout)
         if process.isRunning { process.terminate() }
+        try? await Task.sleep(for: .milliseconds(250))
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
         throw UsageProviderError.timedOut(URL(fileURLWithPath: executable).lastPathComponent)
       }
       guard let first = try await group.next() else {
         throw UsageProviderError.timedOut(URL(fileURLWithPath: executable).lastPathComponent)
       }
       group.cancelAll()
-      guard first.status == 0 else {
-        let message = String(data: first.stderr, encoding: .utf8) ?? "exit \(first.status)"
-        throw UsageProviderError.processFailed(
-          message.trimmingCharacters(in: .whitespacesAndNewlines))
-      }
-      guard first.stdout.count <= 65_536 else {
-        throw UsageProviderError.invalidResponse("process output exceeded 64 KB")
-      }
-      return String(data: first.stdout, encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      return first
     }
+    let capturedStdout = await stdoutTask.value
+    _ = await stderrTask.value
+    guard status == 0 else {
+      throw UsageProviderError.processFailed(
+        "\(URL(fileURLWithPath: executable).lastPathComponent) exited with status \(status)."
+      )
+    }
+    guard !capturedStdout.exceeded else {
+      throw UsageProviderError.invalidResponse("process output exceeded 64 KB")
+    }
+    return String(data: capturedStdout.data, encoding: .utf8)?
+      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  }
+
+  private static func capture(_ handle: FileHandle, maximumBytes: Int) -> CapturedOutput {
+    var data = Data()
+    var exceeded = false
+    while true {
+      guard let chunk = try? handle.read(upToCount: 8192), !chunk.isEmpty else { break }
+      if data.count + chunk.count <= maximumBytes {
+        data.append(chunk)
+      } else {
+        exceeded = true
+      }
+    }
+    return CapturedOutput(data: data, exceeded: exceeded)
   }
 }
 
-private struct ProcessOutput: @unchecked Sendable {
-  let status: Int32
-  let stdout: Data
-  let stderr: Data
+private struct CapturedOutput: Sendable {
+  let data: Data
+  let exceeded: Bool
 }
