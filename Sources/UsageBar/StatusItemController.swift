@@ -2,62 +2,109 @@ import AppKit
 import UsageBarCore
 
 @MainActor
-final class StatusItemController: NSObject, NSMenuDelegate {
+final class StatusItemController: NSObject, NSPopoverDelegate {
   private let store: UsageStore
   private let openSettings: () -> Void
   private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+  private let popover = NSPopover()
+  private lazy var dashboardController = DashboardViewController(
+    store: self.store,
+    actions: DashboardActions(
+      refreshAll: { [weak self] in self?.store.refreshAll() },
+      refreshProvider: { [weak self] provider in self?.store.refresh(provider) },
+      openSettings: { [weak self] in self?.showSettings() },
+      quit: { NSApplication.shared.terminate(nil) }))
 
   init(store: UsageStore, openSettings: @escaping () -> Void) {
     self.store = store
     self.openSettings = openSettings
     super.init()
     self.statusItem.button?.toolTip = "Usage Bar"
-    let menu = NSMenu()
-    menu.delegate = self
-    self.statusItem.menu = menu
-    self.store.onChange = { [weak self] in self?.updateStatusIcon() }
+    self.statusItem.button?.target = self
+    self.statusItem.button?.action = #selector(self.toggleDashboard)
+    self.statusItem.button?.sendAction(on: [.leftMouseUp])
+    self.popover.behavior = .transient
+    self.popover.animates = true
+    self.popover.delegate = self
+    self.popover.contentViewController = self.dashboardController
+    self.store.onChange = { [weak self] in
+      self?.updateStatusIcon()
+      self?.dashboardController.update()
+    }
     self.updateStatusIcon()
   }
 
-  func menuWillOpen(_ menu: NSMenu) {
-    self.rebuild(menu)
-  }
-
   func showMenu() {
-    self.statusItem.button?.performClick(nil)
+    self.showDashboard()
   }
 
   func validateForSelfTest() -> (success: Bool, details: String) {
     guard self.statusItem.button?.image != nil else {
       return (false, "status item has no image")
     }
-    let menu = NSMenu()
-    self.rebuild(menu)
-    let providerViews = menu.items.filter { $0.view is ProviderMenuView }.count
-    let titles = Set(menu.items.map(\.title))
-    let expectedProviders = ProviderID.allCases.count
+    self.dashboardController.loadViewIfNeeded()
+    self.dashboardController.view.layoutSubtreeIfNeeded()
+    let descendants = Self.descendants(of: self.dashboardController.view)
+    let identifiers = Set(descendants.compactMap { $0.identifier?.rawValue })
+    let providerCards = ProviderID.allCases.filter {
+      identifiers.contains("provider-card-\($0.rawValue)")
+    }.count
     let actionsPresent =
-      titles.contains("Refresh All")
-      && titles.contains("Settings…")
-      && titles.contains("Quit Usage Bar")
-    let resetView = UsageWindowView(
-      window: UsageWindow(
-        id: "self-test",
-        label: "Weekly",
-        usedPercent: 42,
-        resetsAt: Date().addingTimeInterval(3600)))
-    let resetDeadlinePresent = resetView.subviews.compactMap { $0 as? NSTextField }
-      .contains { $0.stringValue.hasPrefix("Resets ") }
-    guard providerViews == expectedProviders, actionsPresent, resetDeadlinePresent else {
+      identifiers.contains("refresh-all")
+      && identifiers.contains("open-settings")
+      && identifiers.contains("quit-app")
+    let dashboardFits =
+      self.dashboardController.preferredContentSize.width == 444
+      && self.dashboardController.preferredContentSize.height == 700
+    guard providerCards == ProviderID.allCases.count, actionsPresent, dashboardFits else {
       return (
         false,
-        "menu providers=\(providerViews)/\(expectedProviders), actions=\(actionsPresent), resets=\(resetDeadlinePresent)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), size=\(dashboardFits)"
       )
     }
     return (
       true,
-      "status menu has \(providerViews) provider cards, reset deadlines, and all actions"
+      "dashboard has \(providerCards) provider cards, summary indicators, and all actions"
     )
+  }
+
+  func renderDashboard(to url: URL, scrollOffset: CGFloat = 0) throws {
+    self.dashboardController.loadViewIfNeeded()
+    let view = self.dashboardController.view
+    view.frame = NSRect(origin: .zero, size: self.dashboardController.preferredContentSize)
+    view.layoutSubtreeIfNeeded()
+    if let scroll = Self.descendants(of: view).compactMap({ $0 as? NSScrollView }).first {
+      scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, scrollOffset)))
+      scroll.reflectScrolledClipView(scroll.contentView)
+      view.layoutSubtreeIfNeeded()
+    }
+    guard let representation = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+      throw DashboardRenderError.bitmapUnavailable
+    }
+    view.cacheDisplay(in: view.bounds, to: representation)
+    guard let data = representation.representation(using: .png, properties: [:]) else {
+      throw DashboardRenderError.pngUnavailable
+    }
+    try data.write(to: url, options: .atomic)
+  }
+
+  @objc private func toggleDashboard() {
+    if self.popover.isShown {
+      self.popover.performClose(nil)
+    } else {
+      self.showDashboard()
+    }
+  }
+
+  private func showDashboard() {
+    guard let button = self.statusItem.button else { return }
+    self.dashboardController.update()
+    self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    self.dashboardController.startClock()
+  }
+
+  func popoverDidClose(_ notification: Notification) {
+    self.dashboardController.stopClock()
   }
 
   private func updateStatusIcon() {
@@ -70,157 +117,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     self.statusItem.button?.image = image
   }
 
-  private func rebuild(_ menu: NSMenu) {
-    menu.removeAllItems()
-    let title = NSMenuItem(title: "Usage Bar", action: nil, keyEquivalent: "")
-    title.isEnabled = false
-    title.attributedTitle = NSAttributedString(
-      string: "Usage Bar",
-      attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
-    menu.addItem(title)
-    menu.addItem(.separator())
-
-    for state in self.store.orderedStates where self.store.isEnabled(state.provider) {
-      let item = NSMenuItem()
-      item.view = ProviderMenuView(state: state)
-      menu.addItem(item)
-    }
-
-    menu.addItem(.separator())
-    let refresh = NSMenuItem(
-      title: self.store.isRefreshingAll ? "Refreshing…" : "Refresh All",
-      action: #selector(self.refreshAll),
-      keyEquivalent: "r")
-    refresh.target = self
-    refresh.isEnabled = !self.store.isRefreshingAll
-    menu.addItem(refresh)
-
-    let settings = NSMenuItem(
-      title: "Settings…", action: #selector(self.showSettings), keyEquivalent: ",")
-    settings.target = self
-    menu.addItem(settings)
-
-    let quit = NSMenuItem(title: "Quit Usage Bar", action: #selector(self.quit), keyEquivalent: "q")
-    quit.target = self
-    menu.addItem(quit)
+  private func showSettings() {
+    self.popover.performClose(nil)
+    self.openSettings()
   }
 
-  @objc private func refreshAll() { self.store.refreshAll() }
-  @objc private func showSettings() { self.openSettings() }
-  @objc private func quit() { NSApplication.shared.terminate(nil) }
-}
-
-@MainActor
-private final class ProviderMenuView: NSView {
-  init(state: ProviderViewState) {
-    let width: CGFloat = 318
-    let windowCount = max(1, state.snapshot?.windows.count ?? 0)
-    let errorHeight: CGFloat = state.error == nil ? 0 : 34
-    let height: CGFloat = 54 + CGFloat(windowCount * 52) + errorHeight
-    super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
-
-    let stack = NSStackView()
-    stack.orientation = .vertical
-    stack.alignment = .leading
-    stack.spacing = 7
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(stack)
-    NSLayoutConstraint.activate([
-      stack.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 14),
-      stack.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -14),
-      stack.topAnchor.constraint(equalTo: self.topAnchor, constant: 9),
-      stack.bottomAnchor.constraint(lessThanOrEqualTo: self.bottomAnchor, constant: -9),
-    ])
-
-    let header = NSTextField(labelWithString: self.headerText(state))
-    header.font = .systemFont(ofSize: 12, weight: .semibold)
-    if state.isStale { header.textColor = .systemOrange }
-    stack.addArrangedSubview(header)
-
-    if let snapshot = state.snapshot {
-      for window in snapshot.windows {
-        stack.addArrangedSubview(UsageWindowView(window: window))
-      }
-      let source = NSTextField(labelWithString: snapshot.source)
-      source.font = .systemFont(ofSize: 9)
-      source.textColor = .tertiaryLabelColor
-      stack.addArrangedSubview(source)
-    } else if state.isRefreshing {
-      let label = NSTextField(labelWithString: "Checking usage…")
-      label.textColor = .secondaryLabelColor
-      label.font = .systemFont(ofSize: 11)
-      stack.addArrangedSubview(label)
-    }
-
-    if let error = state.error {
-      let label = NSTextField(wrappingLabelWithString: error)
-      label.font = .systemFont(ofSize: 10)
-      label.textColor = state.snapshot == nil ? .systemRed : .secondaryLabelColor
-      label.maximumNumberOfLines = 2
-      stack.addArrangedSubview(label)
-      label.widthAnchor.constraint(equalToConstant: width - 28).isActive = true
-    }
-  }
-
-  required init?(coder: NSCoder) { nil }
-
-  private func headerText(_ state: ProviderViewState) -> String {
-    var parts = [state.provider.displayName]
-    if let plan = state.snapshot?.planName, !plan.isEmpty { parts.append(plan) }
-    if state.isRefreshing { parts.append("· refreshing") }
-    return parts.joined(separator: "  ")
+  private static func descendants(of view: NSView) -> [NSView] {
+    view.subviews + view.subviews.flatMap { self.descendants(of: $0) }
   }
 }
 
-@MainActor
-private final class UsageWindowView: NSView {
-  init(window: UsageWindow) {
-    super.init(frame: NSRect(x: 0, y: 0, width: 290, height: 45))
-    let label = NSTextField(labelWithString: window.label)
-    label.font = .systemFont(ofSize: 10)
-    label.textColor = .secondaryLabelColor
-    label.translatesAutoresizingMaskIntoConstraints = false
-
-    let value = NSTextField(labelWithString: String(format: "%.0f%%", window.usedPercent))
-    value.font = .monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
-    value.alignment = .right
-    value.translatesAutoresizingMaskIntoConstraints = false
-
-    let bar = NSProgressIndicator()
-    bar.style = .bar
-    bar.minValue = 0
-    bar.maxValue = 100
-    bar.doubleValue = window.usedPercent
-    bar.isIndeterminate = false
-    bar.translatesAutoresizingMaskIntoConstraints = false
-
-    let reset = NSTextField(
-      labelWithString: window.resetsAt.map {
-        "Resets \($0.formatted(date: .abbreviated, time: .shortened))"
-      } ?? "Reset time unavailable")
-    reset.font = .systemFont(ofSize: 9)
-    reset.textColor = .tertiaryLabelColor
-    reset.translatesAutoresizingMaskIntoConstraints = false
-
-    self.addSubview(label)
-    self.addSubview(value)
-    self.addSubview(bar)
-    self.addSubview(reset)
-    NSLayoutConstraint.activate([
-      label.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      label.topAnchor.constraint(equalTo: self.topAnchor),
-      value.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      value.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
-      bar.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      bar.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      bar.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 4),
-      bar.heightAnchor.constraint(equalToConstant: 5),
-      reset.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      reset.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 3),
-      self.widthAnchor.constraint(equalToConstant: 290),
-      self.heightAnchor.constraint(equalToConstant: 45),
-    ])
-  }
-
-  required init?(coder: NSCoder) { nil }
+private enum DashboardRenderError: Error {
+  case bitmapUnavailable
+  case pngUnavailable
 }

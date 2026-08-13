@@ -46,23 +46,45 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public let windows: [UsageWindow]
   public let fetchedAt: Date
   public let source: String
+  public let includedSpend: IncludedSpend?
 
   public init(
     provider: ProviderID,
     planName: String? = nil,
     windows: [UsageWindow],
     fetchedAt: Date = Date(),
-    source: String
+    source: String,
+    includedSpend: IncludedSpend? = nil
   ) {
     self.provider = provider
     self.planName = planName
     self.windows = windows
     self.fetchedAt = fetchedAt
     self.source = source
+    self.includedSpend = includedSpend
   }
 
   public var highestUsedPercent: Double? {
     self.windows.map(\.usedPercent).max()
+  }
+}
+
+public struct IncludedSpend: Codable, Equatable, Sendable {
+  public let label: String
+  public let usedMinorUnits: Int
+  public let limitMinorUnits: Int
+  public let currencyCode: String
+
+  public init(
+    label: String,
+    usedMinorUnits: Int,
+    limitMinorUnits: Int,
+    currencyCode: String = "USD"
+  ) {
+    self.label = label
+    self.usedMinorUnits = max(0, usedMinorUnits)
+    self.limitMinorUnits = max(0, limitMinorUnits)
+    self.currencyCode = currencyCode
   }
 }
 

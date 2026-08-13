@@ -12,7 +12,7 @@ Usage Bar does one job: periodically fetch current subscription utilization and
 reset times from provider-owned local CLI authentication. It does not include:
 
 - browser automation, hidden WebViews, or cookie extraction;
-- usage charts, local token-history scanning, or a database;
+- historical charts, local token-history scanning, or a database;
 - widgets, notifications, plugins, multi-account switching, or iCloud sync;
 - API spend reporting or status-page polling.
 
@@ -54,8 +54,15 @@ The probe prints snapshots and errors only. It never prints credential material.
 The Anthropic probe honors the same explicit Keychain-consent setting as the app.
 
 `make check` also runs a native AppKit UI self-test. It constructs the real status
-menu and settings window, then verifies all provider cards, actions, checkboxes,
-and the refresh picker without changing any setting.
+dashboard and settings window, then verifies all provider cards, summary indicators,
+actions, checkboxes, and the refresh picker without changing any setting.
+
+The popover derives its overview from the current provider snapshots: live provider
+count, tracked limit count, nearest reset, and highest utilization. Each provider
+card shows used and remaining quota, rolling-window duration, reset countdown,
+absolute reset time, plan, source, freshness, and saved-data errors. Anthropic extra
+usage and Grok included-credit totals appear only when the provider returns both a
+used amount and a limit.
 
 ## Privacy and storage
 
@@ -92,9 +99,11 @@ before public distribution.
 ## Architecture
 
 ```text
-AppKit NSStatusItem + NSMenu
+AppKit NSStatusItem + NSPopover
              |
-         UsageStore
+     AppKit dashboard popover
+             |
+          UsageStore
           /      \
 SnapshotCache  UsageProvider
                 /    |    \

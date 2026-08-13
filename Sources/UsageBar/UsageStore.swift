@@ -101,6 +101,59 @@ final class UsageStore {
     self.defaults.bool(forKey: "provider.\(provider.rawValue).enabled")
   }
 
+  func installPreviewSnapshots(now: Date = Date()) {
+    self.states[.openAI] = ProviderViewState(
+      provider: .openAI,
+      snapshot: UsageSnapshot(
+        provider: .openAI,
+        planName: "Pro",
+        windows: [
+          UsageWindow(
+            id: "five-hour", label: "5 hours", usedPercent: 28,
+            windowMinutes: 300, resetsAt: now.addingTimeInterval(2.4 * 3600)),
+          UsageWindow(
+            id: "weekly", label: "Weekly", usedPercent: 61,
+            windowMinutes: 10080, resetsAt: now.addingTimeInterval(4.2 * 86400)),
+        ],
+        fetchedAt: now.addingTimeInterval(-48),
+        source: "Codex app-server"))
+    self.states[.anthropic] = ProviderViewState(
+      provider: .anthropic,
+      snapshot: UsageSnapshot(
+        provider: .anthropic,
+        planName: "Max 20x",
+        windows: [
+          UsageWindow(
+            id: "five-hour", label: "5 hours", usedPercent: 14,
+            windowMinutes: 300, resetsAt: now.addingTimeInterval(1.1 * 3600)),
+          UsageWindow(
+            id: "weekly", label: "Weekly", usedPercent: 52,
+            windowMinutes: 10080, resetsAt: now.addingTimeInterval(3.6 * 86400)),
+          UsageWindow(
+            id: "sonnet-weekly", label: "Sonnet weekly", usedPercent: 31,
+            windowMinutes: 10080, resetsAt: now.addingTimeInterval(3.6 * 86400)),
+        ],
+        fetchedAt: now.addingTimeInterval(-83),
+        source: "Claude OAuth",
+        includedSpend: IncludedSpend(
+          label: "Extra usage", usedMinorUnits: 2_845, limitMinorUnits: 10_000)))
+    self.states[.grok] = ProviderViewState(
+      provider: .grok,
+      snapshot: UsageSnapshot(
+        provider: .grok,
+        planName: "SuperGrok Heavy",
+        windows: [
+          UsageWindow(
+            id: "usage-pool", label: "Weekly", usedPercent: 43,
+            windowMinutes: 10080, resetsAt: now.addingTimeInterval(2.8 * 86400))
+        ],
+        fetchedAt: now.addingTimeInterval(-126),
+        source: "Grok Build billing API",
+        includedSpend: IncludedSpend(
+          label: "Included credits", usedMinorUnits: 12_345, limitMinorUnits: 99_900)))
+    self.changed()
+  }
+
   private func registerDefaults() {
     self.defaults.register(defaults: [
       "provider.openAI.enabled": true,

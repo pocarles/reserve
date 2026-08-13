@@ -1,6 +1,8 @@
 {
   "config": {
     "creditUsagePercent": 42.5,
+    "monthlyLimit": { "val": 99900 },
+    "used": { "val": 12345 },
     "currentPeriod": {
       "type": "USAGE_PERIOD_TYPE_WEEKLY",
       "start": "2026-08-10T12:00:00Z",

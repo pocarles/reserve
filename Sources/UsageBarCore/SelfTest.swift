@@ -34,6 +34,8 @@ public enum UsageBarSelfTests {
     let anthropic = try JSONDecoder().decode(ClaudeUsageResponse.self, from: anthropicData)
     guard anthropic.fiveHour?.utilization == 14.2,
       anthropic.limits?.first?.scope?.model?.displayName == "Fable",
+      anthropic.extraUsage?.includedSpend?.usedMinorUnits == 2845,
+      anthropic.extraUsage?.includedSpend?.limitMinorUnits == 10000,
       ClaudeUsageWindow(utilization: nil, resetsAt: nil).window(
         id: "missing", label: "Missing") == nil
     else { throw Failure("Anthropic usage decoding") }
@@ -110,6 +112,8 @@ public enum UsageBarSelfTests {
     let grok = try JSONDecoder().decode(GrokBillingEnvelope.self, from: grokData)
     guard grok.config?.usedPercent == 42.5,
       grok.config?.currentPeriod?.type == "USAGE_PERIOD_TYPE_WEEKLY",
+      grok.config?.includedSpend?.usedMinorUnits == 12345,
+      grok.config?.includedSpend?.limitMinorUnits == 99900,
       grok.subscriptionTier == "SuperGrok Heavy"
     else { throw Failure("Grok billing decoding") }
     passed.append("Grok billing decoding")
@@ -180,7 +184,9 @@ public enum UsageBarSelfTests {
       provider: .openAI,
       planName: "Pro",
       windows: [UsageWindow(id: "weekly", label: "Weekly", usedPercent: 10)],
-      source: "test")
+      source: "test",
+      includedSpend: IncludedSpend(
+        label: "Included credits", usedMinorUnits: 1234, limitMinorUnits: 5000))
     try await cache.save([.openAI: snapshot])
     let data = try Data(contentsOf: url)
     let text = String(decoding: data, as: UTF8.self)
@@ -199,7 +205,8 @@ public enum UsageBarSelfTests {
       loaded?.provider == snapshot.provider,
       loaded?.planName == snapshot.planName,
       loaded?.windows == snapshot.windows,
-      loaded?.source == snapshot.source
+      loaded?.source == snapshot.source,
+      loaded?.includedSpend == snapshot.includedSpend
     else { throw Failure("normalized snapshot cache") }
     passed.append("normalized snapshot cache")
 

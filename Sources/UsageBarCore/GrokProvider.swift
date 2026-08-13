@@ -96,7 +96,8 @@ public struct GrokProvider: UsageProvider {
           windowMinutes: minutes,
           resetsAt: UsageDateParser.iso8601(period?.end ?? config.billingPeriodEnd))
       ],
-      source: source)
+      source: source,
+      includedSpend: config.includedSpend)
   }
 
   private func fetchThroughOfficialCLIProxy(version: String) async throws -> GrokBillingEnvelope {
@@ -301,6 +302,13 @@ struct GrokBillingConfig: Decodable, Sendable {
       return nil
     }
     return Double(used) / Double(limit) * 100
+  }
+
+  var includedSpend: IncludedSpend? {
+    guard let limit = self.monthlyLimit?.val, limit > 0, let used = self.used?.val else {
+      return nil
+    }
+    return IncludedSpend(label: "Included credits", usedMinorUnits: used, limitMinorUnits: limit)
   }
 }
 

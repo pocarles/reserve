@@ -97,7 +97,8 @@ public struct AnthropicProvider: UsageProvider {
       planName: ClaudePlanFormatter.plan(from: credentials.subscriptionType)
         ?? ClaudePlanFormatter.plan(from: credentials.rateLimitTier),
       windows: windows,
-      source: credentials.source)
+      source: credentials.source,
+      includedSpend: response.extraUsage?.includedSpend)
   }
 
   private func fetchUsage(accessToken: String) async throws -> ClaudeUsageResponse {
@@ -331,6 +332,7 @@ struct ClaudeUsageResponse: Decodable, Sendable {
   let sevenDaySonnet: ClaudeUsageWindow?
   let sevenDayOpus: ClaudeUsageWindow?
   let limits: [ClaudeLimit]?
+  let extraUsage: ClaudeExtraUsage?
 
   enum CodingKeys: String, CodingKey {
     case fiveHour = "five_hour"
@@ -338,6 +340,27 @@ struct ClaudeUsageResponse: Decodable, Sendable {
     case sevenDaySonnet = "seven_day_sonnet"
     case sevenDayOpus = "seven_day_opus"
     case limits
+    case extraUsage = "extra_usage"
+  }
+}
+
+struct ClaudeExtraUsage: Decodable, Sendable {
+  let isEnabled: Bool?
+  let monthlyLimit: Int?
+  let usedCredits: Int?
+
+  enum CodingKeys: String, CodingKey {
+    case isEnabled = "is_enabled"
+    case monthlyLimit = "monthly_limit"
+    case usedCredits = "used_credits"
+  }
+
+  var includedSpend: IncludedSpend? {
+    guard self.isEnabled != false, let usedCredits, let monthlyLimit, monthlyLimit > 0 else {
+      return nil
+    }
+    return IncludedSpend(
+      label: "Extra usage", usedMinorUnits: usedCredits, limitMinorUnits: monthlyLimit)
   }
 }
 

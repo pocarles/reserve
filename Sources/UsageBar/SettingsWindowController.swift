@@ -121,7 +121,7 @@ final class SettingsWindowController: NSWindowController {
     stack.addArrangedSubview(self.heading("Privacy"))
     stack.addArrangedSubview(
       self.note(
-        "The cache contains normalized usage, reset dates, and provider, plan, and account labels. OAuth tokens, cookies, authorization headers, and raw responses are never cached."
+        "The cache contains normalized usage, reset dates, provider and plan labels, and optional included-spend totals. OAuth tokens, cookies, authorization headers, account identifiers, and raw responses are never cached."
       ))
     return root
   }

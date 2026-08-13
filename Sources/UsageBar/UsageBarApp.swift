@@ -22,21 +22,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_: Notification) {
     NSApplication.shared.setActivationPolicy(.accessory)
     let isUISelfTest = CommandLine.arguments.contains("--self-test-ui")
+    let renderIndex = CommandLine.arguments.firstIndex(of: "--render-dashboard")
+    let isDashboardRender = renderIndex != nil
     let store: UsageStore
-    if isUISelfTest {
+    if isUISelfTest || isDashboardRender {
       let testDefaults = UserDefaults(
         suiteName: "UsageBar.UISelfTest.\(UUID().uuidString)")!
       store = UsageStore(defaults: testDefaults, startAutomatically: false)
     } else {
       store = UsageStore()
     }
+    if isDashboardRender { store.installPreviewSnapshots() }
     self.store = store
     self.settingsController = SettingsWindowController(store: store)
     self.statusController = StatusItemController(store: store) { [weak self] in
       self?.settingsController?.showWindow(nil)
       NSApplication.shared.activate(ignoringOtherApps: true)
     }
-    if isUISelfTest {
+    if let renderIndex,
+      CommandLine.arguments.indices.contains(renderIndex + 1)
+    {
+      let offset =
+        CommandLine.arguments.indices.contains(renderIndex + 2)
+        ? Double(CommandLine.arguments[renderIndex + 2]) ?? 0
+        : 0
+      self.renderDashboard(path: CommandLine.arguments[renderIndex + 1], scrollOffset: offset)
+    } else if isUISelfTest {
       self.runUISelfTest()
     } else if CommandLine.arguments.contains("--show-settings") {
       self.settingsController?.showWindow(nil)
@@ -45,6 +56,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
         self?.statusController?.showMenu()
       }
+    }
+  }
+
+  private func renderDashboard(path: String, scrollOffset: Double) {
+    guard let statusController = self.statusController else {
+      Self.finishUISelfTest(success: false, details: "dashboard controller was not created")
+      return
+    }
+    do {
+      try statusController.renderDashboard(
+        to: URL(fileURLWithPath: path), scrollOffset: CGFloat(scrollOffset))
+      Self.finishUISelfTest(success: true, details: "dashboard rendered to \(path)")
+    } catch {
+      Self.finishUISelfTest(success: false, details: "dashboard render failed: \(error)")
     }
   }
 
