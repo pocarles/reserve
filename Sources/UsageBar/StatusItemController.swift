@@ -27,6 +27,28 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     self.statusItem.button?.performClick(nil)
   }
 
+  func validateForSelfTest() -> (success: Bool, details: String) {
+    guard self.statusItem.button?.image != nil else {
+      return (false, "status item has no image")
+    }
+    let menu = NSMenu()
+    self.rebuild(menu)
+    let providerViews = menu.items.filter { $0.view is ProviderMenuView }.count
+    let titles = Set(menu.items.map(\.title))
+    let expectedProviders = ProviderID.allCases.count
+    let actionsPresent =
+      titles.contains("Refresh All")
+      && titles.contains("Settings…")
+      && titles.contains("Quit Usage Bar")
+    guard providerViews == expectedProviders, actionsPresent else {
+      return (
+        false,
+        "menu providers=\(providerViews)/\(expectedProviders), actions=\(actionsPresent)"
+      )
+    }
+    return (true, "status menu has \(providerViews) provider cards and all actions")
+  }
+
   private func updateStatusIcon() {
     self.statusItem.button?.image = NSImage(
       systemSymbolName: self.store.statusSymbol,

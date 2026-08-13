@@ -51,6 +51,10 @@ swift run usagebar-probe grok
 
 The probe prints snapshots and errors only. It never prints credential material.
 
+`make check` also runs a native AppKit UI self-test. It constructs the real status
+menu and settings window, then verifies all provider cards, actions, checkboxes,
+and the refresh picker without changing any setting.
+
 ## Privacy and storage
 
 The cache lives at:
@@ -85,16 +89,14 @@ before public distribution.
 ## Architecture
 
 ```text
-SwiftUI MenuBarExtra
-        |
-    UsageStore
-        |
-  SnapshotCache
-        |
-  UsageProvider
-   /     |     \
-OpenAI Claude  Grok
- RPC    HTTPS   ACP
+AppKit NSStatusItem + NSMenu
+             |
+         UsageStore
+          /      \
+SnapshotCache  UsageProvider
+                /    |    \
+             OpenAI Claude Grok
+               RPC  HTTPS ACP/API
 ```
 
 OpenAI uses the documented Codex app-server `account/rateLimits/read` method.

@@ -1,4 +1,4 @@
-.PHONY: build test check package run probe clean
+.PHONY: build test ui-test check package run probe clean
 
 build:
 	swift build
@@ -6,7 +6,10 @@ build:
 test:
 	swift run usagebar-selftest
 
-check: build test
+ui-test:
+	swift run UsageBar --self-test-ui
+
+check: build test ui-test
 
 package:
 	./Scripts/package_app.sh

@@ -27,6 +27,37 @@ final class SettingsWindowController: NSWindowController {
     self.window?.center()
   }
 
+  func validateForSelfTest() -> (success: Bool, details: String) {
+    guard let window = self.window, let contentView = window.contentView else {
+      return (false, "settings window was not created")
+    }
+    let descendants = Self.descendants(of: contentView)
+    let checkboxes = descendants.compactMap { $0 as? NSButton }.filter {
+      !($0 is NSPopUpButton)
+    }
+    let popups = descendants.compactMap { $0 as? NSPopUpButton }
+    let checkboxTitles = Set(checkboxes.map(\.title))
+    let expectedCheckboxTitles = Set(
+      ProviderID.allCases.map(\.displayName)
+        + [
+          "Allow read-only access to Claude Code credentials in Keychain",
+          "Launch at login",
+        ])
+    let expectedIntervals = ["Every 10 minutes", "Every 15 minutes", "Every 30 minutes"]
+    let success =
+      window.title == "Usage Bar Settings"
+      && checkboxTitles == expectedCheckboxTitles
+      && popups.count == 1
+      && popups.first?.itemTitles == expectedIntervals
+    let details =
+      "settings has \(checkboxes.count) checkboxes and \(popups.count) interval picker"
+    return (success, details)
+  }
+
+  private static func descendants(of view: NSView) -> [NSView] {
+    view.subviews + view.subviews.flatMap { Self.descendants(of: $0) }
+  }
+
   private func makeContentView() -> NSView {
     let root = NSView()
     let stack = NSStackView()

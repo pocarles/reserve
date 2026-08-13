@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 
 @main
 enum UsageBarApp {
@@ -20,14 +21,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationDidFinishLaunching(_: Notification) {
     NSApplication.shared.setActivationPolicy(.accessory)
-    let store = UsageStore()
+    let isUISelfTest = CommandLine.arguments.contains("--self-test-ui")
+    let store: UsageStore
+    if isUISelfTest {
+      let testDefaults = UserDefaults(
+        suiteName: "UsageBar.UISelfTest.\(UUID().uuidString)")!
+      store = UsageStore(defaults: testDefaults, startAutomatically: false)
+    } else {
+      store = UsageStore()
+    }
     self.store = store
     self.settingsController = SettingsWindowController(store: store)
     self.statusController = StatusItemController(store: store) { [weak self] in
       self?.settingsController?.showWindow(nil)
       NSApplication.shared.activate(ignoringOtherApps: true)
     }
-    if CommandLine.arguments.contains("--show-settings") {
+    if isUISelfTest {
+      self.runUISelfTest()
+    } else if CommandLine.arguments.contains("--show-settings") {
       self.settingsController?.showWindow(nil)
       NSApplication.shared.activate(ignoringOtherApps: true)
     } else if CommandLine.arguments.contains("--show-menu") {
@@ -35,5 +46,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self?.statusController?.showMenu()
       }
     }
+  }
+
+  private func runUISelfTest() {
+    guard let statusController = self.statusController,
+      let settingsController = self.settingsController
+    else {
+      Self.finishUISelfTest(success: false, details: "controllers were not created")
+      return
+    }
+
+    let statusResult = statusController.validateForSelfTest()
+    let settingsResult = settingsController.validateForSelfTest()
+    let success = statusResult.success && settingsResult.success
+    let details = [statusResult.details, settingsResult.details].joined(separator: "; ")
+    Self.finishUISelfTest(success: success, details: details)
+  }
+
+  private static func finishUISelfTest(success: Bool, details: String) {
+    let prefix = success ? "PASS" : "FAIL"
+    FileHandle.standardOutput.write(Data("\(prefix) AppKit UI: \(details)\n".utf8))
+    fflush(stdout)
+    exit(success ? 0 : 1)
   }
 }

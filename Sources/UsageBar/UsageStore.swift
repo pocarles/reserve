@@ -22,18 +22,21 @@ final class UsageStore {
   var onChange: (() -> Void)?
 
   private let cache = SnapshotCache()
-  private let defaults = UserDefaults.standard
+  private let defaults: UserDefaults
   private var schedulerTask: Task<Void, Never>?
   private var startupTask: Task<Void, Never>?
 
-  init() {
+  init(defaults: UserDefaults = .standard, startAutomatically: Bool = true) {
+    self.defaults = defaults
     self.states = Dictionary(
       uniqueKeysWithValues: ProviderID.allCases.map {
         ($0, ProviderViewState(provider: $0))
       })
     self.registerDefaults()
-    self.startupTask = Task { [weak self] in
-      await self?.loadCacheAndStart()
+    if startAutomatically {
+      self.startupTask = Task { [weak self] in
+        await self?.loadCacheAndStart()
+      }
     }
   }
 
