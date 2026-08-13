@@ -50,6 +50,63 @@ public enum UsageBarSelfTests {
     else { throw Failure("Anthropic conservative backoff") }
     passed.append("Anthropic conservative backoff")
 
+    let anthropicDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: anthropicDirectory) }
+    try FileManager.default.createDirectory(
+      at: anthropicDirectory, withIntermediateDirectories: true)
+    let anthropicCredential = Data(
+      #"{"claudeAiOauth":{"accessToken":"fixture-token","subscriptionType":"pro"}}"#.utf8)
+    try anthropicCredential.write(
+      to: anthropicDirectory.appendingPathComponent(".credentials.json"), options: .atomic)
+    let anthropicGate = ClaudeRateLimitGate(defaults: nil)
+    let anthropicProvider = AnthropicProvider(
+      environment: ["CLAUDE_CONFIG_DIR": anthropicDirectory.path],
+      allowKeychainRead: false,
+      requestHandler: { request in
+        guard request.url?.absoluteString == "https://api.anthropic.com/api/oauth/usage",
+          request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token",
+          request.value(forHTTPHeaderField: "anthropic-beta") == "oauth-2025-04-20",
+          request.cachePolicy == .reloadIgnoringLocalCacheData,
+          request.httpShouldHandleCookies == false
+        else { throw Failure("Anthropic provider request") }
+        let response = HTTPURLResponse(
+          url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:])!
+        return (anthropicData, response)
+      },
+      rateLimitGate: anthropicGate)
+    let anthropicSnapshot = try await anthropicProvider.fetch()
+    guard anthropicSnapshot.provider == .anthropic,
+      anthropicSnapshot.planName == "Pro",
+      anthropicSnapshot.source == "Claude OAuth file",
+      anthropicSnapshot.windows.first?.id == "five-hour"
+    else { throw Failure("Anthropic provider request") }
+    passed.append("Anthropic provider request")
+
+    let rateLimitedGate = ClaudeRateLimitGate(defaults: nil)
+    let rateLimitedProvider = AnthropicProvider(
+      environment: ["CLAUDE_CONFIG_DIR": anthropicDirectory.path],
+      allowKeychainRead: false,
+      requestHandler: { request in
+        let response = HTTPURLResponse(
+          url: request.url!,
+          statusCode: 429,
+          httpVersion: "HTTP/1.1",
+          headerFields: ["Retry-After": "60"])!
+        return (Data(), response)
+      },
+      rateLimitGate: rateLimitedGate)
+    let beforeBackoff = Date()
+    do {
+      _ = try await rateLimitedProvider.fetch()
+      throw Failure("Anthropic provider backoff")
+    } catch UsageProviderError.rateLimited {
+      guard let blockedUntil = await rateLimitedGate.activeBlock(now: beforeBackoff),
+        blockedUntil >= beforeBackoff.addingTimeInterval(15 * 60)
+      else { throw Failure("Anthropic provider backoff") }
+    }
+    passed.append("Anthropic provider backoff")
+
     let grok = try JSONDecoder().decode(GrokBillingEnvelope.self, from: grokData)
     guard grok.config?.usedPercent == 42.5,
       grok.config?.currentPeriod?.type == "USAGE_PERIOD_TYPE_WEEKLY",

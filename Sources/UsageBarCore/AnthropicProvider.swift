@@ -9,20 +9,35 @@ public struct AnthropicProvider: UsageProvider {
   public let id: ProviderID = .anthropic
   private let environment: [String: String]
   private let allowKeychainRead: Bool
-  private let session: URLSession
+  private let requestHandler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
+  private let rateLimitGate: ClaudeRateLimitGate
 
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     allowKeychainRead: Bool = false,
     session: URLSession? = nil
   ) {
+    let session = session ?? ProviderHTTPSession.shared
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
-    self.session = session ?? ProviderHTTPSession.shared
+    self.requestHandler = { request in try await session.data(for: request) }
+    self.rateLimitGate = .shared
+  }
+
+  init(
+    environment: [String: String],
+    allowKeychainRead: Bool,
+    requestHandler: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse),
+    rateLimitGate: ClaudeRateLimitGate
+  ) {
+    self.environment = environment
+    self.allowKeychainRead = allowKeychainRead
+    self.requestHandler = requestHandler
+    self.rateLimitGate = rateLimitGate
   }
 
   public func fetch() async throws -> UsageSnapshot {
-    if let retryAt = await ClaudeRateLimitGate.shared.activeBlock(), retryAt > Date() {
+    if let retryAt = await self.rateLimitGate.activeBlock(), retryAt > Date() {
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     }
     let credentials = try await ClaudeCredentialLoader.load(
@@ -38,7 +53,7 @@ public struct AnthropicProvider: UsageProvider {
         }
       #endif
       throw UsageProviderError.unauthorized(
-        "Claude authentication expired. Run `claude login` and refresh.")
+        "Claude authentication expired. Run `claude auth login` and refresh.")
     }
 
     var windows: [UsageWindow] = []
@@ -100,7 +115,7 @@ public struct AnthropicProvider: UsageProvider {
 
     let (data, response): (Data, URLResponse)
     do {
-      (data, response) = try await self.session.data(for: request)
+      (data, response) = try await self.requestHandler(request)
     } catch {
       if let error = error as? URLError, error.code == .timedOut {
         throw UsageProviderError.timedOut("Anthropic usage request")
@@ -113,14 +128,14 @@ public struct AnthropicProvider: UsageProvider {
     }
     switch http.statusCode {
     case 200:
-      await ClaudeRateLimitGate.shared.clear()
+      await self.rateLimitGate.clear()
     case 401:
       throw UsageProviderError.unauthorized(
-        "Claude authentication expired. Run `claude login` and refresh.")
+        "Claude authentication expired. Run `claude auth login` and refresh.")
     case 429:
       let retryAt = Self.conservativeRetryDate(
         retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
-      await ClaudeRateLimitGate.shared.block(until: retryAt)
+      await self.rateLimitGate.block(until: retryAt)
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     default:
       throw UsageProviderError.unavailable(
@@ -153,24 +168,34 @@ public struct AnthropicProvider: UsageProvider {
 
 actor ClaudeRateLimitGate {
   static let shared = ClaudeRateLimitGate()
-  private let defaults: UserDefaults
+  private let defaults: UserDefaults?
   private let key = "anthropic.rateLimitBlockedUntil"
+  private var memoryBlock: Date?
 
-  init(defaults: UserDefaults = UserDefaults(suiteName: "com.pocarles.usagebar") ?? .standard) {
+  init(defaults: UserDefaults? = UserDefaults(suiteName: "com.pocarles.usagebar") ?? .standard) {
     self.defaults = defaults
   }
 
   func activeBlock(now: Date = Date()) -> Date? {
-    guard let date = self.defaults.object(forKey: self.key) as? Date else { return nil }
+    let date = self.defaults?.object(forKey: self.key) as? Date ?? self.memoryBlock
+    guard let date else { return nil }
     guard date > now else {
-      self.defaults.removeObject(forKey: self.key)
+      self.defaults?.removeObject(forKey: self.key)
+      self.memoryBlock = nil
       return nil
     }
     return date
   }
 
-  func block(until date: Date) { self.defaults.set(date, forKey: self.key) }
-  func clear() { self.defaults.removeObject(forKey: self.key) }
+  func block(until date: Date) {
+    self.memoryBlock = date
+    self.defaults?.set(date, forKey: self.key)
+  }
+
+  func clear() {
+    self.memoryBlock = nil
+    self.defaults?.removeObject(forKey: self.key)
+  }
 }
 
 struct ClaudeCredentials: Sendable {
@@ -204,11 +229,11 @@ enum ClaudeCredentialLoader {
       if self.keychainItemExistsWithoutPrompt() {
         if !allowKeychainRead { throw UsageProviderError.keychainConsentRequired }
         throw UsageProviderError.credentialsNotFound(
-          "Claude Keychain credentials are unusable. Run `claude login` and refresh.")
+          "Claude Keychain credentials are unusable. Run `claude auth login` and refresh.")
       }
     #endif
     throw UsageProviderError.credentialsNotFound(
-      "Claude OAuth credentials were not found. Run `claude login` first.")
+      "Claude OAuth credentials were not found. Run `claude auth login` first.")
   }
 
   static func decode(data: Data, source: String) throws -> ClaudeCredentials {

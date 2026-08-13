@@ -9,7 +9,7 @@ final class SettingsWindowController: NSWindowController {
   init(store: UsageStore) {
     self.store = store
     let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 500, height: 440),
+      contentRect: NSRect(x: 0, y: 0, width: 500, height: 520),
       styleMask: [.titled, .closable],
       backing: .buffered,
       defer: true)
@@ -32,6 +32,11 @@ final class SettingsWindowController: NSWindowController {
       return (false, "settings window was not created")
     }
     let descendants = Self.descendants(of: contentView)
+    contentView.layoutSubtreeIfNeeded()
+    let stackFits =
+      descendants.compactMap { $0 as? NSStackView }.first.map {
+        $0.frame.minY >= 0 && $0.frame.maxY <= contentView.bounds.height
+      } ?? false
     let checkboxes = descendants.compactMap { $0 as? NSButton }.filter {
       !($0 is NSPopUpButton)
     }
@@ -49,8 +54,9 @@ final class SettingsWindowController: NSWindowController {
       && checkboxTitles == expectedCheckboxTitles
       && popups.count == 1
       && popups.first?.itemTitles == expectedIntervals
+      && stackFits
     let details =
-      "settings has \(checkboxes.count) checkboxes and \(popups.count) interval picker"
+      "settings has \(checkboxes.count) checkboxes, \(popups.count) interval picker, and fitting content"
     return (success, details)
   }
 
@@ -91,6 +97,10 @@ final class SettingsWindowController: NSWindowController {
     stack.addArrangedSubview(keychain)
     stack.addArrangedSubview(
       self.note("Off by default. Background checks never show a Keychain authentication prompt."))
+    stack.addArrangedSubview(
+      self.note(
+        "If Claude is signed out or expired, run `claude auth login` in Terminal, then Refresh All."
+      ))
 
     stack.addArrangedSubview(self.heading("Refresh"))
     let popup = NSPopUpButton()
