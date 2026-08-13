@@ -137,6 +137,59 @@ public enum UsageBarSelfTests {
     else { throw Failure("Grok credential selection") }
     passed.append("Grok credential selection")
 
+    let usageDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("usage-index-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: usageDirectory) }
+    let codexRoot = usageDirectory.appendingPathComponent("codex", isDirectory: true)
+    let claudeRoot = usageDirectory.appendingPathComponent("claude", isDirectory: true)
+    let grokRoot = usageDirectory.appendingPathComponent("grok", isDirectory: true)
+    for root in [codexRoot, claudeRoot, grokRoot] {
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+    let now = Date()
+    let timestamp = ISO8601DateFormatter().string(from: now)
+    let codexLines =
+      [
+        #"{"timestamp":"\#(timestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+        #"{"timestamp":"\#(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":0,"output_tokens":20,"total_tokens":1020}}}}"#,
+      ].joined(separator: "\n") + "\n"
+    try Data(codexLines.utf8).write(to: codexRoot.appendingPathComponent("session.jsonl"))
+
+    func claudeLine(output: Int, message: String, request: String) -> String {
+      #"{"timestamp":"\#(timestamp)","type":"assistant","requestId":"\#(request)","message":{"id":"\#(message)","model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":\#(output)}}}"#
+    }
+    let claudeURL = claudeRoot.appendingPathComponent("session.jsonl")
+    try Data(
+      ([
+        claudeLine(output: 5, message: "m1", request: "r1"),
+        claudeLine(output: 7, message: "m1", request: "r1"),
+      ].joined(separator: "\n") + "\n").utf8
+    ).write(to: claudeURL)
+    let grokSession = grokRoot.appendingPathComponent("session", isDirectory: true)
+    try FileManager.default.createDirectory(at: grokSession, withIntermediateDirectories: true)
+    try Data(
+      #"{"contextTokensUsed":300,"totalTokensBeforeCompaction":200,"primaryModelId":"grok-4.6"}"#
+        .utf8
+    ).write(to: grokSession.appendingPathComponent("signals.json"))
+
+    let usageCache = usageDirectory.appendingPathComponent("private-index.json")
+    let scanner = LocalUsageScanner(
+      roots: .init(codex: codexRoot, claude: claudeRoot, grok: grokRoot),
+      cacheURL: usageCache)
+    let firstUsage = try await scanner.scan(periodDays: 30, now: now)
+    let secondUsage = try await scanner.scan(periodDays: 30, now: now)
+    guard firstUsage[.openAI]?.totalTokens == 1020,
+      firstUsage[.anthropic]?.totalTokens == 137,
+      firstUsage[.grok]?.totalTokens == 500,
+      firstUsage == secondUsage,
+      (firstUsage[.openAI]?.apiEquivalentCostUSD ?? 0) > 0,
+      (firstUsage[.anthropic]?.apiEquivalentCostUSD ?? 0) > 0,
+      firstUsage[.grok]?.isCostEstimate == true,
+      let usageCacheData = try? Data(contentsOf: usageCache),
+      !String(decoding: usageCacheData, as: UTF8.self).contains(usageDirectory.path)
+    else { throw Failure("incremental local usage accounting") }
+    passed.append("incremental local usage accounting")
+
     if let helperExecutable {
       let start = ContinuousClock.now
       var timedOut = false

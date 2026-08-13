@@ -4,7 +4,6 @@ import UsageBarCore
 @MainActor
 struct DashboardActions {
   let refreshAll: () -> Void
-  let refreshProvider: (ProviderID) -> Void
   let openSettings: () -> Void
   let quit: () -> Void
 }
@@ -25,19 +24,12 @@ final class DashboardViewController: NSViewController {
 
   required init?(coder: NSCoder) { nil }
 
-  override func loadView() {
-    self.view = UsageDashboardView(
-      states: self.store.orderedStates.filter { self.store.isEnabled($0.provider) },
-      isRefreshingAll: self.store.isRefreshingAll,
-      now: Date(),
-      actions: self.actions)
-  }
+  override func loadView() { self.update() }
 
   func update() {
-    guard self.isViewLoaded else { return }
     self.view = UsageDashboardView(
       states: self.store.orderedStates.filter { self.store.isEnabled($0.provider) },
-      isRefreshingAll: self.store.isRefreshingAll,
+      isRefreshing: self.store.isRefreshingAll || self.store.isScanningLocalUsage,
       now: Date(),
       actions: self.actions)
   }
@@ -59,82 +51,42 @@ final class DashboardViewController: NSViewController {
 final class UsageDashboardView: NSView {
   init(
     states: [ProviderViewState],
-    isRefreshingAll: Bool,
+    isRefreshing: Bool,
     now: Date,
     actions: DashboardActions
   ) {
-    super.init(
-      frame: NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: DashboardMetrics.height))
+    super.init(frame: NSRect(origin: .zero, size: DashboardMetrics.size))
     self.identifier = NSUserInterfaceItemIdentifier("usage-dashboard")
     self.wantsLayer = true
     self.layer?.backgroundColor = DashboardPalette.background.cgColor
 
-    let scroll = NSScrollView()
-    scroll.drawsBackground = false
-    scroll.hasVerticalScroller = true
-    scroll.autohidesScrollers = true
-    scroll.borderType = .noBorder
-    scroll.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(scroll)
-
-    let document = FlippedView()
-    document.translatesAutoresizingMaskIntoConstraints = false
-    scroll.documentView = document
-
     let stack = NSStackView()
     stack.orientation = .vertical
     stack.alignment = .leading
-    stack.spacing = 18
+    stack.spacing = 12
     stack.translatesAutoresizingMaskIntoConstraints = false
-    document.addSubview(stack)
-
+    self.addSubview(stack)
     NSLayoutConstraint.activate([
-      scroll.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      scroll.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      scroll.topAnchor.constraint(equalTo: self.topAnchor),
-      scroll.bottomAnchor.constraint(equalTo: self.bottomAnchor),
-      document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-      stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 22),
-      stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -22),
-      stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 22),
-      stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -18),
+      stack.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 20),
+      stack.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -20),
+      stack.topAnchor.constraint(equalTo: self.topAnchor, constant: 18),
+      stack.bottomAnchor.constraint(lessThanOrEqualTo: self.bottomAnchor, constant: -14),
     ])
 
     stack.addArrangedSubview(
-      DashboardHeaderView(states: states, isRefreshing: isRefreshingAll, now: now) {
-        actions.refreshAll()
-      })
-    stack.addArrangedSubview(DashboardSummaryView(states: states, now: now))
-
-    let section = NSStackView()
-    section.orientation = .horizontal
-    section.alignment = .centerY
-    let providers = DashboardLabel(
-      "PROVIDERS", size: 10, weight: .medium, color: DashboardPalette.muted)
-    providers.identifier = NSUserInterfaceItemIdentifier("providers-heading")
-    section.addArrangedSubview(providers)
-    section.addArrangedSubview(NSView())
-    section.addArrangedSubview(
-      DashboardLabel("CURRENT CYCLE", size: 10, weight: .medium, color: DashboardPalette.subtle))
-    section.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth).isActive = true
-    stack.addArrangedSubview(section)
+      DashboardHeaderView(
+        states: states, isRefreshing: isRefreshing, now: now, refresh: actions.refreshAll))
+    stack.addArrangedSubview(DashboardSummaryView(states: states))
 
     for state in states {
-      let card = ProviderDashboardCard(state: state, now: now) {
-        actions.refreshProvider(state.provider)
-      }
+      let card = ProviderDashboardCard(state: state, now: now, isScanning: isRefreshing)
       card.identifier = NSUserInterfaceItemIdentifier("provider-card-\(state.provider.rawValue)")
       stack.addArrangedSubview(card)
     }
-
     if states.isEmpty {
       stack.addArrangedSubview(EmptyProvidersView(openSettings: actions.openSettings))
     }
-
     stack.addArrangedSubview(DashboardFooterView(actions: actions))
-    self.layoutSubtreeIfNeeded()
-    scroll.contentView.scroll(to: .zero)
-    scroll.reflectScrolledClipView(scroll.contentView)
   }
 
   required init?(coder: NSCoder) { nil }
@@ -147,29 +99,26 @@ private final class DashboardHeaderView: NSView {
     let title = DashboardLabel("Usage", size: 22, weight: .semibold, color: DashboardPalette.text)
     let subtitle = DashboardLabel(
       Self.subtitle(states: states, isRefreshing: isRefreshing, now: now),
-      size: 11,
+      size: 10.5,
       color: DashboardPalette.muted)
     let copy = NSStackView(views: [title, subtitle])
     copy.orientation = .vertical
     copy.alignment = .leading
-    copy.spacing = 4
-
+    copy.spacing = 2
     let button = DashboardButton(symbol: "arrow.clockwise", toolTip: "Refresh all", action: refresh)
     button.identifier = NSUserInterfaceItemIdentifier("refresh-all")
-
-    self.addSubview(copy)
-    self.addSubview(button)
-    copy.translatesAutoresizingMaskIntoConstraints = false
-    button.translatesAutoresizingMaskIntoConstraints = false
+    for view in [copy, button] {
+      view.translatesAutoresizingMaskIntoConstraints = false
+      self.addSubview(view)
+    }
     NSLayoutConstraint.activate([
       copy.leadingAnchor.constraint(equalTo: self.leadingAnchor),
       copy.topAnchor.constraint(equalTo: self.topAnchor),
       copy.bottomAnchor.constraint(equalTo: self.bottomAnchor),
       button.trailingAnchor.constraint(equalTo: self.trailingAnchor),
       button.centerYAnchor.constraint(equalTo: copy.centerYAnchor),
-      button.widthAnchor.constraint(equalToConstant: 34),
-      button.heightAnchor.constraint(equalToConstant: 30),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
+      self.heightAnchor.constraint(equalToConstant: 48),
     ])
   }
 
@@ -177,17 +126,18 @@ private final class DashboardHeaderView: NSView {
 
   private static func subtitle(states: [ProviderViewState], isRefreshing: Bool, now: Date) -> String
   {
-    if isRefreshing { return "Refreshing subscription limits…" }
-    guard let latest = states.compactMap({ $0.snapshot?.fetchedAt }).max() else {
-      return "Subscription limits · waiting for first refresh"
+    if isRefreshing { return "Refreshing limits and 30-day local usage…" }
+    let dates = states.flatMap { state in
+      [state.snapshot?.fetchedAt, state.localUsage?.fetchedAt].compactMap { $0 }
     }
-    return "Subscription limits · \(DashboardFormat.updated(latest, now: now))"
+    guard let latest = dates.max() else { return "30-day local usage · waiting for first refresh" }
+    return "30-day local usage · \(DashboardFormat.updated(latest, now: now))"
   }
 }
 
 @MainActor
 private final class DashboardSummaryView: NSView {
-  init(states: [ProviderViewState], now: Date) {
+  init(states: [ProviderViewState]) {
     super.init(frame: .zero)
     self.wantsLayer = true
     self.layer?.backgroundColor = DashboardPalette.surface.cgColor
@@ -195,38 +145,30 @@ private final class DashboardSummaryView: NSView {
     self.layer?.borderWidth = 1
     self.layer?.cornerRadius = 13
 
-    let snapshots = states.compactMap(\.snapshot)
-    let live = states.filter { $0.snapshot != nil && $0.error == nil }.count
-    let windows = snapshots.flatMap(\.windows)
-    let nextReset = windows.compactMap(\.resetsAt).filter { $0 > now }.min()
-    let peak = windows.map(\.usedPercent).max()
-
+    let usage = states.compactMap(\.localUsage)
+    let tokens = usage.reduce(Int64(0)) { $0 + $1.totalTokens }
+    let apiValue = usage.reduce(0.0) { $0 + $1.apiEquivalentCostUSD }
+    let subscriptions = states.reduce(0.0) { $0 + $1.subscriptionCostUSD }
+    let saved = apiValue - subscriptions
     let row = NSStackView(views: [
+      DashboardMetric(label: "PROVIDERS", value: "\(states.count)", detail: "tracked"),
       DashboardMetric(
-        label: "LIVE", value: "\(live)/\(states.count)",
-        detail: live == states.count ? "connected" : "available"),
-      DashboardMetric(label: "LIMITS", value: "\(windows.count)", detail: "tracked"),
+        label: "TOKENS", value: DashboardFormat.tokens(tokens), detail: "last 30 days"),
       DashboardMetric(
-        label: "NEXT RESET",
-        value: nextReset.map { DashboardFormat.summaryCountdown(to: $0, now: now) } ?? "—",
-        detail: "soonest"),
-      DashboardMetric(
-        label: "PEAK USED", value: peak.map { String(format: "%.0f%%", $0) } ?? "—",
-        detail: "highest"),
+        label: "API VALUE", value: DashboardFormat.money(apiValue), detail: "equivalent"),
+      DashboardMetric(label: "SAVED", value: DashboardFormat.savings(saved), detail: "vs plans"),
     ])
     row.orientation = .horizontal
     row.alignment = .centerY
     row.distribution = .fillEqually
-    row.spacing = 0
     row.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(row)
     NSLayoutConstraint.activate([
       row.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 4),
       row.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -4),
-      row.topAnchor.constraint(equalTo: self.topAnchor, constant: 13),
-      row.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -13),
+      row.centerYAnchor.constraint(equalTo: self.centerYAnchor),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
-      self.heightAnchor.constraint(equalToConstant: 78),
+      self.heightAnchor.constraint(equalToConstant: 70),
     ])
   }
 
@@ -237,29 +179,24 @@ private final class DashboardSummaryView: NSView {
 private final class DashboardMetric: NSView {
   init(label: String, value: String, detail: String) {
     super.init(frame: .zero)
-    let labelView = DashboardLabel(
-      label, size: 8.5, weight: .medium, color: DashboardPalette.subtle)
-    let valueView = DashboardLabel(value, size: 17, weight: .medium, color: DashboardPalette.text)
-    valueView.font = .monospacedDigitSystemFont(ofSize: 17, weight: .medium)
-    let detailView = DashboardLabel(detail, size: 9, color: DashboardPalette.muted)
-    for label in [labelView, valueView, detailView] {
+    let heading = DashboardLabel(label, size: 8, weight: .medium, color: DashboardPalette.subtle)
+    let value = DashboardLabel(value, size: 16, weight: .medium, color: DashboardPalette.text)
+    value.font = .monospacedDigitSystemFont(ofSize: 16, weight: .medium)
+    let detail = DashboardLabel(detail, size: 8.5, color: DashboardPalette.muted)
+    for label in [heading, value, detail] {
       label.alignment = .center
       label.lineBreakMode = .byClipping
       label.widthAnchor.constraint(equalToConstant: 88).isActive = true
     }
-    if label == "NEXT RESET" {
-      valueView.font = .monospacedDigitSystemFont(ofSize: 15, weight: .medium)
-    }
-    let stack = NSStackView(views: [labelView, valueView, detailView])
+    let stack = NSStackView(views: [heading, value, detail])
     stack.orientation = .vertical
     stack.alignment = .centerX
-    stack.spacing = 3
+    stack.spacing = 2
     stack.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(stack)
     NSLayoutConstraint.activate([
       stack.centerXAnchor.constraint(equalTo: self.centerXAnchor),
       stack.centerYAnchor.constraint(equalTo: self.centerYAnchor),
-      self.widthAnchor.constraint(greaterThanOrEqualToConstant: 92),
     ])
   }
 
@@ -268,66 +205,37 @@ private final class DashboardMetric: NSView {
 
 @MainActor
 private final class ProviderDashboardCard: NSView {
-  init(state: ProviderViewState, now: Date, refresh: @escaping () -> Void) {
+  init(state: ProviderViewState, now: Date, isScanning: Bool) {
     super.init(frame: .zero)
     self.wantsLayer = true
     self.layer?.backgroundColor = DashboardPalette.card.cgColor
-    self.layer?.borderColor = state.provider.accent.withAlphaComponent(0.28).cgColor
+    self.layer?.borderColor = state.provider.accent.withAlphaComponent(0.30).cgColor
     self.layer?.borderWidth = 1
-    self.layer?.cornerRadius = 15
+    self.layer?.cornerRadius = 14
 
-    let content = NSStackView()
-    content.orientation = .vertical
-    content.alignment = .leading
-    content.spacing = 12
-    content.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(content)
+    let stack = NSStackView()
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = 8
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(stack)
     NSLayoutConstraint.activate([
-      content.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 16),
-      content.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -16),
-      content.topAnchor.constraint(equalTo: self.topAnchor, constant: 15),
-      content.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -14),
+      stack.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 14),
+      stack.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -14),
+      stack.topAnchor.constraint(equalTo: self.topAnchor, constant: 12),
+      stack.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -11),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
     ])
 
-    content.addArrangedSubview(self.header(state: state, refresh: refresh))
-    if let snapshot = state.snapshot, let primary = snapshot.windows.first {
-      content.addArrangedSubview(
-        PrimaryUsageView(window: primary, accent: state.provider.accent, now: now))
-      for window in snapshot.windows.dropFirst() {
-        content.addArrangedSubview(
-          CompactUsageView(window: window, accent: state.provider.accent, now: now))
-      }
-      if let spend = snapshot.includedSpend {
-        content.addArrangedSubview(IncludedSpendView(spend: spend, accent: state.provider.accent))
-      }
-      if let error = state.error {
-        content.addArrangedSubview(
-          StatusMessageView(
-            symbol: "clock.arrow.circlepath",
-            text: "Saved data · \(error)",
-            color: DashboardPalette.warning))
-      }
-      content.addArrangedSubview(self.metadata(snapshot: snapshot, stale: state.isStale, now: now))
-    } else if state.isRefreshing {
-      content.addArrangedSubview(
-        StatusMessageView(
-          symbol: "arrow.triangle.2.circlepath",
-          text: "Checking subscription usage…",
-          color: state.provider.accent))
-    } else {
-      content.addArrangedSubview(
-        StatusMessageView(
-          symbol: "exclamationmark.circle",
-          text: state.error ?? "No usage snapshot is available yet.",
-          color: DashboardPalette.warning))
-    }
+    stack.addArrangedSubview(Self.header(state: state))
+    stack.addArrangedSubview(EconomicsRow(state: state, isScanning: isScanning))
+    stack.addArrangedSubview(QuotaRow(state: state, now: now))
   }
 
   required init?(coder: NSCoder) { nil }
 
-  private func header(state: ProviderViewState, refresh: @escaping () -> Void) -> NSView {
-    let mark = ProviderMark(provider: state.provider)
+  private static func header(state: ProviderViewState) -> NSView {
+    let logo = ProviderLogo(provider: state.provider)
     let name = DashboardLabel(
       state.provider.displayName, size: 13, weight: .semibold, color: DashboardPalette.text)
     let status: String
@@ -345,101 +253,57 @@ private final class ProviderDashboardCard: NSView {
       status = "Connect"
       statusColor = DashboardPalette.warning
     }
-    let stateLabel = DashboardLabel("●  \(status)", size: 9.5, weight: .medium, color: statusColor)
+    let stateLabel = DashboardLabel("●  \(status)", size: 9, weight: .medium, color: statusColor)
     let identity = NSStackView(views: [name, stateLabel])
     identity.orientation = .vertical
     identity.alignment = .leading
-    identity.spacing = 2
-
-    let row = NSStackView()
+    identity.spacing = 1
+    let spacer = NSView()
+    spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let row = NSStackView(views: [logo, identity, spacer])
     row.orientation = .horizontal
     row.alignment = .centerY
     row.spacing = 9
-    row.addArrangedSubview(mark)
-    row.addArrangedSubview(identity)
-    let spacer = NSView()
-    spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-    spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    row.addArrangedSubview(spacer)
     if let plan = state.snapshot?.planName, !plan.isEmpty {
-      let pill = PillLabel(text: plan.uppercased())
-      pill.setContentHuggingPriority(.required, for: .horizontal)
-      pill.setContentCompressionResistancePriority(.required, for: .horizontal)
-      row.addArrangedSubview(pill)
+      row.addArrangedSubview(PillLabel(text: plan.uppercased()))
     }
-    let button = DashboardButton(
-      symbol: "arrow.clockwise", toolTip: "Refresh \(state.provider.displayName)", action: refresh)
-    button.identifier = NSUserInterfaceItemIdentifier("refresh-\(state.provider.rawValue)")
-    button.setContentHuggingPriority(.required, for: .horizontal)
-    button.setContentCompressionResistancePriority(.required, for: .horizontal)
-    row.addArrangedSubview(button)
     row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
     return row
   }
+}
 
-  private func metadata(snapshot: UsageSnapshot, stale: Bool, now: Date) -> NSView {
-    let source = DashboardLabel(snapshot.source, size: 9, color: DashboardPalette.subtle)
-    source.lineBreakMode = .byTruncatingTail
-    let updated = DashboardLabel(
-      DashboardFormat.age(snapshot.fetchedAt, now: now) + (stale ? " · saved" : ""),
-      size: 9,
-      color: stale ? DashboardPalette.warning : DashboardPalette.subtle)
-    updated.alignment = .right
-    let row = NSStackView(views: [source, NSView(), updated])
+@MainActor
+private final class EconomicsRow: NSView {
+  init(state: ProviderViewState, isScanning: Bool) {
+    super.init(frame: .zero)
+    let usage = state.localUsage
+    let api = usage.map {
+      DashboardFormat.money($0.apiEquivalentCostUSD, approximate: $0.isCostEstimate)
+    }
+    let plan = DashboardFormat.money(state.subscriptionCostUSD)
+    let saved = usage.map {
+      DashboardFormat.savings($0.apiEquivalentCostUSD - state.subscriptionCostUSD)
+    }
+    let row = NSStackView(views: [
+      EconomicsMetric(
+        label: "TOKENS",
+        value: usage.map { DashboardFormat.tokens($0.totalTokens) } ?? (isScanning ? "…" : "—")),
+      EconomicsMetric(label: "API VALUE", value: api ?? (isScanning ? "…" : "—")),
+      EconomicsMetric(label: "PLAN", value: plan),
+      EconomicsMetric(label: "SAVED", value: saved ?? "—", highlight: true),
+    ])
     row.orientation = .horizontal
     row.alignment = .centerY
-    row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
-    return row
-  }
-}
-
-@MainActor
-private final class PrimaryUsageView: NSView {
-  init(window: UsageWindow, accent: NSColor, now: Date) {
-    super.init(frame: .zero)
-    let label = DashboardLabel(
-      window.label.uppercased(), size: 9, weight: .medium, color: DashboardPalette.muted)
-    let used = DashboardLabel(
-      String(format: "%.0f%%", window.usedPercent), size: 30, weight: .medium,
-      color: DashboardPalette.text)
-    used.font = .monospacedDigitSystemFont(ofSize: 30, weight: .medium)
-    let remaining = DashboardLabel(
-      String(format: "%.0f%% remaining", max(0, 100 - window.usedPercent)),
-      size: 10,
-      color: DashboardPalette.muted)
-    remaining.alignment = .right
-
-    let bar = RoundedProgressView(value: window.usedPercent, color: accent)
-    let reset = DashboardLabel(
-      DashboardFormat.reset(window, now: now), size: 10, color: DashboardPalette.muted)
-    let duration = DashboardLabel(
-      DashboardFormat.windowDuration(window.windowMinutes), size: 9, color: DashboardPalette.subtle)
-    duration.alignment = .right
-    duration.setContentHuggingPriority(.required, for: .horizontal)
-    duration.setContentCompressionResistancePriority(.required, for: .horizontal)
-    duration.widthAnchor.constraint(equalToConstant: 62).isActive = true
-
-    for view in [label, used, remaining, bar, reset, duration] {
-      view.translatesAutoresizingMaskIntoConstraints = false
-      self.addSubview(view)
-    }
+    row.distribution = .fillEqually
+    row.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(row)
     NSLayoutConstraint.activate([
-      label.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      label.topAnchor.constraint(equalTo: self.topAnchor),
-      used.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      used.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 2),
-      remaining.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      remaining.firstBaselineAnchor.constraint(equalTo: used.firstBaselineAnchor),
-      bar.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      bar.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      bar.topAnchor.constraint(equalTo: used.bottomAnchor, constant: 8),
-      bar.heightAnchor.constraint(equalToConstant: 7),
-      reset.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      reset.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 7),
-      duration.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      duration.firstBaselineAnchor.constraint(equalTo: reset.firstBaselineAnchor),
-      reset.bottomAnchor.constraint(equalTo: self.bottomAnchor),
+      row.leadingAnchor.constraint(equalTo: self.leadingAnchor),
+      row.trailingAnchor.constraint(equalTo: self.trailingAnchor),
+      row.topAnchor.constraint(equalTo: self.topAnchor),
+      row.bottomAnchor.constraint(equalTo: self.bottomAnchor),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth),
+      self.heightAnchor.constraint(equalToConstant: 40),
     ])
   }
 
@@ -447,44 +311,28 @@ private final class PrimaryUsageView: NSView {
 }
 
 @MainActor
-private final class CompactUsageView: NSView {
-  init(window: UsageWindow, accent: NSColor, now: Date) {
+private final class EconomicsMetric: NSView {
+  init(label: String, value: String, highlight: Bool = false) {
     super.init(frame: .zero)
-    let divider = NSView()
-    divider.wantsLayer = true
-    divider.layer?.backgroundColor = DashboardPalette.border.cgColor
-    let label = DashboardLabel(
-      window.label, size: 10.5, weight: .medium, color: DashboardPalette.text)
+    let heading = DashboardLabel(label, size: 7.5, weight: .medium, color: DashboardPalette.subtle)
     let value = DashboardLabel(
-      String(format: "%.0f%%", window.usedPercent), size: 10.5, weight: .semibold,
-      color: DashboardPalette.text)
-    value.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
-    value.alignment = .right
-    let bar = RoundedProgressView(value: window.usedPercent, color: accent)
-    let reset = DashboardLabel(
-      DashboardFormat.compactReset(window, now: now), size: 9, color: DashboardPalette.subtle)
-
-    for view in [divider, label, value, bar, reset] {
-      view.translatesAutoresizingMaskIntoConstraints = false
-      self.addSubview(view)
+      value, size: 11.5, weight: .semibold,
+      color: highlight ? DashboardPalette.success : DashboardPalette.text)
+    value.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
+    for label in [heading, value] {
+      label.alignment = .center
+      label.lineBreakMode = .byClipping
+      label.widthAnchor.constraint(equalToConstant: 88).isActive = true
     }
+    let stack = NSStackView(views: [heading, value])
+    stack.orientation = .vertical
+    stack.alignment = .centerX
+    stack.spacing = 2
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(stack)
     NSLayoutConstraint.activate([
-      divider.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      divider.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      divider.topAnchor.constraint(equalTo: self.topAnchor),
-      divider.heightAnchor.constraint(equalToConstant: 1),
-      label.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      label.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 9),
-      value.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      value.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
-      bar.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      bar.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      bar.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 6),
-      bar.heightAnchor.constraint(equalToConstant: 5),
-      reset.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      reset.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 5),
-      reset.bottomAnchor.constraint(equalTo: self.bottomAnchor),
-      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth),
+      stack.centerXAnchor.constraint(equalTo: self.centerXAnchor),
+      stack.centerYAnchor.constraint(equalTo: self.centerYAnchor),
     ])
   }
 
@@ -492,54 +340,63 @@ private final class CompactUsageView: NSView {
 }
 
 @MainActor
-private final class IncludedSpendView: NSView {
-  init(spend: IncludedSpend, accent: NSColor) {
+private final class QuotaRow: NSView {
+  init(state: ProviderViewState, now: Date) {
     super.init(frame: .zero)
-    let percent =
-      spend.limitMinorUnits > 0
-      ? Double(spend.usedMinorUnits) / Double(spend.limitMinorUnits) * 100
-      : 0
     let divider = NSView()
     divider.wantsLayer = true
     divider.layer?.backgroundColor = DashboardPalette.border.cgColor
-    let label = DashboardLabel(
-      spend.label, size: 10.5, weight: .medium, color: DashboardPalette.text)
-    let amount = DashboardLabel(
-      "\(DashboardFormat.money(spend.usedMinorUnits, currency: spend.currencyCode)) / \(DashboardFormat.money(spend.limitMinorUnits, currency: spend.currencyCode))",
-      size: 10.5,
-      weight: .medium,
-      color: DashboardPalette.text)
-    amount.alignment = .right
-    amount.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-    amount.lineBreakMode = .byClipping
-    amount.setContentHuggingPriority(.required, for: .horizontal)
-    amount.setContentCompressionResistancePriority(.required, for: .horizontal)
-    amount.widthAnchor.constraint(equalToConstant: 126).isActive = true
-    let bar = RoundedProgressView(value: percent, color: accent)
-    let detail = DashboardLabel(
-      String(format: "%.0f%% used", percent), size: 9, color: DashboardPalette.subtle)
-    detail.alignment = .left
-    for view in [divider, label, amount, bar, detail] {
-      view.translatesAutoresizingMaskIntoConstraints = false
-      self.addSubview(view)
+    divider.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(divider)
+
+    let windows = state.snapshot?.windows ?? []
+    let highest = windows.max(by: { $0.usedPercent < $1.usedPercent })
+    let resetDates = windows.compactMap(\.resetsAt).filter { $0 > now }
+    let next = resetDates.min()
+    let title: String
+    let detail: String
+    if let highest {
+      title = "\(highest.label)  ·  \(String(format: "%.0f%%", highest.usedPercent)) used"
+      let count = resetDates.count
+      let noun = count == 1 ? "reset window" : "reset windows"
+      detail =
+        next.map {
+          "\(count) \(noun) · next \(DashboardFormat.countdown(to: $0, now: now)) · \(DashboardFormat.shortDate($0))"
+        } ?? "\(count) \(noun) · next reset unavailable"
+    } else {
+      title = "Quota unavailable"
+      detail = state.error ?? "Connect this provider to read reset windows."
     }
+    let heading = DashboardLabel(title, size: 9.5, weight: .medium, color: DashboardPalette.text)
+    let detailLabel = DashboardLabel(
+      detail, size: 8.5,
+      color: state.error == nil ? DashboardPalette.muted : DashboardPalette.warning)
+    detailLabel.lineBreakMode = .byTruncatingTail
+    let labels = NSStackView(views: [heading, detailLabel])
+    labels.orientation = .vertical
+    labels.alignment = .leading
+    labels.spacing = 2
+    labels.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(labels)
+
+    let bar = RoundedProgressView(value: highest?.usedPercent ?? 0, color: state.provider.accent)
+    bar.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(bar)
     NSLayoutConstraint.activate([
       divider.leadingAnchor.constraint(equalTo: self.leadingAnchor),
       divider.trailingAnchor.constraint(equalTo: self.trailingAnchor),
       divider.topAnchor.constraint(equalTo: self.topAnchor),
       divider.heightAnchor.constraint(equalToConstant: 1),
-      label.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      label.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 9),
-      amount.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      amount.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+      labels.leadingAnchor.constraint(equalTo: self.leadingAnchor),
+      labels.trailingAnchor.constraint(equalTo: self.trailingAnchor),
+      labels.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 7),
       bar.leadingAnchor.constraint(equalTo: self.leadingAnchor),
       bar.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      bar.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 6),
+      bar.topAnchor.constraint(equalTo: labels.bottomAnchor, constant: 5),
       bar.heightAnchor.constraint(equalToConstant: 5),
-      detail.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      detail.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 5),
-      detail.bottomAnchor.constraint(equalTo: self.bottomAnchor),
+      bar.bottomAnchor.constraint(equalTo: self.bottomAnchor),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth),
+      self.heightAnchor.constraint(equalToConstant: 47),
     ])
   }
 
@@ -547,37 +404,40 @@ private final class IncludedSpendView: NSView {
 }
 
 @MainActor
-private final class StatusMessageView: NSView {
-  init(symbol: String, text: String, color: NSColor) {
+private final class ProviderLogo: NSView {
+  init(provider: ProviderID) {
     super.init(frame: .zero)
+    self.identifier = NSUserInterfaceItemIdentifier("provider-logo-\(provider.rawValue)")
     self.wantsLayer = true
-    self.layer?.backgroundColor = color.withAlphaComponent(0.08).cgColor
+    self.layer?.backgroundColor = provider.accent.withAlphaComponent(0.13).cgColor
     self.layer?.cornerRadius = 9
-    let icon = NSImageView(
-      image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
-    icon.contentTintColor = color
-    let label = NSTextField(wrappingLabelWithString: text)
-    label.font = .systemFont(ofSize: 10)
-    label.textColor = DashboardPalette.muted
-    label.maximumNumberOfLines = 3
-    icon.translatesAutoresizingMaskIntoConstraints = false
-    label.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(icon)
-    self.addSubview(label)
+    let image = NSImageView(image: Self.image(provider: provider))
+    image.contentTintColor = provider.accent
+    image.imageScaling = .scaleProportionallyUpOrDown
+    image.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(image)
     NSLayoutConstraint.activate([
-      icon.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 10),
-      icon.centerYAnchor.constraint(equalTo: self.centerYAnchor),
-      icon.widthAnchor.constraint(equalToConstant: 14),
-      icon.heightAnchor.constraint(equalToConstant: 14),
-      label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
-      label.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -10),
-      label.topAnchor.constraint(equalTo: self.topAnchor, constant: 9),
-      label.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -9),
-      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth),
+      self.widthAnchor.constraint(equalToConstant: 32),
+      self.heightAnchor.constraint(equalToConstant: 32),
+      image.centerXAnchor.constraint(equalTo: self.centerXAnchor),
+      image.centerYAnchor.constraint(equalTo: self.centerYAnchor),
+      image.widthAnchor.constraint(equalToConstant: 18),
+      image.heightAnchor.constraint(equalToConstant: 18),
     ])
   }
 
   required init?(coder: NSCoder) { nil }
+
+  private static func image(provider: ProviderID) -> NSImage {
+    let url =
+      Bundle.module.url(
+        forResource: provider.resourceName, withExtension: "svg", subdirectory: "Resources")
+      ?? Bundle.module.url(forResource: provider.resourceName, withExtension: "svg")
+    let image = url.flatMap(NSImage.init(contentsOf:)) ?? NSImage()
+    image.isTemplate = true
+    image.accessibilityDescription = provider.displayName
+    return image
+  }
 }
 
 @MainActor
@@ -595,14 +455,14 @@ private final class EmptyProvidersView: NSView {
     let stack = NSStackView(views: [label, button])
     stack.orientation = .vertical
     stack.alignment = .centerX
-    stack.spacing = 10
+    stack.spacing = 8
     stack.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(stack)
     NSLayoutConstraint.activate([
       stack.centerXAnchor.constraint(equalTo: self.centerXAnchor),
       stack.centerYAnchor.constraint(equalTo: self.centerYAnchor),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
-      self.heightAnchor.constraint(equalToConstant: 110),
+      self.heightAnchor.constraint(equalToConstant: 100),
     ])
   }
 
@@ -624,10 +484,10 @@ private final class DashboardFooterView: NSView {
     let row = NSStackView(views: [settings, NSView(), quit])
     row.orientation = .horizontal
     row.alignment = .centerY
-    line.translatesAutoresizingMaskIntoConstraints = false
-    row.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(line)
-    self.addSubview(row)
+    for view in [line, row] {
+      view.translatesAutoresizingMaskIntoConstraints = false
+      self.addSubview(view)
+    }
     NSLayoutConstraint.activate([
       line.leadingAnchor.constraint(equalTo: self.leadingAnchor),
       line.trailingAnchor.constraint(equalTo: self.trailingAnchor),
@@ -635,36 +495,10 @@ private final class DashboardFooterView: NSView {
       line.heightAnchor.constraint(equalToConstant: 1),
       row.leadingAnchor.constraint(equalTo: self.leadingAnchor),
       row.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      row.topAnchor.constraint(equalTo: line.bottomAnchor, constant: 10),
+      row.topAnchor.constraint(equalTo: line.bottomAnchor, constant: 6),
       row.bottomAnchor.constraint(equalTo: self.bottomAnchor),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
-    ])
-  }
-
-  required init?(coder: NSCoder) { nil }
-}
-
-@MainActor
-private final class ProviderMark: NSView {
-  init(provider: ProviderID) {
-    super.init(frame: .zero)
-    self.wantsLayer = true
-    self.layer?.backgroundColor = provider.accent.withAlphaComponent(0.13).cgColor
-    self.layer?.cornerRadius = 10
-    let image = NSImageView(
-      image: NSImage(
-        systemSymbolName: provider.symbol, accessibilityDescription: provider.displayName)
-        ?? NSImage())
-    image.contentTintColor = provider.accent
-    image.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(image)
-    NSLayoutConstraint.activate([
-      self.widthAnchor.constraint(equalToConstant: 34),
-      self.heightAnchor.constraint(equalToConstant: 34),
-      image.centerXAnchor.constraint(equalTo: self.centerXAnchor),
-      image.centerYAnchor.constraint(equalTo: self.centerYAnchor),
-      image.widthAnchor.constraint(equalToConstant: 17),
-      image.heightAnchor.constraint(equalToConstant: 17),
+      self.heightAnchor.constraint(equalToConstant: 28),
     ])
   }
 
@@ -682,13 +516,13 @@ private final class PillLabel: NSTextField {
     self.drawsBackground = true
     self.backgroundColor = DashboardPalette.surfaceRaised
     self.textColor = DashboardPalette.muted
-    self.font = .systemFont(ofSize: 8.5, weight: .medium)
+    self.font = .systemFont(ofSize: 8, weight: .medium)
     self.alignment = .center
     self.wantsLayer = true
     self.layer?.cornerRadius = 6
-    self.heightAnchor.constraint(equalToConstant: 22).isActive = true
     let measured = (text as NSString).size(withAttributes: [.font: self.font as Any]).width
-    self.widthAnchor.constraint(equalToConstant: min(112, max(38, measured + 18))).isActive = true
+    self.widthAnchor.constraint(equalToConstant: min(118, max(38, measured + 18))).isActive = true
+    self.heightAnchor.constraint(equalToConstant: 21).isActive = true
   }
 
   required init?(coder: NSCoder) { nil }
@@ -758,7 +592,7 @@ private final class DashboardTextButton: NSButton {
     self.title = title
     self.image = symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: title) }
     self.imagePosition = symbol == nil ? .noImage : .imageLeading
-    self.font = .systemFont(ofSize: 10.5, weight: .medium)
+    self.font = .systemFont(ofSize: 10, weight: .medium)
     self.contentTintColor = DashboardPalette.muted
     self.isBordered = false
     self.target = self
@@ -786,16 +620,12 @@ private final class DashboardLabel: NSTextField {
   required init?(coder: NSCoder) { nil }
 }
 
-@MainActor
-private final class FlippedView: NSView {
-  override var isFlipped: Bool { true }
-}
-
 private enum DashboardMetrics {
   static let width: CGFloat = 444
-  static let height: CGFloat = 700
-  static let contentWidth: CGFloat = 400
-  static let cardContentWidth: CGFloat = 368
+  static let height: CGFloat = 748
+  static let contentWidth: CGFloat = 404
+  static let cardContentWidth: CGFloat = 376
+  static let size = NSSize(width: width, height: height)
 }
 
 private enum DashboardPalette {
@@ -821,70 +651,70 @@ extension ProviderID {
     }
   }
 
-  fileprivate var symbol: String {
+  fileprivate var resourceName: String {
     switch self {
-    case .openAI: "circle.hexagongrid.fill"
-    case .anthropic: "sun.max.fill"
-    case .grok: "xmark"
+    case .openAI: "openai"
+    case .anthropic: "anthropic"
+    case .grok: "grok"
     }
   }
 }
 
 private enum DashboardFormat {
-  static func reset(_ window: UsageWindow, now: Date) -> String {
-    guard let date = window.resetsAt else { return "Reset time unavailable" }
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM d, h:mm a"
-    let absolute = formatter.string(from: date)
-    return "Resets \(self.compactCountdown(to: date, now: now)) · \(absolute)"
+  static func tokens(_ value: Int64) -> String {
+    let number = Double(value)
+    if value >= 1_000_000_000 { return Self.compact(number / 1_000_000_000, suffix: "B") }
+    if value >= 1_000_000 { return Self.compact(number / 1_000_000, suffix: "M") }
+    if value >= 1_000 { return Self.compact(number / 1_000, suffix: "K") }
+    return "\(value)"
   }
 
-  static func compactReset(_ window: UsageWindow, now: Date) -> String {
-    guard let date = window.resetsAt else { return "Reset unavailable" }
-    return "Resets \(self.compactCountdown(to: date, now: now))"
+  static func money(_ value: Double, approximate: Bool = false) -> String {
+    let prefix = approximate ? "~" : ""
+    if value >= 1_000_000 {
+      return prefix + Self.compact(value / 1_000_000, prefix: "$", suffix: "M")
+    }
+    if value >= 10_000 { return prefix + Self.compact(value / 1_000, prefix: "$", suffix: "K") }
+    let formatter = NumberFormatter()
+    formatter.numberStyle = .currency
+    formatter.currencyCode = "USD"
+    formatter.maximumFractionDigits = value < 100 ? 2 : 0
+    return prefix + (formatter.string(from: NSNumber(value: value)) ?? "$—")
   }
 
-  static func compactCountdown(to date: Date, now: Date) -> String {
-    let seconds = date.timeIntervalSince(now)
-    if seconds <= 0 { return "due" }
-    let minutes = max(1, Int(seconds / 60))
-    let days = minutes / 1440
-    let hours = (minutes % 1440) / 60
-    let remainder = minutes % 60
-    if days > 0 { return hours > 0 ? "in \(days)d \(hours)h" : "in \(days)d" }
-    if hours > 0 { return remainder > 0 ? "in \(hours)h \(remainder)m" : "in \(hours)h" }
-    return "in \(remainder)m"
-  }
-
-  static func summaryCountdown(to date: Date, now: Date) -> String {
-    self.compactCountdown(to: date, now: now).replacingOccurrences(of: "in ", with: "")
+  static func savings(_ value: Double) -> String {
+    value >= 0 ? Self.money(value) : "−" + Self.money(abs(value))
   }
 
   static func updated(_ date: Date, now: Date) -> String {
-    "updated \(self.age(date, now: now))"
-  }
-
-  static func age(_ date: Date, now: Date) -> String {
     let seconds = max(0, now.timeIntervalSince(date))
-    if seconds < 60 { return "just now" }
-    if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
-    if seconds < 86400 { return "\(Int(seconds / 3600))h ago" }
-    return "\(Int(seconds / 86400))d ago"
+    if seconds < 60 { return "updated just now" }
+    if seconds < 3600 { return "updated \(Int(seconds / 60))m ago" }
+    return "updated \(Int(seconds / 3600))h ago"
   }
 
-  static func windowDuration(_ minutes: Int?) -> String {
-    guard let minutes else { return "Rolling limit" }
-    if minutes % 10080 == 0 { return "\(minutes / 10080)w window" }
-    if minutes % 1440 == 0 { return "\(minutes / 1440)d window" }
-    if minutes % 60 == 0 { return "\(minutes / 60)h window" }
-    return "\(minutes)m window"
+  static func countdown(to date: Date, now: Date) -> String {
+    let minutes = max(0, Int(date.timeIntervalSince(now) / 60))
+    let days = minutes / 1440
+    let hours = (minutes % 1440) / 60
+    let remainder = minutes % 60
+    if days > 0 { return "in \(days)d \(hours)h" }
+    if hours > 0 { return "in \(hours)h \(remainder)m" }
+    return "in \(remainder)m"
   }
 
-  static func money(_ minorUnits: Int, currency: String) -> String {
-    let formatter = NumberFormatter()
-    formatter.numberStyle = .currency
-    formatter.currencyCode = currency
-    formatter.maximumFractionDigits = minorUnits % 100 == 0 ? 0 : 2
-    return formatter.string(from: NSNumber(value: Double(minorUnits) / 100)) ?? "—"
+  static func shortDate(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMM d, h:mm a"
+    return formatter.string(from: date)
+  }
+
+  private static func compact(
+    _ value: Double,
+    prefix: String = "",
+    suffix: String
+  ) -> String {
+    let digits = value >= 100 ? 0 : value >= 10 ? 1 : 2
+    return prefix + String(format: "%.*f", digits, value) + suffix
   }
 }

@@ -42,11 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if let renderIndex,
       CommandLine.arguments.indices.contains(renderIndex + 1)
     {
-      let offset =
-        CommandLine.arguments.indices.contains(renderIndex + 2)
-        ? Double(CommandLine.arguments[renderIndex + 2]) ?? 0
-        : 0
-      self.renderDashboard(path: CommandLine.arguments[renderIndex + 1], scrollOffset: offset)
+      self.renderDashboard(path: CommandLine.arguments[renderIndex + 1])
     } else if isUISelfTest {
       self.runUISelfTest()
     } else if CommandLine.arguments.contains("--show-settings") {
@@ -59,14 +55,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
-  private func renderDashboard(path: String, scrollOffset: Double) {
+  private func renderDashboard(path: String) {
     guard let statusController = self.statusController else {
       Self.finishUISelfTest(success: false, details: "dashboard controller was not created")
       return
     }
     do {
-      try statusController.renderDashboard(
-        to: URL(fileURLWithPath: path), scrollOffset: CGFloat(scrollOffset))
+      try statusController.renderDashboard(to: URL(fileURLWithPath: path))
       Self.finishUISelfTest(success: true, details: "dashboard rendered to \(path)")
     } catch {
       Self.finishUISelfTest(success: false, details: "dashboard render failed: \(error)")

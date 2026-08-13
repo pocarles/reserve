@@ -14,7 +14,8 @@ let package = Package(
         .target(name: "UsageBarCore"),
         .executableTarget(
             name: "UsageBar",
-            dependencies: ["UsageBarCore"]),
+            dependencies: ["UsageBarCore"],
+            resources: [.copy("Resources")]),
         .executableTarget(
             name: "UsageBarProbe",
             dependencies: ["UsageBarCore"]),

@@ -2,7 +2,7 @@
 
 Usage Bar is informed by and contains small adapted implementation patterns from
 [CodexBar](https://github.com/steipete/CodexBar), inspected at commit
-`d14c3242d88e09fdcdb7f33d6bdc1a6c7a7769a2`.
+`89ee92124fdab4fe353ffeb48daba9be655fc70d`.
 
 CodexBar is distributed under the following license:
 
@@ -28,5 +28,6 @@ CodexBar is distributed under the following license:
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
-No CodexBar assets, WebKit integration, cookie extraction, history database,
-widget code, updater code, or provider registry is included.
+The OpenAI, Anthropic, and Grok provider SVGs are adapted from CodexBar's
+MIT-licensed provider icon resources. No WebKit integration, cookie extraction,
+history database, widget code, updater code, or provider registry is included.

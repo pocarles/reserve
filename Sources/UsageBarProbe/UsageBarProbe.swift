@@ -9,6 +9,10 @@ struct UsageBarProbe {
     let allowClaudeKeychainRead =
       appDefaults?.bool(forKey: "anthropic.keychainReadAllowed") ?? false
     let argument = CommandLine.arguments.dropFirst().first
+    if argument?.lowercased() == "local" {
+      await self.printLocalUsage()
+      return
+    }
     let selected: [ProviderID]
     switch argument?.lowercased() {
     case "openai": selected = [.openAI]
@@ -17,7 +21,7 @@ struct UsageBarProbe {
     case nil, "all": selected = ProviderID.allCases
     default:
       FileHandle.standardError.write(
-        Data("Usage: usagebar-probe [openai|anthropic|grok|all]\n".utf8))
+        Data("Usage: usagebar-probe [openai|anthropic|grok|local|all]\n".utf8))
       exit(64)
     }
 
@@ -45,6 +49,21 @@ struct UsageBarProbe {
     FileHandle.standardOutput.write(data)
     FileHandle.standardOutput.write(Data([0x0A]))
     if !failures.isEmpty { exit(1) }
+  }
+
+  private static func printLocalUsage() async {
+    do {
+      let summaries = try await LocalUsageScanner().scan(periodDays: 30)
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+      encoder.dateEncodingStrategy = .iso8601
+      let values = ProviderID.allCases.compactMap { summaries[$0] }
+      FileHandle.standardOutput.write(try encoder.encode(values))
+      FileHandle.standardOutput.write(Data([0x0A]))
+    } catch {
+      FileHandle.standardError.write(Data("Local usage scan failed: \(error)\n".utf8))
+      exit(1)
+    }
   }
 }
 

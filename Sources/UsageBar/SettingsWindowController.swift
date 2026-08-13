@@ -3,13 +3,13 @@ import ServiceManagement
 import UsageBarCore
 
 @MainActor
-final class SettingsWindowController: NSWindowController {
+final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
   private let store: UsageStore
 
   init(store: UsageStore) {
     self.store = store
     let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 500, height: 520),
+      contentRect: NSRect(x: 0, y: 0, width: 500, height: 650),
       styleMask: [.titled, .closable],
       backing: .buffered,
       defer: true)
@@ -41,6 +41,7 @@ final class SettingsWindowController: NSWindowController {
       !($0 is NSPopUpButton)
     }
     let popups = descendants.compactMap { $0 as? NSPopUpButton }
+    let subscriptionFields = descendants.compactMap { $0 as? NSTextField }.filter(\.isEditable)
     let checkboxTitles = Set(checkboxes.map(\.title))
     let expectedCheckboxTitles = Set(
       ProviderID.allCases.map(\.displayName)
@@ -53,10 +54,11 @@ final class SettingsWindowController: NSWindowController {
       window.title == "Usage Bar Settings"
       && checkboxTitles == expectedCheckboxTitles
       && popups.count == 1
+      && subscriptionFields.count == ProviderID.allCases.count
       && popups.first?.itemTitles == expectedIntervals
       && stackFits
     let details =
-      "settings has \(checkboxes.count) checkboxes, \(popups.count) interval picker, and fitting content"
+      "settings has \(checkboxes.count) checkboxes, \(subscriptionFields.count) subscription fields, \(popups.count) interval picker, and fitting content"
     return (success, details)
   }
 
@@ -102,6 +104,13 @@ final class SettingsWindowController: NSWindowController {
         "If Claude is signed out or expired, run `claude auth login` in Terminal, then Refresh All."
       ))
 
+    stack.addArrangedSubview(self.heading("Monthly subscription costs"))
+    for provider in ProviderID.allCases {
+      stack.addArrangedSubview(self.subscriptionCostRow(provider))
+    }
+    stack.addArrangedSubview(
+      self.note("Used only to compare the rolling 30-day API equivalent with your actual plan."))
+
     stack.addArrangedSubview(self.heading("Refresh"))
     let popup = NSPopUpButton()
     popup.addItems(withTitles: ["Every 10 minutes", "Every 15 minutes", "Every 30 minutes"])
@@ -121,7 +130,7 @@ final class SettingsWindowController: NSWindowController {
     stack.addArrangedSubview(self.heading("Privacy"))
     stack.addArrangedSubview(
       self.note(
-        "The cache contains normalized usage, reset dates, provider and plan labels, and optional included-spend totals. OAuth tokens, cookies, authorization headers, account identifiers, and raw responses are never cached."
+        "The cache contains normalized limits and aggregate 30-day token totals. Local file paths are hashed. OAuth tokens, prompts, responses, account identifiers, and raw provider data are never cached."
       ))
     return root
   }
@@ -141,6 +150,31 @@ final class SettingsWindowController: NSWindowController {
     return label
   }
 
+  private func subscriptionCostRow(_ provider: ProviderID) -> NSView {
+    let label = NSTextField(labelWithString: provider.displayName)
+    label.font = .systemFont(ofSize: 11)
+    label.widthAnchor.constraint(equalToConstant: 105).isActive = true
+    let currency = NSTextField(labelWithString: "$")
+    currency.textColor = .secondaryLabelColor
+    let field = NSTextField(
+      string: String(format: "%.0f", self.store.monthlySubscriptionCost(for: provider)))
+    field.identifier = NSUserInterfaceItemIdentifier("subscription.\(provider.rawValue)")
+    field.alignment = .right
+    field.formatter = NumberFormatter()
+    field.delegate = self
+    field.target = self
+    field.action = #selector(self.subscriptionCostChanged(_:))
+    field.widthAnchor.constraint(equalToConstant: 70).isActive = true
+    let suffix = NSTextField(labelWithString: "/ month")
+    suffix.font = .systemFont(ofSize: 10)
+    suffix.textColor = .secondaryLabelColor
+    let row = NSStackView(views: [label, currency, field, suffix])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 5
+    return row
+  }
+
   @objc private func providerChanged(_ sender: NSButton) {
     guard let raw = sender.identifier?.rawValue, let provider = ProviderID(rawValue: raw) else {
       return
@@ -154,6 +188,20 @@ final class SettingsWindowController: NSWindowController {
 
   @objc private func intervalChanged(_ sender: NSPopUpButton) {
     self.store.refreshIntervalMinutes = [10, 15, 30][max(0, sender.indexOfSelectedItem)]
+  }
+
+  @objc private func subscriptionCostChanged(_ sender: NSTextField) {
+    guard let raw = sender.identifier?.rawValue.split(separator: ".").last,
+      let provider = ProviderID(rawValue: String(raw))
+    else { return }
+    self.store.setMonthlySubscriptionCost(sender.doubleValue, for: provider)
+  }
+
+  func controlTextDidEndEditing(_ notification: Notification) {
+    guard let field = notification.object as? NSTextField,
+      field.identifier?.rawValue.hasPrefix("subscription.") == true
+    else { return }
+    self.subscriptionCostChanged(field)
   }
 
   @objc private func loginChanged(_ sender: NSButton) {

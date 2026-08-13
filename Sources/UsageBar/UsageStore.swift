@@ -7,6 +7,8 @@ struct ProviderViewState: Identifiable {
   var snapshot: UsageSnapshot?
   var error: String?
   var isRefreshing = false
+  var localUsage: LocalUsageSummary?
+  var subscriptionCostUSD: Double = 0
 
   var isStale: Bool {
     guard let snapshot else { return false }
@@ -18,9 +20,11 @@ struct ProviderViewState: Identifiable {
 final class UsageStore {
   private(set) var states: [ProviderID: ProviderViewState]
   private(set) var isRefreshingAll = false
+  private(set) var isScanningLocalUsage = false
   var onChange: (() -> Void)?
 
   private let cache = SnapshotCache()
+  private let localUsageScanner = LocalUsageScanner()
   private let defaults: UserDefaults
   private var schedulerTask: Task<Void, Never>?
   private var startupTask: Task<Void, Never>?
@@ -45,7 +49,11 @@ final class UsageStore {
   }
 
   var orderedStates: [ProviderViewState] {
-    ProviderID.allCases.compactMap { self.states[$0] }
+    ProviderID.allCases.compactMap { provider in
+      guard var state = self.states[provider] else { return nil }
+      state.subscriptionCostUSD = self.monthlySubscriptionCost(for: provider)
+      return state
+    }
   }
 
   var statusSymbol: String {
@@ -82,6 +90,7 @@ final class UsageStore {
     guard !self.isRefreshingAll else { return }
     if !manual, ProcessInfo.processInfo.isLowPowerModeEnabled { return }
     self.isRefreshingAll = true
+    self.refreshLocalUsage()
     self.changed()
     Task { await self.performRefreshAll() }
   }
@@ -101,6 +110,33 @@ final class UsageStore {
     self.defaults.bool(forKey: "provider.\(provider.rawValue).enabled")
   }
 
+  func monthlySubscriptionCost(for provider: ProviderID) -> Double {
+    let key = "subscription.monthlyCost.\(provider.rawValue)"
+    if self.defaults.object(forKey: key) != nil {
+      return max(0, self.defaults.double(forKey: key))
+    }
+    let plan = self.states[provider]?.snapshot?.planName?.lowercased() ?? ""
+    switch provider {
+    case .openAI:
+      if plan.contains("plus") { return 20 }
+      if plan.contains("business") || plan.contains("team") { return 30 }
+      return 200
+    case .anthropic:
+      if plan.contains("20") { return 200 }
+      if plan.contains("5") || plan.contains("premium") { return 100 }
+      if plan.contains("team") { return 25 }
+      return 20
+    case .grok:
+      if plan.contains("heavy") { return 300 }
+      return 30
+    }
+  }
+
+  func setMonthlySubscriptionCost(_ value: Double, for provider: ProviderID) {
+    self.defaults.set(max(0, value), forKey: "subscription.monthlyCost.\(provider.rawValue)")
+    self.changed()
+  }
+
   func installPreviewSnapshots(now: Date = Date()) {
     self.states[.openAI] = ProviderViewState(
       provider: .openAI,
@@ -116,7 +152,11 @@ final class UsageStore {
             windowMinutes: 10080, resetsAt: now.addingTimeInterval(4.2 * 86400)),
         ],
         fetchedAt: now.addingTimeInterval(-48),
-        source: "Codex app-server"))
+        source: "Codex app-server"),
+      localUsage: LocalUsageSummary(
+        provider: .openAI, periodDays: 30, inputTokens: 18_620_000_000,
+        cachedInputTokens: 15_900_000_000, cacheWriteInputTokens: 48_000_000,
+        outputTokens: 92_000_000, apiEquivalentCostUSD: 9_995.11))
     self.states[.anthropic] = ProviderViewState(
       provider: .anthropic,
       snapshot: UsageSnapshot(
@@ -136,7 +176,11 @@ final class UsageStore {
         fetchedAt: now.addingTimeInterval(-83),
         source: "Claude OAuth",
         includedSpend: IncludedSpend(
-          label: "Extra usage", usedMinorUnits: 2_845, limitMinorUnits: 10_000)))
+          label: "Extra usage", usedMinorUnits: 2_845, limitMinorUnits: 10_000)),
+      localUsage: LocalUsageSummary(
+        provider: .anthropic, periodDays: 30, inputTokens: 3_750_000_000,
+        cachedInputTokens: 3_100_000_000, cacheWriteInputTokens: 330_000_000,
+        outputTokens: 62_200_000, apiEquivalentCostUSD: 4_173.96))
     self.states[.grok] = ProviderViewState(
       provider: .grok,
       snapshot: UsageSnapshot(
@@ -150,7 +194,10 @@ final class UsageStore {
         fetchedAt: now.addingTimeInterval(-126),
         source: "Grok Build billing API",
         includedSpend: IncludedSpend(
-          label: "Included credits", usedMinorUnits: 12_345, limitMinorUnits: 99_900)))
+          label: "Included credits", usedMinorUnits: 12_345, limitMinorUnits: 99_900)),
+      localUsage: LocalUsageSummary(
+        provider: .grok, periodDays: 30, inputTokens: 820_000_000,
+        outputTokens: 0, apiEquivalentCostUSD: 1_640, isCostEstimate: true))
     self.changed()
   }
 
@@ -175,7 +222,27 @@ final class UsageStore {
     }
     self.changed()
     self.startScheduler()
+    self.refreshLocalUsage()
     self.refreshAll(manual: false)
+  }
+
+  private func refreshLocalUsage() {
+    guard !self.isScanningLocalUsage else { return }
+    self.isScanningLocalUsage = true
+    self.changed()
+    Task { [weak self] in
+      guard let self else { return }
+      let result = try? await self.localUsageScanner.scan(periodDays: 30)
+      await MainActor.run {
+        if let result {
+          for provider in ProviderID.allCases {
+            self.states[provider]?.localUsage = result[provider]
+          }
+        }
+        self.isScanningLocalUsage = false
+        self.changed()
+      }
+    }
   }
 
   private func startScheduler() {

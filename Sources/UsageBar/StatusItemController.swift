@@ -11,7 +11,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     store: self.store,
     actions: DashboardActions(
       refreshAll: { [weak self] in self?.store.refreshAll() },
-      refreshProvider: { [weak self] provider in self?.store.refresh(provider) },
       openSettings: { [weak self] in self?.showSettings() },
       quit: { NSApplication.shared.terminate(nil) }))
 
@@ -53,31 +52,36 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       identifiers.contains("refresh-all")
       && identifiers.contains("open-settings")
       && identifiers.contains("quit-app")
+    let logosPresent = ProviderID.allCases.allSatisfy {
+      identifiers.contains("provider-logo-\($0.rawValue)")
+    }
+    let hasScrollView = descendants.contains { $0 is NSScrollView }
+    let contentFits =
+      descendants.compactMap { $0 as? NSStackView }.first.map {
+        $0.frame.minY >= 0 && $0.frame.maxY <= self.dashboardController.view.bounds.height
+      } ?? false
     let dashboardFits =
       self.dashboardController.preferredContentSize.width == 444
-      && self.dashboardController.preferredContentSize.height == 700
-    guard providerCards == ProviderID.allCases.count, actionsPresent, dashboardFits else {
+      && self.dashboardController.preferredContentSize.height == 748
+    guard providerCards == ProviderID.allCases.count, actionsPresent, logosPresent,
+      !hasScrollView, contentFits, dashboardFits
+    else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), size=\(dashboardFits)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits)"
       )
     }
     return (
       true,
-      "dashboard has \(providerCards) provider cards, summary indicators, and all actions"
+      "dashboard has \(providerCards) provider cards with logos, economics, resets, no scrolling, and all actions"
     )
   }
 
-  func renderDashboard(to url: URL, scrollOffset: CGFloat = 0) throws {
+  func renderDashboard(to url: URL) throws {
     self.dashboardController.loadViewIfNeeded()
     let view = self.dashboardController.view
     view.frame = NSRect(origin: .zero, size: self.dashboardController.preferredContentSize)
     view.layoutSubtreeIfNeeded()
-    if let scroll = Self.descendants(of: view).compactMap({ $0 as? NSScrollView }).first {
-      scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, scrollOffset)))
-      scroll.reflectScrolledClipView(scroll.contentView)
-      view.layoutSubtreeIfNeeded()
-    }
     guard let representation = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
       throw DashboardRenderError.bitmapUnavailable
     }
