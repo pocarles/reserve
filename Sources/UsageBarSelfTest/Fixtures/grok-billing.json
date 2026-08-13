@@ -1,0 +1,13 @@
+{
+  "config": {
+    "creditUsagePercent": 42.5,
+    "currentPeriod": {
+      "type": "USAGE_PERIOD_TYPE_WEEKLY",
+      "start": "2026-08-10T12:00:00Z",
+      "end": "2026-08-17T12:00:00Z"
+    },
+    "prepaidBalance": { "val": 0 }
+  },
+  "onDemandEnabled": false,
+  "subscriptionTier": "SuperGrok Heavy"
+}

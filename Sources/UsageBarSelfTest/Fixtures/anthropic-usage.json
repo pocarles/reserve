@@ -1,0 +1,14 @@
+{
+  "five_hour": { "utilization": 14.2, "resets_at": "2026-08-13T18:00:00Z" },
+  "seven_day": { "utilization": 52.1, "resets_at": "2026-08-17T12:00:00Z" },
+  "seven_day_sonnet": { "utilization": 31, "resets_at": "2026-08-17T12:00:00Z" },
+  "limits": [
+    {
+      "kind": "weekly_scoped",
+      "percent": 9.5,
+      "resets_at": "2026-08-17T12:00:00Z",
+      "is_active": true,
+      "scope": { "model": { "id": "fable", "display_name": "Fable" } }
+    }
+  ]
+}
