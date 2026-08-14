@@ -166,11 +166,36 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         withState(previewSummaries[1], .reserve(percent: 12)),
         withState(previewSummaries[2], .reserve(percent: 18)),
       ])
+    let oneHealthyStale = AllowanceBuilder.headline(
+      for: [
+        withState(previewSummaries[0], .stale),
+        withState(previewSummaries[1], .reserve(percent: 12)),
+        withState(previewSummaries[2], .unknown),
+      ])
+    let mixedStale = AllowanceBuilder.headline(
+      for: [
+        withState(previewSummaries[0], .stale),
+        withState(previewSummaries[1], .reserve(percent: 12)),
+        withState(previewSummaries[2], .onPace),
+      ])
+    let mixedHealthy = AllowanceBuilder.headline(
+      for: [
+        withState(previewSummaries[0], .reserve(percent: 12)),
+        withState(previewSummaries[1], .onPace),
+        withState(previewSummaries[2], .onPace),
+      ])
     let aggregateCopyWorks =
       singleSummary.primary == "1 plan in deficit"
       && pluralSummary.primary == "2 plans in deficit"
       && pluralSummary.secondary.contains("8% in deficit")
       && staleSummary.primary == "1 plan needs an update"
+      && staleSummary.secondary.contains("2 other plans have reserve")
+      && oneHealthyStale.secondary.contains("1 other plan has reserve")
+      && !oneHealthyStale.secondary.contains("have reserve")
+      && mixedStale.secondary.contains("1 other plan has reserve")
+      && mixedStale.secondary.contains("1 is on pace")
+      && !mixedStale.secondary.contains("remain on pace")
+      && mixedHealthy.primary == "1 plan has reserve · 2 are on pace"
       && !staleSummary.primary.contains("All plans")
     let semanticColorsWork =
       UsagePaceState.reserve(percent: 10).color.isEqual(NSColor.systemGreen)

@@ -7,13 +7,9 @@ public actor SnapshotCache {
   private let maximumBytes = 100 * 1024
 
   public init(fileURL: URL? = nil) {
-    let applicationSupport = FileManager.default.urls(
-      for: .applicationSupportDirectory, in: .userDomainMask)[0]
     self.fileURL =
       fileURL
-      ?? applicationSupport
-      .appendingPathComponent("UsageBar", isDirectory: true)
-      .appendingPathComponent("snapshots.json")
+      ?? Self.defaultDirectory.appendingPathComponent("snapshots.json")
     self.encoder = JSONEncoder()
     self.encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     self.encoder.dateEncodingStrategy = .iso8601
@@ -50,14 +46,14 @@ public actor SnapshotCache {
     guard data.count <= self.maximumBytes else {
       throw UsageProviderError.invalidResponse("snapshot cache exceeded 100 KB")
     }
-    let directory = self.fileURL.deletingLastPathComponent()
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    try FileManager.default.setAttributes(
-      [.posixPermissions: NSNumber(value: Int16(0o700))],
-      ofItemAtPath: directory.path)
-    try data.write(to: self.fileURL, options: [.atomic])
-    try FileManager.default.setAttributes(
-      [.posixPermissions: NSNumber(value: Int16(0o600))],
-      ofItemAtPath: self.fileURL.path)
+    try BoundedFileReader.writeRestricted(data, to: self.fileURL)
+  }
+
+  private static var defaultDirectory: URL {
+    let root =
+      FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+      ?? FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support", isDirectory: true)
+    return root.appendingPathComponent("UsageBar", isDirectory: true)
   }
 }

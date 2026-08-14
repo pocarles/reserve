@@ -115,12 +115,16 @@ public enum UsagePaceState: Equatable, Sendable {
   case stale
   case unknown
 
+  /// How old a snapshot may be before its numbers stop counting as current.
+  /// Cards, headlines, and stale-data notifications all use this one value.
+  public static let stalenessLimit: TimeInterval = 30 * 60
+
   public static func calculate(
     for window: UsageWindow?,
     fetchedAt: Date?,
     hasError: Bool = false,
     now: Date = Date(),
-    stalenessLimit: TimeInterval = 30 * 60
+    stalenessLimit: TimeInterval = UsagePaceState.stalenessLimit
   ) -> UsagePaceState {
     guard let window else { return .unknown }
     if window.usedPercent >= 99.5 { return .exhausted }

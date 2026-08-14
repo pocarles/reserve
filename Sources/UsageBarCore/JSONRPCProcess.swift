@@ -5,15 +5,16 @@ final class JSONRPCProcess: @unchecked Sendable {
   private let input = Pipe()
   private let output = Pipe()
   private let errors = Pipe()
-  private let lineStream: AsyncStream<Data>
   private let continuation: AsyncStream<Data>.Continuation
+  private var lineIterator: AsyncStream<Data>.Iterator
   private let writeLock = NSLock()
   private var nextID = 1
 
   init(executable: String, arguments: [String], environment: [String: String]) throws {
     var streamContinuation: AsyncStream<Data>.Continuation!
-    self.lineStream = AsyncStream<Data> { streamContinuation = $0 }
+    let lineStream = AsyncStream<Data> { streamContinuation = $0 }
     self.continuation = streamContinuation
+    self.lineIterator = lineStream.makeAsyncIterator()
 
     self.process.executableURL = URL(fileURLWithPath: executable)
     self.process.arguments = arguments
@@ -162,7 +163,9 @@ final class JSONRPCProcess: @unchecked Sendable {
   }
 
   private func readMessage() async throws -> [String: Any] {
-    for await line in self.lineStream {
+    // One iterator for the life of the process. `AsyncStream` is single-consumer;
+    // a fresh `for await` on each call would abandon the previous iterator.
+    while let line = await self.lineIterator.next() {
       guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
         continue
       }

@@ -103,9 +103,6 @@ struct ProviderSummary {
 
 @MainActor
 enum AllowanceBuilder {
-  /// How old a snapshot may be before its numbers stop counting as current.
-  static let stalenessLimit: TimeInterval = 30 * 60
-
   static func summary(for state: ProviderViewState, now: Date = Date()) -> ProviderSummary {
     let windows = state.snapshot?.windows ?? []
     let primaryWindow =
@@ -114,8 +111,9 @@ enum AllowanceBuilder {
 
     let allowances = windows
       .sorted { lhs, rhs in
-        if lhs.id == primaryWindow?.id { return true }
-        if rhs.id == primaryWindow?.id { return false }
+        let lhsPrimary = lhs.id == primaryWindow?.id
+        let rhsPrimary = rhs.id == primaryWindow?.id
+        if lhsPrimary != rhsPrimary { return lhsPrimary }
         return (lhs.resetsAt ?? .distantFuture) < (rhs.resetsAt ?? .distantFuture)
       }
       .map { window in
@@ -130,13 +128,12 @@ enum AllowanceBuilder {
             for: window,
             fetchedAt: state.snapshot?.fetchedAt,
             hasError: state.error != nil,
-            now: now,
-            stalenessLimit: Self.stalenessLimit))
+            now: now))
       }
 
     let planName = state.snapshot?.planName?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let isStale =
-      state.snapshot.map { now.timeIntervalSince($0.fetchedAt) > Self.stalenessLimit } ?? false
+    let isStale = SmartAlertDetector.isStale(
+      lastUpdated: state.snapshot?.fetchedAt, now: now)
 
     return ProviderSummary(
       provider: state.provider,
@@ -254,28 +251,45 @@ enum AllowanceBuilder {
       "Next reset: \($0.provider.displayName) \(DashboardFormat.countdown(to: $0.date, now: now))"
     } ?? "Next reset unavailable"
     if !stale.isEmpty {
-      let known = reserve.count + onPace.count
-      let knownSummary = known == 0
-        ? "Current pace is unavailable"
-        : "\(known) other plan\(known == 1 ? "" : "s") "
-          + (onPace.isEmpty ? "have reserve" : "remain on pace")
+      let knownSummary = Self.healthySummary(
+        reserve: reserve.count, onPace: onPace.count, other: true)
+        ?? "Current pace is unavailable"
       return (
-        "\(stale.count) plan\(stale.count == 1 ? "" : "s") need\(stale.count == 1 ? "s" : "") an update",
+        Self.plans(stale.count, singular: "needs an update", plural: "need an update"),
         knownSummary + " · " + nextReset, .stale)
     }
     if !onPace.isEmpty {
       let primary = reserve.isEmpty
         ? "All plans are on pace"
-        : "\(reserve.count) plan\(reserve.count == 1 ? "" : "s") have reserve · "
-          + "\(onPace.count) \(onPace.count == 1 ? "is" : "are") on pace"
+        : (Self.healthySummary(
+          reserve: reserve.count, onPace: onPace.count, other: false) ?? "All plans are on pace")
       return (primary, nextReset, .onPace)
     }
     if !reserve.isEmpty {
       return ("All plans have reserve", nextReset, .reserve(percent: 0))
     }
     return (
-      "\(stale.count) provider\(stale.count == 1 ? "" : "s") need\(stale.count == 1 ? "s" : "") an update",
+      Self.plans(stale.count, singular: "needs an update", plural: "need an update"),
       "Current pace is unavailable", .stale)
+  }
+
+  /// "1 plan has reserve" / "2 other plans remain on pace".
+  private static func plans(_ count: Int, singular: String, plural: String, other: Bool = false)
+    -> String
+  {
+    "\(count)\(other ? " other" : "") plan\(count == 1 ? "" : "s") \(count == 1 ? singular : plural)"
+  }
+
+  private static func healthySummary(reserve: Int, onPace: Int, other: Bool) -> String? {
+    if reserve == 0, onPace == 0 { return nil }
+    if reserve == 0 {
+      return Self.plans(onPace, singular: "remains on pace", plural: "remain on pace", other: other)
+    }
+    if onPace == 0 {
+      return Self.plans(reserve, singular: "has reserve", plural: "have reserve", other: other)
+    }
+    return Self.plans(reserve, singular: "has reserve", plural: "have reserve", other: other)
+      + " · \(onPace) \(onPace == 1 ? "is" : "are") on pace"
   }
 
   private static func nextReset(in summaries: [ProviderSummary], now: Date) -> (

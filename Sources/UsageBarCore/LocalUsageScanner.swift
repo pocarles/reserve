@@ -128,7 +128,10 @@ public actor LocalUsageScanner {
   ) {
     self.roots = roots
     self.fileManager = fileManager
-    let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    let support =
+      fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+      ?? fileManager.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support", isDirectory: true)
     self.cacheURL =
       cacheURL
       ?? support.appendingPathComponent("UsageBar", isDirectory: true)
@@ -615,13 +618,7 @@ public actor LocalUsageScanner {
     guard data.count <= self.maximumCacheBytes else {
       throw UsageProviderError.invalidResponse("local usage index exceeded 12 MB")
     }
-    let directory = self.cacheURL.deletingLastPathComponent()
-    try self.fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-    try self.fileManager.setAttributes(
-      [.posixPermissions: NSNumber(value: Int16(0o700))], ofItemAtPath: directory.path)
-    try data.write(to: self.cacheURL, options: .atomic)
-    try self.fileManager.setAttributes(
-      [.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: self.cacheURL.path)
+    try BoundedFileReader.writeRestricted(data, to: self.cacheURL, fileManager: self.fileManager)
   }
 
   private func fileKey(provider: ProviderID, url: URL) -> String {

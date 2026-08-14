@@ -14,11 +14,6 @@ struct ProviderViewState: Identifiable {
   var renewalStart: Date?
   var nextRenewal: Date?
   var serviceStatus: ProviderServiceStatus?
-
-  var isStale: Bool {
-    guard let snapshot else { return false }
-    return self.error != nil || Date().timeIntervalSince(snapshot.fetchedAt) > 30 * 60
-  }
 }
 
 enum PreviewScenario: String, CaseIterable {

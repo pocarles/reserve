@@ -106,6 +106,8 @@ public enum UsageBarSelfTests {
       staying.isEmpty,
       neverInDeficit.isEmpty,
       entering[0].preferenceKey == "deficit",
+      UsagePaceState.stalenessLimit == 30 * 60,
+      SmartAlertDetector.stalenessLimit == UsagePaceState.stalenessLimit,
       SmartAlertDetector.isStale(
         lastUpdated: paceNow.addingTimeInterval(-31 * 60), now: paceNow),
       !SmartAlertDetector.isStale(

@@ -27,8 +27,8 @@ public enum SmartAlert: Equatable, Sendable {
 
 public enum SmartAlertDetector {
   /// How long a provider may go without a successful update before its numbers
-  /// stop counting as current.
-  public static let stalenessLimit: TimeInterval = 30 * 60
+  /// stop counting as current. Same value the pace state uses.
+  public static let stalenessLimit: TimeInterval = UsagePaceState.stalenessLimit
 
   /// Windows that crossed into a pace deficit since the previous snapshot.
   /// Only the transition is reported, so a persistent deficit stays quiet.
