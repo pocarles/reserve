@@ -239,7 +239,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         self.section(
           title: nil,
           footer: "Reserve detects the provider tools installed on this Mac and reuses their "
-            + "existing sign-ins. Open a provider for its plan, sources and permissions.",
+            + "existing sign-ins. Claude Keychain reuse stays off until you enable it. "
+            + "Open a provider for its plan, sources and permissions.",
           rows: rows)
       ])
   }
@@ -353,6 +354,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         self.section(title: nil, rows: [AboutHeaderView()]),
         self.section(
           title: "Updates",
+          footer: "Looks for a GitHub Release of this repo. There is none yet; this build is from source.",
           rows: [
             self.automaticUpdateCheckbox(),
             self.updateControls(),
@@ -454,10 +456,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             + "asks for a password and never stores a token.",
           rows: [
             self.bullets([
-              "Claude Code's Keychain item, only if you turn that on in Providers",
-              "Provider credential files such as ~/.claude/.credentials.json and "
-                + "~/.codex/auth.json",
-              "Session logs under ~/.claude, ~/.codex and ~/.grok, for token counts only",
+              "Claude Code's Keychain item, off until you enable it in Providers",
+              "~/.claude/.credentials.json and ~/.grok/auth.json",
+              "Session logs under ~/.claude/projects, ~/.codex/sessions and ~/.grok/sessions, "
+                + "for token counts only",
             ])
           ]),
         self.section(
@@ -667,6 +669,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         target: self, action: #selector(self.keychainChanged(_:)))
       checkbox.identifier = NSUserInterfaceItemIdentifier("settings-automatic-claude")
       checkbox.state = self.store.claudeKeychainReadAllowed ? .on : .off
+      checkbox.toolTip =
+        "Off by default. Reads Claude Code's Keychain item through Security.framework."
       rows.append(self.formRow("Permissions:", checkbox, labelWidth: 92))
     }
     let refresh = NSButton(

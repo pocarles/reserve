@@ -3,8 +3,7 @@
 Reserve is a deliberately small macOS menu-bar application that shows the
 subscription quota windows for OpenAI Codex, Anthropic Claude, and Grok.
 
-The project is currently private and pre-release. Do not publish the repository,
-create a public remote, or distribute builds without an explicit release decision.
+Build it on your Mac with `make run`. There is no official binary download.
 
 ## Product boundary
 
@@ -28,14 +27,14 @@ session files directly and keeps only daily aggregates.
 - `claude` logged into the Anthropic subscription
 - Grok Build 1.0.0 or newer, authenticated using `grok login`
 
-On first launch, Reserve immediately opens its dashboard, enables quiet launch
-at login, detects the three installed CLIs, reuses their existing sign-ins, and
-starts collecting the available local usage totals. There is no account wizard
-and no separate Reserve account. If a provider is signed out, one Connect click
-runs that provider's official CLI login (`codex login`, `claude auth login
---claudeai`, or `grok login --oauth`) and hands the sign-in to the default browser.
-Temporary login output stays in memory, URLs are restricted to that provider's
-HTTPS hosts, and neither is logged or cached.
+On first launch, Reserve opens its dashboard, detects the three installed CLIs,
+reuses their existing sign-ins, and starts collecting the available local usage
+totals. Launch at login stays off until you enable it in Settings. There is no
+account wizard and no separate Reserve account. If a provider is signed out, one
+Connect click runs that provider's official CLI login (`codex login`, `claude
+auth login --claudeai`, or `grok login --oauth`) and hands the sign-in to the
+default browser. Temporary login output stays in memory, URLs are restricted to
+that provider's HTTPS hosts, and neither is logged or cached.
 
 The practical zero-action path assumes the provider CLIs above are already
 installed and signed in. Reserve deliberately does not install or update those
@@ -54,7 +53,9 @@ make run
 
 `make run` creates an ad-hoc signed `Reserve.app` in the repository and opens it.
 The generated app is ignored by Git and includes the project license and
-third-party notices in its Resources directory.
+third-party notices in its Resources directory. An ad-hoc signature is enough to
+run Reserve on the Mac that built it. Gatekeeper will refuse a copied bundle on
+another machine.
 
 To test a provider without the menu UI:
 
@@ -72,6 +73,12 @@ The Anthropic probe honors the same explicit Keychain-consent setting as the app
 dashboard and settings window, then verifies the shared pace-state model, provider
 cards, automatic and pinned menu-bar modes, theme tokens, actions, checkboxes, and
 refresh decisions without retaining any test setting.
+
+## Sharing a build
+
+If someone else wants Reserve, they clone this repository and run `make run` on
+their Mac. Do not AirDrop or zip `Reserve.app`. That copy will not open cleanly,
+and that is expected: there is no Developer ID or notarized release.
 
 The popover fits its complete dashboard without scrolling. Clicking elsewhere
 closes it, while clicks in Reserve Settings leave it open.
@@ -137,11 +144,11 @@ plan. With both detail switches off it becomes a true icon-only item. General ow
 these controls; Appearance shows only appearance, theme, and its live palette
 preview. Clicking a provider card pins it immediately without opening Settings.
 
-The compact About page shows the installed version, links to the planned public
-GitHub repository and [@pocarles on X](https://x.com/pocarles), and opens the MIT
-license bundled inside the app. Its manual update check reads only the latest
-GitHub Release; until the repository is published, it reports that no public
-release is available rather than treating that state as an error.
+The compact About page shows the installed version, links to the GitHub
+repository and [@pocarles on X](https://x.com/pocarles), and opens the MIT
+license bundled inside the app. Its update check looks at GitHub Releases of
+this repo and reports that no public release is available until one exists. It
+does not download an app. Automatic checks are off by default.
 
 ## Privacy and storage
 
@@ -159,11 +166,17 @@ responses, cookies, authorization headers, raw provider payloads, and subprocess
 logs are never cached.
 
 Claude Code may store its OAuth credential in macOS Keychain rather than
-`~/.claude/.credentials.json`. Reserve enables read-only reuse by default so an
-existing Claude Code sign-in works without duplicate setup; it can be disabled at
-any time in Settings. Reads use Apple's `/usr/bin/security` helper with direct
-arguments and a five-second hard timeout; credential JSON remains in memory only
-and is never logged or cached.
+`~/.claude/.credentials.json`. Reserve does not read that Keychain item unless
+you turn on “Read my Claude Code sign-in from the Keychain” under Providers.
+The read uses Security.framework (`SecItemCopyMatching`) so macOS attributes
+the access to Reserve. Credential JSON stays in memory only and is never logged
+or cached.
+
+Reserve also reads `~/.claude/.credentials.json` and Grok's `~/.grok/auth.json`
+when those files exist. OpenAI limits come from the Codex CLI over JSON-RPC, not
+from a credential file Reserve opens itself. Local token totals come from
+session logs under `~/.claude/projects`, `~/.codex/sessions`, and
+`~/.grok/sessions`; only daily aggregates are kept.
 
 ## Resource contract
 

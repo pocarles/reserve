@@ -1,9 +1,9 @@
 import Foundation
 
 enum ReserveLinks {
-  static let repository = URL(string: "https://github.com/pocarles/Reserve")!
+  static let repository = URL(string: "https://github.com/pocarles/reserve")!
   static let releasesAPI = URL(
-    string: "https://api.github.com/repos/pocarles/Reserve/releases/latest")!
+    string: "https://api.github.com/repos/pocarles/reserve/releases/latest")!
   static let xProfile = URL(string: "https://x.com/pocarles")!
 }
 
@@ -47,7 +47,7 @@ actor UpdateChecker {
       url.host?.lowercased() == "github.com",
       url.user == nil, url.password == nil, url.port == nil
     else { return false }
-    return url.path.hasPrefix("/pocarles/Reserve/releases/")
+    return url.path.lowercased().hasPrefix("/pocarles/reserve/releases/")
   }
 
   private static func isNewer(_ candidate: String, than current: String) -> Bool {

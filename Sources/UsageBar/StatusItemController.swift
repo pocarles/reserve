@@ -446,12 +446,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // Only a release page of this repository is ever opened.
     let updateURLsAreRestricted =
       UpdateChecker.isReserveReleaseURL(
+        URL(string: "https://github.com/pocarles/reserve/releases/tag/v0.2.0")!)
+      && UpdateChecker.isReserveReleaseURL(
         URL(string: "https://github.com/pocarles/Reserve/releases/tag/v0.2.0")!)
       && !UpdateChecker.isReserveReleaseURL(URL(string: "https://example.com/releases/tag/v1")!)
       && !UpdateChecker.isReserveReleaseURL(
-        URL(string: "https://github.com/attacker/Reserve/releases/tag/v1")!)
+        URL(string: "https://github.com/attacker/reserve/releases/tag/v1")!)
       && !UpdateChecker.isReserveReleaseURL(
-        URL(string: "http://github.com/pocarles/Reserve/releases/tag/v1")!)
+        URL(string: "http://github.com/pocarles/reserve/releases/tag/v1")!)
     let unrelatedWindow = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
       styleMask: [.titled], backing: .buffered, defer: false)

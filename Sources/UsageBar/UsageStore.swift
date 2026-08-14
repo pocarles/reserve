@@ -259,9 +259,9 @@ final class UsageStore {
     }
   }
 
-  /// Whether Reserve looks for a new release on its own. The check contacts
-  /// GitHub and sends nothing but the current version, and it can be switched
-  /// off entirely.
+  /// Whether Reserve looks for a new release on its own. Off by default: this
+  /// build is from source and there is no downloadable GitHub Release yet. The
+  /// check contacts GitHub and sends nothing but the current version.
   var automaticUpdateChecks: Bool {
     get { self.defaults.bool(forKey: "updates.automatic") }
     set {
@@ -686,7 +686,7 @@ final class UsageStore {
       "notifications.sound": false,
       "appearance.theme": AppearanceTheme.matrix.rawValue,
       "appearance.mode": AppearanceMode.system.rawValue,
-      "updates.automatic": true,
+      "updates.automatic": false,
       "menuBar.provider": "reserve",
       "menuBar.showsRemaining": true,
       "menuBar.showsReset": true,
