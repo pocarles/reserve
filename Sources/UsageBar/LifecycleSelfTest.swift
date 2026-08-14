@@ -413,43 +413,54 @@ enum LifecycleSelfTest {
 
   /// A control that spins has to spin in place.
   ///
-  /// The invariant is that moving the anchor leaves the layer's geometry alone:
-  /// `layer.frame` must still match the view's frame. When `position` is not
-  /// restored the layer slides by half its size, so the control both draws
-  /// off-centre and rotates around a point beside itself.
+  /// The previous version of this built the control in a bare host view and
+  /// asserted that the layer was not displaced. Both were wrong: the real
+  /// control lives inside the dashboard's stack views, and displacement was
+  /// zero precisely *because* the anchor had never moved — the check could not
+  /// fail. The invariant that matters is geometric: under the rotation the
+  /// control's own centre must map to itself. Rotating about a corner moves it.
   static func checkSpinnerGeometry() -> Result {
     var result = Result()
-    let host = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
-    host.wantsLayer = true
-    let button = ReserveIconButton(
-      symbol: "arrow.clockwise", toolTip: "Refresh now", diameter: 26,
-      spinningSince: 0.3, action: {})
-    button.translatesAutoresizingMaskIntoConstraints = false
-    host.addSubview(button)
-    NSLayoutConstraint.activate([
-      button.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 40),
-      button.topAnchor.constraint(equalTo: host.topAnchor, constant: 60),
-    ])
-    host.layoutSubtreeIfNeeded()
-    host.layout()
-
+    // The real construction path, refreshing, so the control is actually turning.
+    let dashboard = UsageDashboardView(
+      states: [], selectedMenuBarProvider: nil, isRefreshing: true,
+      refreshStartedAt: Date().addingTimeInterval(-0.4), now: Date(),
+      actions: DashboardActions(
+        refreshAll: {}, connectProvider: { _ in }, selectMenuBarProvider: { _ in },
+        openSettings: {}, openInsights: {}, dismiss: {}, toggleProviderDetail: { _ in },
+        quit: {}))
+    dashboard.layoutSubtreeIfNeeded()
+    guard let button = self.descendants(of: dashboard).compactMap({ $0 as? ReserveIconButton })
+      .first(where: { $0.identifier?.rawValue == "refresh-all" })
+    else {
+      result.failures.append("the dashboard has no refresh control")
+      return result
+    }
+    guard !ReserveMotion.isReduced else { return result }
     guard let layer = button.layer else {
       result.failures.append("the refresh control has no layer to rotate")
       return result
     }
-    result.expect(
-      abs(layer.anchorPoint.x - 0.5) < 0.001 && abs(layer.anchorPoint.y - 0.5) < 0.001,
-      "the refresh control rotates about \(layer.anchorPoint) rather than its middle")
-    // The decisive one: a displaced layer is what reads as orbiting.
-    let dx = abs(layer.frame.origin.x - button.frame.origin.x)
-    let dy = abs(layer.frame.origin.y - button.frame.origin.y)
-    result.expect(
-      dx < 0.5 && dy < 0.5,
-      "the refresh control's layer is displaced by (\(Int(dx)), \(Int(dy)))pt from the control "
-        + "itself, so it swings around a point beside itself instead of turning in place")
-    if !ReserveMotion.isReduced {
-      result.expect(button.isSpinning, "the refresh control did not start turning")
+    result.expect(button.isSpinning, "the refresh control did not start turning")
+    guard let spin = layer.animation(forKey: "reserve.refresh.spin") as? CAKeyframeAnimation,
+      let values = spin.values as? [CATransform3D], values.count > 4
+    else {
+      result.failures.append(
+        "the refresh control's rotation is not expressed as centre-relative matrices, so it "
+          + "turns about its layer's anchor point")
+      return result
     }
+    // Take a quarter turn in and confirm the centre has not travelled.
+    let centre = CGPoint(x: button.bounds.midX, y: button.bounds.midY)
+    let matrix = values[values.count / 4]
+    let moved = CGPoint(
+      x: matrix.m11 * centre.x + matrix.m21 * centre.y + matrix.m41,
+      y: matrix.m12 * centre.x + matrix.m22 * centre.y + matrix.m42)
+    let drift = hypot(moved.x - centre.x, moved.y - centre.y)
+    result.expect(
+      drift < 0.5,
+      "a quarter turn moves the refresh control's centre by \(Int(drift))pt, so it swings "
+        + "around a point beside itself instead of turning in place")
     return result
   }
 

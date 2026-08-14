@@ -450,6 +450,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return
       }
 
+      if CommandLine.arguments.contains("--diagnose-refresh") {
+        print("=== refresh control, inside the real popover ===")
+        let window = statusController.dashboardWindowForTesting
+        let root = window?.contentView
+        let spinners = root.map { LifecycleSelfTest.descendants(of: $0) }?
+          .compactMap { $0 as? ReserveIconButton } ?? []
+        for button in spinners where button.identifier?.rawValue == "refresh-all" {
+          if let layer = button.layer {
+            print("  idle: anchor=\(layer.anchorPoint) spinning=\(button.isSpinning)")
+            print("        bounds=\(button.bounds)")
+            if let spin = layer.animation(forKey: "reserve.refresh.spin") as? CAKeyframeAnimation,
+              let values = spin.values as? [CATransform3D], values.count > 4 {
+              let c = CGPoint(x: button.bounds.midX, y: button.bounds.midY)
+              var worst = 0.0
+              for m in values {
+                let p = CGPoint(
+                  x: m.m11 * c.x + m.m21 * c.y + m.m41,
+                  y: m.m12 * c.x + m.m22 * c.y + m.m42)
+                worst = max(worst, hypot(p.x - c.x, p.y - c.y))
+              }
+              print("        centre drift over a full turn = \(String(format: "%.3f", worst))pt")
+            }
+          }
+        }
+
+        print("=== does the control drive a real refresh? ===")
+        let before = ProviderID.allCases.reduce(into: [ProviderID: Date?]()) {
+          $0[$1] = store.states[$1]?.snapshot?.fetchedAt
+        }
+        print("  isRefreshingAll before = \(store.isRefreshingAll)")
+        let clicked = (root.map { LifecycleSelfTest.descendants(of: $0) } ?? [])
+          .compactMap { $0 as? NSButton }
+          .first { $0.identifier?.rawValue == "refresh-all" }
+        clicked?.performClick(nil)
+        try? await Task.sleep(for: .milliseconds(150))
+        print("  clicked=\(clicked != nil) isRefreshingAll after click = \(store.isRefreshingAll)")
+        print("  refreshStartedAt = \(store.refreshStartedAt.map { "\($0)" } ?? "nil")")
+        // The control turns only while a refresh is in flight.
+        let busy = (statusController.dashboardWindowForTesting?.contentView)
+          .map { LifecycleSelfTest.descendants(of: $0) }?
+          .compactMap { $0 as? ReserveIconButton }
+          .first { $0.identifier?.rawValue == "refresh-all" }
+        if let busy, let layer = busy.layer {
+          print("  busy: spinning=\(busy.isSpinning) anchor=\(layer.anchorPoint)")
+          if let spin = layer.animation(forKey: "reserve.refresh.spin") as? CAKeyframeAnimation,
+            let values = spin.values as? [CATransform3D] {
+            let c = CGPoint(x: busy.bounds.midX, y: busy.bounds.midY)
+            var worst = 0.0
+            for m in values {
+              let p = CGPoint(
+                x: m.m11 * c.x + m.m21 * c.y + m.m41,
+                y: m.m12 * c.x + m.m22 * c.y + m.m42)
+              worst = max(worst, hypot(p.x - c.x, p.y - c.y))
+            }
+            print("        centre drift over a full turn = \(String(format: "%.3f", worst))pt")
+          } else {
+            print("        NOT centre-relative: rotation is anchor-based")
+          }
+        }
+        for _ in 0..<40 {
+          if !store.isRefreshingAll { break }
+          try? await Task.sleep(for: .milliseconds(500))
+        }
+        print("  isRefreshingAll settled = \(store.isRefreshingAll)")
+        for provider in ProviderID.allCases where store.isEnabled(provider) {
+          let now = store.states[provider]?.snapshot?.fetchedAt
+          let moved = (before[provider] ?? nil) != now
+          let err = store.states[provider]?.error
+          print("    \(provider.rawValue): fetchedAt moved=\(moved) error=\(err ?? "none")")
+        }
+        exit(0)
+      }
+
       if CommandLine.arguments.contains("--diagnose") {
         print("=== disclosure geometry ===")
         LifecycleSelfTest.dumpGeometry("collapsed  ", store: store, controller: statusController)

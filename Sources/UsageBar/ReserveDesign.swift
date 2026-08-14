@@ -487,6 +487,8 @@ enum ReserveMotion {
 @MainActor
 final class ReserveIconButton: NSButton {
   private let handler: () -> Void
+  private var spinPhase: TimeInterval?
+  private var spinBounds: CGRect = .zero
 
   init(
     symbol: String,
@@ -514,48 +516,51 @@ final class ReserveIconButton: NSButton {
     self.action = #selector(self.performAction)
     self.widthAnchor.constraint(equalToConstant: diameter).isActive = true
     self.heightAnchor.constraint(equalToConstant: diameter).isActive = true
-    if let phase { self.spin(phase: phase) }
+    self.spinPhase = phase
   }
 
   /// Turns while a refresh is in flight. The phase is passed in so the rotation
   /// stays continuous even though the dashboard rebuilds during a refresh.
-  private func spin(phase: TimeInterval) {
-    guard !ReserveMotion.isReduced else { return }
+  ///
+  /// The rotation is baked into the matrices rather than expressed as
+  /// `transform.rotation.z`, because that key turns the layer about its
+  /// `anchorPoint`, and AppKit owns the anchor of a view's backing layer. Moving
+  /// the anchor to the middle does not survive — AppKit re-syncs the layer's
+  /// geometry after `layout()`, restoring (0, 0) — so the control rotated about
+  /// its bottom-left corner and swung around itself instead of turning in place.
+  /// Translating to the centre, rotating, and translating back needs no anchor.
+  private func installSpin(phase: TimeInterval) {
+    guard !ReserveMotion.isReduced, self.bounds.width > 0, self.bounds.height > 0 else { return }
     let duration: TimeInterval = 1.1
-    let rotation = CABasicAnimation(keyPath: "transform.rotation.z")
-    rotation.fromValue = 0
-    rotation.toValue = -Double.pi * 2
+    let centre = CGPoint(x: self.bounds.midX, y: self.bounds.midY)
+    func matrix(_ angle: CGFloat) -> CATransform3D {
+      var transform = CATransform3DMakeTranslation(centre.x, centre.y, 0)
+      transform = CATransform3DRotate(transform, angle, 0, 0, 1)
+      return CATransform3DTranslate(transform, -centre.x, -centre.y, 0)
+    }
+    // Enough steps that linear interpolation between them is indistinguishable
+    // from a smooth turn.
+    let steps = 24
+    let rotation = CAKeyframeAnimation(keyPath: "transform")
+    rotation.values = (0...steps).map { matrix(-2 * .pi * CGFloat($0) / CGFloat(steps)) }
+    rotation.calculationMode = .linear
     rotation.duration = duration
     rotation.repeatCount = .greatestFiniteMagnitude
     rotation.isRemovedOnCompletion = false
     rotation.timeOffset = phase.truncatingRemainder(dividingBy: duration)
     self.wantsLayer = true
-    self.centreRotationAnchor()
     self.layer?.add(rotation, forKey: "reserve.refresh.spin")
+    self.spinBounds = self.bounds
   }
 
-  /// Moves the layer's anchor to its middle so `transform.rotation.z` turns the
-  /// control in place.
-  ///
-  /// `position` is expressed relative to `anchorPoint`, so moving the anchor
-  /// without restoring `position` slides the layer by half its size — the
-  /// previous `layer.frame = layer.frame` could not undo that, because the
-  /// getter already reflects the shifted anchor and assigning it back re-derives
-  /// the very same position. The control then drew off-centre and swung around a
-  /// point beside itself instead of spinning.
-  ///
-  /// AppKit does not re-sync the layer afterwards, and it hands the view its real
-  /// frame only once constraints resolve, so this is re-applied on every layout
-  /// rather than once during `init`.
-  private func centreRotationAnchor() {
-    guard let layer = self.layer else { return }
-    layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-    layer.position = CGPoint(x: self.frame.midX, y: self.frame.midY)
-  }
-
+  /// The animation is built from `bounds`, which is empty until constraints
+  /// resolve, so it is installed once the control has a real size and rebuilt if
+  /// that size ever changes.
   override func layout() {
     super.layout()
-    self.centreRotationAnchor()
+    guard let phase = self.spinPhase else { return }
+    let missing = self.layer?.animation(forKey: "reserve.refresh.spin") == nil
+    if missing || self.spinBounds != self.bounds { self.installSpin(phase: phase) }
   }
 
   var isSpinning: Bool { self.layer?.animation(forKey: "reserve.refresh.spin") != nil }
