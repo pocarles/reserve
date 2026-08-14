@@ -8,7 +8,11 @@
       "start": "2026-08-10T12:00:00Z",
       "end": "2026-08-17T12:00:00Z"
     },
-    "prepaidBalance": { "val": 0 }
+    "prepaidBalance": { "val": 0 },
+    "productUsage": [
+      { "product": "GrokBuild", "usagePercent": 38.5 },
+      { "product": "GrokChat", "usagePercent": 4.0 }
+    ]
   },
   "onDemandEnabled": false,
   "subscriptionTier": "SuperGrok Heavy"

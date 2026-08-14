@@ -39,6 +39,105 @@ public struct UsageWindow: Codable, Equatable, Sendable, Identifiable {
   }
 }
 
+public struct UsagePaceProjection: Equatable, Sendable {
+  /// A small neutral band prevents normal sampling noise from flipping a plan
+  /// between reserve and deficit. This is the sole pace boundary used by the
+  /// popover, menu bar, notifications, and tests.
+  public static let onPaceTolerancePercent = 2.0
+
+  public enum Position: Equatable, Sendable {
+    case reserve
+    case deficit
+    case onPace
+  }
+
+  public let position: Position
+  public let variancePercent: Double
+  public let projectedExhaustionAt: Date?
+  public let projectedRemainingPercent: Double?
+  /// How far through the allowance window the clock has travelled. Exposed so
+  /// the interface can mark the on-pace position without re-deriving it.
+  public let elapsedPercent: Double
+
+  public static func calculate(for window: UsageWindow, now: Date = Date())
+    -> UsagePaceProjection?
+  {
+    guard let minutes = window.windowMinutes, minutes > 0,
+      let reset = window.resetsAt, reset > now
+    else { return nil }
+    let duration = TimeInterval(minutes * 60)
+    let start = reset.addingTimeInterval(-duration)
+    let elapsed = now.timeIntervalSince(start)
+    guard elapsed > 0 else { return nil }
+    let elapsedFraction = min(1, elapsed / duration)
+    // Very early projections swing wildly after a single request. Wait until at
+    // least 1% of the allowance window has elapsed before presenting a pace.
+    guard elapsedFraction >= 0.01 else { return nil }
+
+    let usedFraction = min(1, max(0, window.usedPercent / 100))
+    let signedVariance = (elapsedFraction - usedFraction) * 100
+    let tolerance = Self.onPaceTolerancePercent
+    let position: Position =
+      if signedVariance > tolerance {
+        .reserve
+      } else if signedVariance < -tolerance {
+        .deficit
+      } else {
+        .onPace
+      }
+
+    let projectedUsage = usedFraction == 0 ? 0 : usedFraction / elapsedFraction
+    let projectedRemaining = max(0, min(100, (1 - projectedUsage) * 100))
+    let projectedExhaustion: Date?
+    if usedFraction > 0 {
+      let exhaustion = start.addingTimeInterval(elapsed / usedFraction)
+      projectedExhaustion = exhaustion < reset ? max(exhaustion, now) : nil
+    } else {
+      projectedExhaustion = nil
+    }
+
+    return UsagePaceProjection(
+      position: position,
+      variancePercent: abs(signedVariance),
+      projectedExhaustionAt: projectedExhaustion,
+      projectedRemainingPercent: projectedRemaining,
+      elapsedPercent: elapsedFraction * 100)
+  }
+}
+
+/// Reserve's factual interpretation of a limit. Capacity remaining is kept on
+/// `UsageWindow`; this type describes pace, freshness, and availability only.
+public enum UsagePaceState: Equatable, Sendable {
+  case reserve(percent: Double)
+  case onPace
+  case deficit(percent: Double)
+  case exhausted
+  case stale
+  case unknown
+
+  public static func calculate(
+    for window: UsageWindow?,
+    fetchedAt: Date?,
+    hasError: Bool = false,
+    now: Date = Date(),
+    stalenessLimit: TimeInterval = 30 * 60
+  ) -> UsagePaceState {
+    guard let window else { return .unknown }
+    if window.usedPercent >= 99.5 { return .exhausted }
+    if hasError || fetchedAt.map({ now.timeIntervalSince($0) > stalenessLimit }) == true {
+      return .stale
+    }
+    guard let projection = UsagePaceProjection.calculate(for: window, now: now) else {
+      return .unknown
+    }
+    switch projection.position {
+    case .reserve: return .reserve(percent: projection.variancePercent)
+    case .onPace: return .onPace
+    case .deficit: return .deficit(percent: projection.variancePercent)
+    }
+  }
+}
+
 public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public var id: ProviderID { self.provider }
   public let provider: ProviderID
@@ -47,6 +146,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public let fetchedAt: Date
   public let source: String
   public let includedSpend: IncludedSpend?
+  public let billingRenewsAt: Date?
 
   public init(
     provider: ProviderID,
@@ -54,7 +154,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     windows: [UsageWindow],
     fetchedAt: Date = Date(),
     source: String,
-    includedSpend: IncludedSpend? = nil
+    includedSpend: IncludedSpend? = nil,
+    billingRenewsAt: Date? = nil
   ) {
     self.provider = provider
     self.planName = planName
@@ -62,6 +163,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     self.fetchedAt = fetchedAt
     self.source = source
     self.includedSpend = includedSpend
+    self.billingRenewsAt = billingRenewsAt
   }
 
   public var highestUsedPercent: Double? {

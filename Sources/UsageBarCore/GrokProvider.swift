@@ -29,45 +29,11 @@ public struct GrokProvider: UsageProvider {
       )
     }
 
-    let rpc = try JSONRPCProcess(
-      executable: executable,
-      arguments: ["agent", "--no-leader", "stdio"],
-      environment: self.environment)
-    defer { rpc.shutdown() }
-
-    _ = try await rpc.request(
-      method: "initialize",
-      params: [
-        "protocolVersion": "1",
-        "clientCapabilities": [
-          "fs": ["readTextFile": false, "writeTextFile": false],
-          "terminal": false,
-        ],
-      ],
-      timeout: .seconds(8),
-      includeJSONRPCVersion: true,
-      unescapeSlashes: true)
-
-    let response: GrokBillingEnvelope
-    var source = "Grok Build ACP"
-    do {
-      let message = try await rpc.request(
-        method: "x.ai/billing",
-        timeout: .seconds(15),
-        includeJSONRPCVersion: true,
-        unescapeSlashes: true)
-      response = try rpc.decodeResult(GrokBillingEnvelope.self, from: message)
-    } catch let error as UsageProviderError {
-      if error.localizedDescription.localizedCaseInsensitiveContains("method not found") {
-        response = try await self.fetchThroughOfficialCLIProxy(version: versionOutput)
-        source = "Grok Build billing API"
-      } else if error.localizedDescription.localizedCaseInsensitiveContains("authentication") {
-        throw UsageProviderError.unauthorized(
-          "Grok authentication is required. Run `grok login` and refresh.")
-      } else {
-        throw error
-      }
-    }
+    // Grok Build 1.x does not expose x.ai/billing through its ACP agent. Calling
+    // that method first starts a large, short-lived agent only to receive
+    // "method not found". Use the authenticated billing request implemented by
+    // the official CLI directly instead.
+    let response = try await self.fetchThroughOfficialCLIProxy(version: versionOutput)
 
     guard let config = response.config ?? response.legacyConfig else {
       throw UsageProviderError.unavailable("Grok did not return personal subscription usage.")
@@ -85,19 +51,41 @@ public struct GrokProvider: UsageProvider {
     }()
     let label = Self.periodLabel(type: period?.type, minutes: minutes)
 
+    let reset = UsageDateParser.iso8601(period?.end ?? config.billingPeriodEnd)
+    let isMonthlyBillingPeriod = Self.isMonthlyBillingPeriod(
+      type: period?.type,
+      minutes: minutes)
+    var windows = [
+      UsageWindow(
+        id: "usage-pool",
+        label: label,
+        usedPercent: percent,
+        windowMinutes: minutes,
+        resetsAt: reset)
+    ]
+    for product in config.productUsage ?? [] where product.usagePercent > 0 {
+      windows.append(
+        UsageWindow(
+          id: "product-\(product.product.lowercased())",
+          label: Self.productLabel(product.product),
+          usedPercent: product.usagePercent,
+          windowMinutes: minutes,
+          resetsAt: reset))
+    }
+
     return UsageSnapshot(
       provider: .grok,
       planName: response.subscriptionTier,
-      windows: [
-        UsageWindow(
-          id: "usage-pool",
-          label: label,
-          usedPercent: percent,
-          windowMinutes: minutes,
-          resetsAt: UsageDateParser.iso8601(period?.end ?? config.billingPeriodEnd))
-      ],
-      source: source,
-      includedSpend: config.includedSpend)
+      windows: windows,
+      source: "Grok Build billing API",
+      includedSpend: config.includedSpend,
+      billingRenewsAt: isMonthlyBillingPeriod ? reset : nil)
+  }
+
+  private static func isMonthlyBillingPeriod(type: String?, minutes: Int?) -> Bool {
+    if type?.localizedCaseInsensitiveContains("monthly") == true { return true }
+    guard let minutes else { return false }
+    return (27 * 24 * 60)...(32 * 24 * 60) ~= minutes
   }
 
   private func fetchThroughOfficialCLIProxy(version: String) async throws -> GrokBillingEnvelope {
@@ -154,6 +142,14 @@ public struct GrokProvider: UsageProvider {
     if let minutes, (6 * 24 * 60)...(8 * 24 * 60) ~= minutes { return "Weekly" }
     if let minutes, (27 * 24 * 60)...(32 * 24 * 60) ~= minutes { return "Monthly" }
     return "Usage pool"
+  }
+
+  private static func productLabel(_ product: String) -> String {
+    switch product.lowercased() {
+    case "grokbuild": return "Grok Build share"
+    case "grokchat": return "Grok Chat share"
+    default: return product + " share"
+    }
   }
 }
 
@@ -281,7 +277,8 @@ struct GrokBillingEnvelope: Decodable, Sendable {
         billingPeriodStart: try container.decodeIfPresent(String.self, forKey: .billingPeriodStart)
           ?? cycle?.billingPeriodStart,
         billingPeriodEnd: try container.decodeIfPresent(String.self, forKey: .billingPeriodEnd)
-          ?? cycle?.billingPeriodEnd)
+          ?? cycle?.billingPeriodEnd,
+        productUsage: nil)
     } else {
       self.legacyConfig = nil
     }
@@ -295,6 +292,7 @@ struct GrokBillingConfig: Decodable, Sendable {
   let used: GrokCent?
   let billingPeriodStart: String?
   let billingPeriodEnd: String?
+  let productUsage: [GrokProductUsage]?
 
   var usedPercent: Double? {
     if let creditUsagePercent { return creditUsagePercent }
@@ -310,6 +308,11 @@ struct GrokBillingConfig: Decodable, Sendable {
     }
     return IncludedSpend(label: "Included credits", usedMinorUnits: used, limitMinorUnits: limit)
   }
+}
+
+struct GrokProductUsage: Decodable, Sendable {
+  let product: String
+  let usagePercent: Double
 }
 
 struct GrokUsagePeriod: Decodable, Sendable {

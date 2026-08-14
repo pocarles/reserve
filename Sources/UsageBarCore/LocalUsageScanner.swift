@@ -2,6 +2,21 @@ import CryptoKit
 import Darwin
 import Foundation
 
+/// One day of locally observed usage. The scanner already keeps these totals
+/// per file; this is the roll-up the interface can chart.
+public struct DailyUsage: Codable, Equatable, Sendable, Identifiable {
+  /// yyyy-MM-dd, so days sort lexically.
+  public let day: String
+  public let tokens: Int64
+
+  public var id: String { self.day }
+
+  public init(day: String, tokens: Int64) {
+    self.day = day
+    self.tokens = max(0, tokens)
+  }
+}
+
 public struct LocalUsageSummary: Codable, Equatable, Sendable {
   public let provider: ProviderID
   public let periodDays: Int
@@ -11,8 +26,15 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
   public let outputTokens: Int64
   public let apiEquivalentCostUSD: Double
   public let isCostEstimate: Bool
+  public let todayTokens: Int64
+  public let cycleTokens: Int64
+  public let cycleAPIEquivalentCostUSD: Double
+  public let cycleStartedAt: Date
+  public let isCycleCostEstimate: Bool
   public let fetchedAt: Date
   public let source: String
+  /// Oldest first, one entry per day of the period including quiet days.
+  public let dailyTokens: [DailyUsage]
 
   public init(
     provider: ProviderID,
@@ -23,26 +45,48 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     outputTokens: Int64,
     apiEquivalentCostUSD: Double,
     isCostEstimate: Bool = false,
+    todayTokens: Int64? = nil,
+    cycleTokens: Int64? = nil,
+    cycleAPIEquivalentCostUSD: Double? = nil,
+    cycleStartedAt: Date? = nil,
+    isCycleCostEstimate: Bool? = nil,
     fetchedAt: Date = Date(),
-    source: String = "Local session logs"
+    source: String = "Local session logs",
+    dailyTokens: [DailyUsage] = []
   ) {
+    let normalizedInput = max(0, inputTokens)
+    let normalizedCached = max(0, cachedInputTokens)
+    let normalizedCacheWrite = max(0, cacheWriteInputTokens)
+    let normalizedOutput = max(0, outputTokens)
+    let fallbackTokens =
+      normalizedInput
+      + (provider == .anthropic ? normalizedCached : 0)
+      + normalizedCacheWrite + normalizedOutput
     self.provider = provider
     self.periodDays = periodDays
-    self.inputTokens = max(0, inputTokens)
-    self.cachedInputTokens = max(0, cachedInputTokens)
-    self.cacheWriteInputTokens = max(0, cacheWriteInputTokens)
-    self.outputTokens = max(0, outputTokens)
+    self.inputTokens = normalizedInput
+    self.cachedInputTokens = normalizedCached
+    self.cacheWriteInputTokens = normalizedCacheWrite
+    self.outputTokens = normalizedOutput
     self.apiEquivalentCostUSD = max(0, apiEquivalentCostUSD)
     self.isCostEstimate = isCostEstimate
+    self.todayTokens = max(0, todayTokens ?? fallbackTokens)
+    self.cycleTokens = max(0, cycleTokens ?? fallbackTokens)
+    self.cycleAPIEquivalentCostUSD = max(0, cycleAPIEquivalentCostUSD ?? apiEquivalentCostUSD)
+    self.cycleStartedAt = cycleStartedAt ?? fetchedAt
+    self.isCycleCostEstimate = isCycleCostEstimate ?? isCostEstimate
     self.fetchedAt = fetchedAt
+    self.dailyTokens = dailyTokens
     self.source = source
   }
 
   public var totalTokens: Int64 {
-    self.inputTokens
-      + (self.provider == .anthropic ? self.cachedInputTokens : 0)
-      + self.cacheWriteInputTokens
-      + self.outputTokens
+    self.totalTokensValue
+  }
+
+  private var totalTokensValue: Int64 {
+    self.inputTokens + (self.provider == .anthropic ? self.cachedInputTokens : 0)
+      + self.cacheWriteInputTokens + self.outputTokens
   }
 }
 
@@ -75,6 +119,7 @@ public actor LocalUsageScanner {
   private let maximumLineBytes = 1024 * 1024
   private let codexTailBytes = 2 * 1024 * 1024
   private let codexTailStepBytes = 256 * 1024
+  private var fileKeys: [ProviderID: [String: String]] = [:]
 
   public init(
     roots: Roots = .defaults(),
@@ -90,38 +135,103 @@ public actor LocalUsageScanner {
       .appendingPathComponent("local-usage-index.json")
   }
 
-  public func scan(periodDays: Int = 30, now: Date = Date()) throws -> [ProviderID:
-    LocalUsageSummary]
-  {
+  public func scan(
+    periodDays: Int = 30,
+    cycleStarts: [ProviderID: Date] = [:],
+    now: Date = Date()
+  ) throws -> [ProviderID: LocalUsageSummary] {
     let days = min(90, max(1, periodDays))
     let cutoff = Calendar.current.date(byAdding: .day, value: -days + 1, to: now) ?? now
     let cutoffKey = Self.dayKey(cutoff)
     var index = self.loadIndex()
     var retainedKeys: Set<String> = []
+    var indexChanged = false
 
     let codex = try self.scanCodex(
-      cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys)
+      cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys,
+      indexChanged: &indexChanged)
     let claude = try self.scanClaude(
-      cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys)
+      cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys,
+      indexChanged: &indexChanged)
     let grok = try self.scanGrok(
-      cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys)
+      cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys,
+      indexChanged: &indexChanged)
 
+    let previousRecordCount = index.records.count
     index.records = index.records.filter { retainedKeys.contains($0.key) }
-    index.updatedAt = now
-    try self.saveIndex(index)
+    if index.records.count != previousRecordCount { indexChanged = true }
+    if indexChanged {
+      index.updatedAt = now
+      try self.saveIndex(index)
+    }
 
+    let todayKey = Self.dayKey(now)
+    let series = Self.dailySeries(index: index, days: days, now: now)
+    func summary(_ provider: ProviderID, fallback: UsageTotals) -> LocalUsageSummary {
+      let cycleStart = cycleStarts[provider] ?? cutoff
+      let today = Self.aggregate(provider: provider, since: todayKey, index: index)
+      let cycle = Self.aggregate(
+        provider: provider, since: Self.dayKey(cycleStart), index: index)
+      return fallback.summary(
+        provider: provider,
+        periodDays: days,
+        today: today,
+        cycle: cycle,
+        cycleStartedAt: cycleStart,
+        now: now,
+        dailyTokens: series[provider] ?? [])
+    }
     return [
-      .openAI: codex.summary(provider: .openAI, periodDays: days, now: now),
-      .anthropic: claude.summary(provider: .anthropic, periodDays: days, now: now),
-      .grok: grok.summary(provider: .grok, periodDays: days, now: now),
+      .openAI: summary(.openAI, fallback: codex),
+      .anthropic: summary(.anthropic, fallback: claude),
+      .grok: summary(.grok, fallback: grok),
     ]
+  }
+
+  /// Continuous daily series for every provider, quiet days included so a chart
+  /// has an even axis. One pass over the index, bounded to the period.
+  private static func dailySeries(
+    index: UsageIndex,
+    days: Int,
+    now: Date
+  ) -> [ProviderID: [DailyUsage]] {
+    let calendar = Calendar.current
+    let keys: [String] = (0..<days).reversed().compactMap { offset in
+      calendar.date(byAdding: .day, value: -offset, to: now).map(Self.dayKey)
+    }
+    guard let cutoffKey = keys.first else { return [:] }
+
+    var totals: [ProviderID: [String: UsageTotals]] = [:]
+    for record in index.records.values {
+      for (day, value) in record.days where day >= cutoffKey {
+        totals[record.provider, default: [:]][day, default: UsageTotals()].add(value)
+      }
+    }
+    return ProviderID.allCases.reduce(into: [:]) { result, provider in
+      let byDay = totals[provider] ?? [:]
+      result[provider] = keys.map {
+        DailyUsage(day: $0, tokens: byDay[$0]?.totalTokens(provider: provider) ?? 0)
+      }
+    }
+  }
+
+  private static func aggregate(
+    provider: ProviderID,
+    since cutoffKey: String,
+    index: UsageIndex
+  ) -> UsageTotals {
+    index.records.values.lazy.filter { $0.provider == provider }.reduce(into: UsageTotals()) {
+      result, record in
+      result.add(record.totals(since: cutoffKey))
+    }
   }
 
   private func scanCodex(
     cutoff: Date,
     cutoffKey: String,
     index: inout UsageIndex,
-    retainedKeys: inout Set<String>
+    retainedKeys: inout Set<String>,
+    indexChanged: inout Bool
   ) throws -> UsageTotals {
     var total = UsageTotals()
     for file in self.recentFiles(
@@ -130,7 +240,7 @@ public actor LocalUsageScanner {
       try Task.checkCancellation()
       let fileTotals = try autoreleasepool {
         let metadata = try self.metadata(file)
-        let key = Self.fileKey(provider: .openAI, url: file)
+        let key = self.fileKey(provider: .openAI, url: file)
         retainedKeys.insert(key)
         var record = index.records[key]
         if record?.size != metadata.size || record?.modifiedAt != metadata.modifiedAt {
@@ -144,6 +254,7 @@ public actor LocalUsageScanner {
             recentRows: [:],
             recentOrder: [])
           index.records[key] = record
+          indexChanged = true
         }
         return record?.totals(since: cutoffKey) ?? UsageTotals()
       }
@@ -156,7 +267,8 @@ public actor LocalUsageScanner {
     cutoff: Date,
     cutoffKey: String,
     index: inout UsageIndex,
-    retainedKeys: inout Set<String>
+    retainedKeys: inout Set<String>,
+    indexChanged: inout Bool
   ) throws -> UsageTotals {
     var total = UsageTotals()
     for file in self.recentFiles(
@@ -165,7 +277,7 @@ public actor LocalUsageScanner {
       try Task.checkCancellation()
       let fileTotals = try autoreleasepool {
         let metadata = try self.metadata(file)
-        let key = Self.fileKey(provider: .anthropic, url: file)
+        let key = self.fileKey(provider: .anthropic, url: file)
         retainedKeys.insert(key)
         var record = index.records[key]
         if record?.provider != .anthropic || metadata.size < (record?.offset ?? 0) {
@@ -197,6 +309,7 @@ public actor LocalUsageScanner {
           updated.days = updated.days.filter { $0.key >= cutoffKey }
           record = updated
           index.records[key] = updated
+          indexChanged = true
         }
         return record?.totals(since: cutoffKey) ?? UsageTotals()
       }
@@ -209,7 +322,8 @@ public actor LocalUsageScanner {
     cutoff: Date,
     cutoffKey: String,
     index: inout UsageIndex,
-    retainedKeys: inout Set<String>
+    retainedKeys: inout Set<String>,
+    indexChanged: inout Bool
   ) throws -> UsageTotals {
     var total = UsageTotals()
     for file in self.recentFiles(
@@ -217,7 +331,7 @@ public actor LocalUsageScanner {
     {
       try Task.checkCancellation()
       let metadata = try self.metadata(file)
-      let key = Self.fileKey(provider: .grok, url: file)
+      let key = self.fileKey(provider: .grok, url: file)
       retainedKeys.insert(key)
       var record = index.records[key]
       if record?.size != metadata.size || record?.modifiedAt != metadata.modifiedAt {
@@ -232,6 +346,7 @@ public actor LocalUsageScanner {
           recentRows: [:],
           recentOrder: [])
         index.records[key] = record
+        indexChanged = true
       }
       total.add(record?.totals(since: cutoffKey) ?? UsageTotals())
     }
@@ -493,9 +608,13 @@ public actor LocalUsageScanner {
       [.posixPermissions: NSNumber(value: Int16(0o600))], ofItemAtPath: self.cacheURL.path)
   }
 
-  private static func fileKey(provider: ProviderID, url: URL) -> String {
-    let digest = SHA256.hash(data: Data(url.standardizedFileURL.path.utf8))
-    return provider.rawValue + ":" + digest.map { String(format: "%02x", $0) }.joined()
+  private func fileKey(provider: ProviderID, url: URL) -> String {
+    let path = url.standardizedFileURL.path
+    if let cached = self.fileKeys[provider]?[path] { return cached }
+    let digest = SHA256.hash(data: Data(path.utf8))
+    let key = provider.rawValue + ":" + digest.map { String(format: "%02x", $0) }.joined()
+    self.fileKeys[provider, default: [:]][path] = key
+    return key
   }
 
   private static func dayKey(_ date: Date) -> String {
@@ -573,7 +692,19 @@ struct UsageTotals: Codable, Equatable {
     self.costUSD = max(0, self.costUSD - other.costUSD)
   }
 
-  func summary(provider: ProviderID, periodDays: Int, now: Date) -> LocalUsageSummary {
+  func totalTokens(provider: ProviderID) -> Int64 {
+    self.input + (provider == .anthropic ? self.cached : 0) + self.cacheWrite + self.output
+  }
+
+  func summary(
+    provider: ProviderID,
+    periodDays: Int,
+    today: UsageTotals,
+    cycle: UsageTotals,
+    cycleStartedAt: Date,
+    now: Date,
+    dailyTokens: [DailyUsage] = []
+  ) -> LocalUsageSummary {
     LocalUsageSummary(
       provider: provider,
       periodDays: periodDays,
@@ -583,7 +714,13 @@ struct UsageTotals: Codable, Equatable {
       outputTokens: self.output,
       apiEquivalentCostUSD: self.costUSD,
       isCostEstimate: self.estimated,
-      fetchedAt: now)
+      todayTokens: today.totalTokens(provider: provider),
+      cycleTokens: cycle.totalTokens(provider: provider),
+      cycleAPIEquivalentCostUSD: cycle.costUSD,
+      cycleStartedAt: cycleStartedAt,
+      isCycleCostEstimate: cycle.estimated,
+      fetchedAt: now,
+      dailyTokens: dailyTokens)
   }
 }
 

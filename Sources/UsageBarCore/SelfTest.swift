@@ -14,6 +14,133 @@ public enum UsageBarSelfTests {
     else { throw Failure("usage percentage clamping") }
     passed.append("usage percentage clamping")
 
+    let paceNow = Date(timeIntervalSince1970: 1_900_000_000)
+    let paceReset = paceNow.addingTimeInterval(6 * 24 * 60 * 60)
+    let deficitPace = UsagePaceProjection.calculate(
+      for: UsageWindow(
+        id: "weekly", label: "Weekly", usedPercent: 20,
+        windowMinutes: 7 * 24 * 60, resetsAt: paceReset),
+      now: paceNow)
+    let reservePace = UsagePaceProjection.calculate(
+      for: UsageWindow(
+        id: "weekly", label: "Weekly", usedPercent: 10,
+        windowMinutes: 7 * 24 * 60, resetsAt: paceReset),
+      now: paceNow)
+    let onPace = UsagePaceProjection.calculate(
+      for: UsageWindow(
+        id: "weekly", label: "Weekly", usedPercent: 14.5,
+        windowMinutes: 7 * 24 * 60, resetsAt: paceReset),
+      now: paceNow)
+    let elapsedPercent = 100.0 / 7.0
+    let justInsideTolerance = UsagePaceProjection.calculate(
+      for: UsageWindow(
+        id: "weekly", label: "Weekly", usedPercent: elapsedPercent + 1.9,
+        windowMinutes: 7 * 24 * 60, resetsAt: paceReset), now: paceNow)
+    let justOutsideDeficit = UsagePaceProjection.calculate(
+      for: UsageWindow(
+        id: "weekly", label: "Weekly", usedPercent: elapsedPercent + 2.1,
+        windowMinutes: 7 * 24 * 60, resetsAt: paceReset), now: paceNow)
+    let justOutsideReserve = UsagePaceProjection.calculate(
+      for: UsageWindow(
+        id: "weekly", label: "Weekly", usedPercent: elapsedPercent - 2.1,
+        windowMinutes: 7 * 24 * 60, resetsAt: paceReset), now: paceNow)
+    guard deficitPace?.position == .deficit,
+      abs((deficitPace?.variancePercent ?? 0) - 5.714) < 0.01,
+      deficitPace?.projectedExhaustionAt == paceNow.addingTimeInterval(4 * 24 * 60 * 60),
+      reservePace?.position == .reserve,
+      abs((reservePace?.projectedRemainingPercent ?? 0) - 30) < 0.01,
+      onPace?.position == .onPace,
+      justInsideTolerance?.position == .onPace,
+      justOutsideDeficit?.position == .deficit,
+      justOutsideReserve?.position == .reserve,
+      UsagePaceProjection.onPaceTolerancePercent == 2,
+      UsagePaceState.calculate(
+        for: UsageWindow(
+          id: "weekly", label: "Weekly", usedPercent: 20,
+          windowMinutes: 7 * 24 * 60, resetsAt: paceReset),
+        fetchedAt: paceNow, now: paceNow) == .deficit(percent: deficitPace!.variancePercent),
+      UsagePaceState.calculate(
+        for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 100),
+        fetchedAt: paceNow, now: paceNow) == .exhausted,
+      UsagePaceState.calculate(
+        for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 20),
+        fetchedAt: paceNow.addingTimeInterval(-31 * 60), now: paceNow) == .stale,
+      UsagePaceProjection.calculate(
+        for: UsageWindow(
+          id: "expired", label: "Weekly", usedPercent: 20,
+          windowMinutes: 7 * 24 * 60, resetsAt: paceNow), now: paceNow) == nil
+    else { throw Failure("usage pace projection") }
+    passed.append("usage pace projection")
+
+    // Smart alerts fire on the transition into deficit, not on every refresh.
+    let riskReset = paceNow.addingTimeInterval(2 * 24 * 60 * 60)
+    func weekly(_ used: Double) -> UsageSnapshot {
+      UsageSnapshot(
+        provider: .openAI,
+        windows: [
+          UsageWindow(
+            id: "weekly", label: "Weekly", usedPercent: used,
+            windowMinutes: 7 * 24 * 60, resetsAt: riskReset),
+          UsageWindow(
+            id: "build-share", label: "Build share", usedPercent: used,
+            windowMinutes: 7 * 24 * 60, resetsAt: riskReset),
+        ],
+        source: "self-test")
+    }
+    let safeSnapshot = weekly(5)
+    let riskySnapshot = weekly(80)
+    let entering = SmartAlertDetector.deficitAlerts(
+      previous: safeSnapshot, current: riskySnapshot, now: paceNow)
+    let staying = SmartAlertDetector.deficitAlerts(
+      previous: riskySnapshot, current: riskySnapshot, now: paceNow)
+    let neverInDeficit = SmartAlertDetector.deficitAlerts(
+      previous: safeSnapshot, current: safeSnapshot, now: paceNow)
+    guard entering.count == 1,
+      case .enteredDeficit(let alertProvider, let alertWindow, _, let deficit, _, let alertReset) =
+        entering[0],
+      alertProvider == .openAI,
+      // Component shares never raise their own alert.
+      alertWindow == "weekly",
+      deficit > 0,
+      alertReset == riskReset,
+      staying.isEmpty,
+      neverInDeficit.isEmpty,
+      entering[0].preferenceKey == "deficit",
+      SmartAlertDetector.isStale(
+        lastUpdated: paceNow.addingTimeInterval(-31 * 60), now: paceNow),
+      !SmartAlertDetector.isStale(
+        lastUpdated: paceNow.addingTimeInterval(-29 * 60), now: paceNow),
+      !SmartAlertDetector.isStale(lastUpdated: nil, now: paceNow),
+      SmartAlertDetector.isIncident(.degraded),
+      SmartAlertDetector.isIncident(.outage),
+      !SmartAlertDetector.isIncident(.operational),
+      !SmartAlertDetector.isIncident(.unknown),
+      !SmartAlertDetector.isIncident(nil)
+    else { throw Failure("smart alert detection") }
+    passed.append("smart alert detection")
+
+    // The daily series is continuous, ordered oldest first, and quiet days are
+    // present rather than missing.
+    let seriesNow = Date(timeIntervalSince1970: 1_760_000_000)
+    let seriesSummary = LocalUsageSummary(
+      provider: .openAI, periodDays: 30, inputTokens: 10, outputTokens: 5,
+      apiEquivalentCostUSD: 1,
+      dailyTokens: (0..<30).reversed().compactMap { offset in
+        Calendar.current.date(byAdding: .day, value: -offset, to: seriesNow).map {
+          let formatter = DateFormatter()
+          formatter.locale = Locale(identifier: "en_US_POSIX")
+          formatter.dateFormat = "yyyy-MM-dd"
+          return DailyUsage(day: formatter.string(from: $0), tokens: offset % 4 == 0 ? 0 : 100)
+        }
+      })
+    guard seriesSummary.dailyTokens.count == 30,
+      seriesSummary.dailyTokens == seriesSummary.dailyTokens.sorted(by: { $0.day < $1.day }),
+      seriesSummary.dailyTokens.contains(where: { $0.tokens == 0 }),
+      Set(seriesSummary.dailyTokens.map(\.day)).count == 30,
+      DailyUsage(day: "2026-01-01", tokens: -5).tokens == 0
+    else { throw Failure("daily usage series") }
+    passed.append("daily usage series")
+
     let httpConfiguration = ProviderHTTPSession.shared.configuration
     guard httpConfiguration.urlCache == nil,
       httpConfiguration.httpCookieStorage == nil,
@@ -21,6 +148,45 @@ public enum UsageBarSelfTests {
       httpConfiguration.requestCachePolicy == .reloadIgnoringLocalCacheData
     else { throw Failure("ephemeral provider HTTP session") }
     passed.append("ephemeral provider HTTP session")
+
+    let healthyStatus = try ServiceStatusClient.decodeStatuspage(
+      Data(#"{"status":{"indicator":"none","description":"All Systems Operational"}}"#.utf8),
+      provider: .openAI)
+    let degradedStatus = try ServiceStatusClient.decodeStatuspage(
+      Data(#"{"status":{"indicator":"minor","description":"Partial System Degradation"}}"#.utf8),
+      provider: .anthropic)
+    let xAIStatus = ServiceStatusClient.decodeXAI(
+      Data(
+        """
+        <rss><channel><item><title>[Grok (Web)] Slow responses</title>
+        <description><h3>Status: INVESTIGATING</h3><p>Severity: degraded</p></description>
+        </item></channel></rss>
+        """.utf8))
+    guard healthyStatus.health == .operational,
+      degradedStatus.health == .degraded,
+      xAIStatus.health == .degraded
+    else { throw Failure("official service status decoding") }
+    passed.append("official service status decoding")
+
+    let notificationReset = Date(timeIntervalSince1970: 1_900_000_000)
+    let oldNotificationSnapshot = UsageSnapshot(
+      provider: .openAI,
+      windows: [
+        UsageWindow(
+          id: "weekly", label: "Weekly", usedPercent: 49, resetsAt: notificationReset)
+      ], source: "test")
+    let newNotificationSnapshot = UsageSnapshot(
+      provider: .openAI,
+      windows: [
+        UsageWindow(
+          id: "weekly", label: "Weekly", usedPercent: 91, resetsAt: notificationReset)
+      ], source: "test")
+    let crossings = UsageNotificationEventDetector.thresholdCrossings(
+      previous: oldNotificationSnapshot, current: newNotificationSnapshot)
+    guard crossings.map(\.threshold) == [50, 90] else {
+      throw Failure("usage notification thresholds")
+    }
+    passed.append("usage notification thresholds")
 
     let openAI = try JSONDecoder().decode(OpenAIRateLimitsResponse.self, from: openAIData)
     guard openAI.rateLimits.primary?.usedPercent == 25.5,
@@ -114,6 +280,8 @@ public enum UsageBarSelfTests {
       grok.config?.currentPeriod?.type == "USAGE_PERIOD_TYPE_WEEKLY",
       grok.config?.includedSpend?.usedMinorUnits == 12345,
       grok.config?.includedSpend?.limitMinorUnits == 99900,
+      grok.config?.productUsage?.count == 2,
+      grok.config?.productUsage?.first?.product == "GrokBuild",
       grok.subscriptionTier == "SuperGrok Heavy"
     else { throw Failure("Grok billing decoding") }
     passed.append("Grok billing decoding")
@@ -177,11 +345,23 @@ public enum UsageBarSelfTests {
       roots: .init(codex: codexRoot, claude: claudeRoot, grok: grokRoot),
       cacheURL: usageCache)
     let firstUsage = try await scanner.scan(periodDays: 30, now: now)
+    let firstCacheModification = try usageCache.resourceValues(
+      forKeys: [.contentModificationDateKey]).contentModificationDate
+    try await Task.sleep(for: .milliseconds(20))
     let secondUsage = try await scanner.scan(periodDays: 30, now: now)
+    let secondCacheModification = try usageCache.resourceValues(
+      forKeys: [.contentModificationDateKey]).contentModificationDate
     guard firstUsage[.openAI]?.totalTokens == 1020,
+      firstUsage[.openAI]?.todayTokens == 1020,
+      firstUsage[.openAI]?.cycleTokens == 1020,
       firstUsage[.anthropic]?.totalTokens == 137,
+      firstUsage[.anthropic]?.todayTokens == 137,
+      firstUsage[.anthropic]?.cycleTokens == 137,
       firstUsage[.grok]?.totalTokens == 500,
+      firstUsage[.grok]?.todayTokens == 500,
+      firstUsage[.grok]?.cycleTokens == 500,
       firstUsage == secondUsage,
+      firstCacheModification == secondCacheModification,
       (firstUsage[.openAI]?.apiEquivalentCostUSD ?? 0) > 0,
       (firstUsage[.anthropic]?.apiEquivalentCostUSD ?? 0) > 0,
       firstUsage[.grok]?.isCostEstimate == true,

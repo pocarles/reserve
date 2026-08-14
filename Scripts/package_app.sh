@@ -3,7 +3,7 @@ set -euo pipefail
 
 project_dir=${0:A:h:h}
 configuration=${CONFIGURATION:-release}
-app_dir="$project_dir/UsageBar.app"
+app_dir="$project_dir/Reserve.app"
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
@@ -20,6 +20,7 @@ if [[ -d "$resource_bundle" ]]; then
   cp -R "$resource_bundle" "$resources_dir/"
 fi
 cp "$project_dir/Support/Info.plist" "$contents_dir/Info.plist"
+cp "$project_dir/Support/Reserve.icns" "$resources_dir/Reserve.icns"
 cp "$project_dir/LICENSE" "$resources_dir/LICENSE.txt"
 cp "$project_dir/THIRD_PARTY_NOTICES.md" "$resources_dir/THIRD_PARTY_NOTICES.md"
 

@@ -15,11 +15,11 @@ package:
 	./Scripts/package_app.sh
 
 run: package
-	open UsageBar.app
+	open Reserve.app
 
 probe:
 	swift run usagebar-probe all
 
 clean:
 	swift package clean
-	rm -rf UsageBar.app
+	rm -rf Reserve.app
