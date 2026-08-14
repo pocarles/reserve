@@ -1144,7 +1144,7 @@ enum DashboardMetrics {
   static let footerGap: CGFloat = 14
   static let cardRowGap: CGFloat = 10
   static let identityGap: CGFloat = 12
-  static let meterHeight: CGFloat = 8
+  static let meterHeight: CGFloat = 6
 }
 
 @MainActor
