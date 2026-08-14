@@ -62,9 +62,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       descendants.compactMap { $0 as? NSStackView }.first.map {
         $0.frame.minY >= 0 && $0.frame.maxY <= self.dashboardController.view.bounds.height
       } ?? false
+    let size = self.dashboardController.preferredContentSize
     let dashboardFits =
-      self.dashboardController.preferredContentSize.width == 444
-      && self.dashboardController.preferredContentSize.height == 748
+      size.width == DashboardMetrics.width
+      && size.height >= DashboardMetrics.minimumHeight
+      && size.height <= DashboardMetrics.maximumHeight
+      && size.height >= self.dashboardController.view.bounds.height
     let oauthURLParsingIsSafe =
       UsageStore.claudeAuthorizationURL(
         in: "Authenticate at https://claude.com/cai/oauth/authorize?code=sample")?.host
@@ -76,7 +79,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits), oauthURL=\(oauthURLParsingIsSafe)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), oauthURL=\(oauthURLParsingIsSafe)"
       )
     }
     return (

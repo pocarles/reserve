@@ -64,14 +64,33 @@ The Anthropic probe honors the same explicit Keychain-consent setting as the app
 dashboard and settings window, then verifies all provider cards, summary indicators,
 actions, checkboxes, and the refresh picker without changing any setting.
 
-The popover fits its complete dashboard without scrolling. Its overview shows the
-number of enabled providers, their combined 30-day tokens, API-equivalent value,
-and net savings versus configured monthly subscriptions. Each provider card leads
-with its weekly usage percentage and next reset, followed by the progress bar and
-any additional reset windows. Token totals, API value, and savings sit below that
-quota information; the plan name and subscription cost are plain text beside the
-provider identity. Subscription costs are editable in Settings because plan names
-and billing arrangements vary.
+To inspect the interface without opening the app, render either surface to a PNG:
+
+```sh
+swift run UsageBar --render-dashboard /tmp/dashboard.png --appearance dark
+swift run UsageBar --render-settings /tmp/settings.png
+```
+
+The dashboard render uses built-in preview data; add `--empty` to render the
+not-yet-connected state. `--appearance light|dark` forces an appearance.
+
+The popover sizes itself to its content, so it fits the complete dashboard
+without scrolling and without trailing dead space. Its overview leads with net
+savings versus the configured monthly subscriptions, with combined 30-day tokens,
+API-equivalent value, and total plan cost beside it. Each provider card leads with
+its weekly usage percentage and next reset, followed by the meter and any
+additional reset windows as compact chips. Token totals, API value, and savings
+sit below a rule; the plan name and subscription cost are plain text beside the
+provider identity. A provider with no readable limits shows what to do instead of
+an empty meter, because a bar at zero reads as "nothing used" rather than "not
+connected". Subscription costs are editable in Settings because plan names and
+billing arrangements vary.
+
+The interface is a warm, paper-like design that follows the system appearance:
+an ivory sheet with white cards in light mode, and the same composition in warm
+charcoal in dark mode. Display numbers are set in New York; data and labels are
+set in the system sans with monospaced digits. Colors, type, and the shared
+controls live in `Sources/UsageBar/DesignSystem.swift`.
 
 API value is an estimate, not a provider bill. OpenAI and Anthropic calculations
 use the observed input, cache, cache-write, and output mix when available. Grok's
