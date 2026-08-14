@@ -126,6 +126,24 @@ enum ReserveColor {
   }
 }
 
+extension NSView {
+  /// Resolves an adaptive colour in *this view's* appearance.
+  ///
+  /// `NSColor.cgColor` resolves against the current drawing appearance, which
+  /// during view construction is whatever the thread happens to be set to and
+  /// inside `viewDidChangeEffectiveAppearance` is still the old one. Assigning
+  /// `someDynamicColor.cgColor` to a layer therefore freezes the wrong variant,
+  /// which is why layer-backed surfaces used to keep their previous appearance.
+  @MainActor
+  func resolvedCGColor(_ color: NSColor) -> CGColor {
+    var resolved = color.cgColor
+    self.effectiveAppearance.performAsCurrentDrawingAppearance {
+      resolved = color.cgColor
+    }
+    return resolved
+  }
+}
+
 /// A non-editable label with optional letter spacing.
 @MainActor
 final class ReserveLabel: NSTextField {
@@ -210,16 +228,24 @@ final class ReserveLabel: NSTextField {
 /// A one-pixel rule.
 @MainActor
 final class ReserveHairline: NSView {
+  private let color: NSColor
+
   init(width: CGFloat? = nil, color: NSColor? = nil) {
+    self.color = color ?? ReserveColor.hairline
     super.init(frame: .zero)
     self.wantsLayer = true
-    self.layer?.backgroundColor = (color ?? ReserveColor.hairline).cgColor
+    self.layer?.backgroundColor = self.resolvedCGColor(self.color)
     self.translatesAutoresizingMaskIntoConstraints = false
     self.heightAnchor.constraint(equalToConstant: 1).isActive = true
     if let width { self.widthAnchor.constraint(equalToConstant: width).isActive = true }
   }
 
   required init?(coder: NSCoder) { nil }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    self.layer?.backgroundColor = self.resolvedCGColor(self.color)
+  }
 }
 
 /// A soft surface used for grouped content. It carries fill and radius only —
@@ -238,14 +264,20 @@ class ReserveSurface: NSView {
     self.wantsLayer = true
     self.layer?.cornerRadius = radius
     self.layer?.cornerCurve = .continuous
-    self.layer?.backgroundColor = fill?.withAlphaComponent(fillAlpha).cgColor
+    self.applyFill()
   }
 
   required init?(coder: NSCoder) { nil }
 
+  private func applyFill() {
+    self.layer?.backgroundColor = self.fill.map {
+      self.resolvedCGColor($0.withAlphaComponent(self.fillAlpha))
+    }
+  }
+
   override func viewDidChangeEffectiveAppearance() {
     super.viewDidChangeEffectiveAppearance()
-    self.layer?.backgroundColor = self.fill?.withAlphaComponent(self.fillAlpha).cgColor
+    self.applyFill()
   }
 }
 
@@ -375,6 +407,7 @@ final class ReserveSparkline: NSView {
 @MainActor
 final class ReserveTextButton: NSButton {
   private let handler: () -> Void
+  private var filledColor: NSColor?
 
   init(
     title: String,
@@ -399,8 +432,9 @@ final class ReserveTextButton: NSButton {
     self.wantsLayer = true
     self.layer?.cornerRadius = ReserveRadius.control
     self.layer?.cornerCurve = .continuous
-    if filled {
-      self.layer?.backgroundColor = color.withAlphaComponent(0.14).cgColor
+    self.filledColor = filled ? color.withAlphaComponent(0.14) : nil
+    if let filledColor = self.filledColor {
+      self.layer?.backgroundColor = self.resolvedCGColor(filledColor)
     }
     self.target = self
     self.action = #selector(self.performAction)
@@ -416,6 +450,11 @@ final class ReserveTextButton: NSButton {
 
   override func resetCursorRects() {
     self.addCursorRect(self.bounds, cursor: .pointingHand)
+  }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    if let filledColor { self.layer?.backgroundColor = self.resolvedCGColor(filledColor) }
   }
 
   @objc private func performAction() { self.handler() }
@@ -467,7 +506,8 @@ final class ReserveIconButton: NSButton {
     self.setAccessibilityLabel(toolTip)
     self.isBordered = false
     self.wantsLayer = true
-    self.layer?.backgroundColor = ReserveColor.elevated.withAlphaComponent(0.7).cgColor
+    self.layer?.backgroundColor = self.resolvedCGColor(
+      ReserveColor.elevated.withAlphaComponent(0.7))
     self.layer?.cornerRadius = ReserveRadius.control + 2
     self.layer?.cornerCurve = .continuous
     self.target = self
@@ -497,6 +537,13 @@ final class ReserveIconButton: NSButton {
   }
 
   var isSpinning: Bool { self.layer?.animation(forKey: "reserve.refresh.spin") != nil }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    self.layer?.backgroundColor = self.resolvedCGColor(
+      ReserveColor.elevated.withAlphaComponent(0.7))
+    self.contentTintColor = ReserveColor.accent
+  }
 
   required init?(coder: NSCoder) { nil }
 

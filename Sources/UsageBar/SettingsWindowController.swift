@@ -51,6 +51,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   private var renewalStatusLabels: [ProviderID: NSTextField] = [:]
   private var expandedProviders: Set<ProviderID> = []
   private var availableReleaseURL: URL?
+  /// Held so the registration is explicit; the observer closure itself keeps
+  /// only a weak reference to this controller, which lives for the app's run.
+  private var storeObserver: UsageStore.ObserverToken?
+  /// Guards against a pane rebuild re-entering through a store write made by one
+  /// of the controls it is building.
+  private var isApplyingPane = false
 
   init(store: UsageStore) {
     self.store = store
@@ -73,6 +79,22 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     toolbar.displayMode = .iconAndLabel
     toolbar.selectedItemIdentifier = self.pane.itemIdentifier
     window.toolbar = toolbar
+    self.applyPane(animated: false)
+    // Settings shows live provider state — connection, plan, freshness — so it
+    // has to observe the same store the dashboard does. Without this it keeps
+    // whatever was true when the pane was last built.
+    self.storeObserver = store.observe { [weak self] in self?.storeChanged() }
+  }
+
+  /// Rebuilds the visible pane when the store changes.
+  ///
+  /// Rebuilding replaces every control, so it is deliberately skipped while a
+  /// text field is being edited — otherwise a refresh landing mid-keystroke
+  /// would take the field editor away and discard what was typed.
+  private func storeChanged() {
+    guard let window = self.window, window.isVisible else { return }
+    guard !self.isApplyingPane else { return }
+    if window.firstResponder is NSText { return }
     self.applyPane(animated: false)
   }
 
@@ -142,6 +164,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   /// anchored the way macOS settings windows do.
   private func applyPane(animated: Bool) {
     guard let window = self.window else { return }
+    guard !self.isApplyingPane else { return }
+    self.isApplyingPane = true
+    defer { self.isApplyingPane = false }
     window.title = self.pane.title
     let content = self.makeContentView()
     content.layoutSubtreeIfNeeded()
@@ -1326,10 +1351,9 @@ private final class MenuBarPreview: NSView {
       store.menuBarProvider.map { "Menu bar preview, \($0.displayName)" }
         ?? "Menu bar preview, Reserve icon")
     self.wantsLayer = true
-    self.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+    self.applyChrome()
     self.layer?.cornerRadius = 6
     self.layer?.borderWidth = 1
-    self.layer?.borderColor = NSColor.separatorColor.cgColor
 
     let now = Date()
     let summaries = store.orderedStates.filter { store.isEnabled($0.provider) }
@@ -1375,6 +1399,16 @@ private final class MenuBarPreview: NSView {
   }
 
   required init?(coder: NSCoder) { nil }
+
+  private func applyChrome() {
+    self.layer?.backgroundColor = self.resolvedCGColor(.controlBackgroundColor)
+    self.layer?.borderColor = self.resolvedCGColor(.separatorColor)
+  }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    self.applyChrome()
+  }
 }
 
 /// Each choice previews the theme's surfaces as well as its control accent.
@@ -1445,7 +1479,7 @@ private final class SettingsSeparator: NSView {
   init(width: CGFloat) {
     super.init(frame: .zero)
     self.wantsLayer = true
-    self.layer?.backgroundColor = NSColor.separatorColor.cgColor
+    self.layer?.backgroundColor = self.resolvedCGColor(.separatorColor)
     self.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
       self.heightAnchor.constraint(equalToConstant: 1),
@@ -1454,6 +1488,11 @@ private final class SettingsSeparator: NSView {
   }
 
   required init?(coder: NSCoder) { nil }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    self.layer?.backgroundColor = self.resolvedCGColor(.separatorColor)
+  }
 }
 
 @MainActor
@@ -1461,7 +1500,7 @@ private final class SettingsProviderLogo: NSView {
   init(provider: ProviderID) {
     super.init(frame: .zero)
     self.wantsLayer = true
-    self.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+    self.layer?.backgroundColor = self.resolvedCGColor(.controlBackgroundColor)
     self.layer?.cornerRadius = 5
     self.setAccessibilityElement(false)
     let image = NSImageView(image: ProviderArtwork.image(for: provider))
@@ -1481,6 +1520,11 @@ private final class SettingsProviderLogo: NSView {
   }
 
   required init?(coder: NSCoder) { nil }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    self.layer?.backgroundColor = self.resolvedCGColor(.controlBackgroundColor)
+  }
 }
 
 private final class SettingsTextField: NSTextField {

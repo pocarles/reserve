@@ -39,7 +39,32 @@ final class UsageStore {
   /// across the rebuilds a refresh triggers.
   private(set) var refreshStartedAt: Date?
   private(set) var isScanningLocalUsage = false
-  var onChange: (() -> Void)?
+
+  /// Identifies one registered observer. Surfaces come and go, so removal has to
+  /// be precise rather than "clear the callback".
+  struct ObserverToken: Hashable {
+    fileprivate let id: Int
+  }
+
+  /// Every surface observes the same store. This used to be a single closure
+  /// slot, which meant the second surface to register silently replaced the
+  /// first and that surface then never saw another update.
+  private var observers: [(token: ObserverToken, handler: () -> Void)] = []
+  private var nextObserverID = 0
+  private var isNotifying = false
+  private var needsFollowUpNotification = false
+
+  @discardableResult
+  func observe(_ handler: @escaping () -> Void) -> ObserverToken {
+    self.nextObserverID += 1
+    let token = ObserverToken(id: self.nextObserverID)
+    self.observers.append((token, handler))
+    return token
+  }
+
+  func removeObserver(_ token: ObserverToken) {
+    self.observers.removeAll { $0.token == token }
+  }
 
   private let cache = SnapshotCache()
   private let localUsageScanner = LocalUsageScanner()
@@ -56,6 +81,9 @@ final class UsageStore {
   private var loginOutputBuffers: [ProviderID: Data] = [:]
   private var openedLoginURLs: Set<ProviderID> = []
   private var lastLocalUsageScanAt: Date?
+  /// The newest refresh request per provider. Results from any older request are
+  /// discarded rather than applied.
+  private var refreshTokens: [ProviderID: Int] = [:]
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
   /// Which provider row is open in the popover. Transient interface state, so
@@ -622,8 +650,20 @@ final class UsageStore {
     ])
   }
 
+  /// Notifies every observer. A change made from inside an observer is coalesced
+  /// into one follow-up pass rather than recursing, so observers always settle on
+  /// the final state and a store update can never run away.
   private func changed() {
-    self.onChange?()
+    guard !self.isNotifying else {
+      self.needsFollowUpNotification = true
+      return
+    }
+    self.isNotifying = true
+    defer { self.isNotifying = false }
+    repeat {
+      self.needsFollowUpNotification = false
+      for observer in self.observers { observer.handler() }
+    } while self.needsFollowUpNotification
   }
 
   private func finishLogin(_ provider: ProviderID, status: Int32) {
@@ -772,9 +812,18 @@ final class UsageStore {
     persist: Bool = true,
     notify: Bool = true
   ) async {
+    // A manual refresh and the scheduled sweep can be in flight for the same
+    // provider at once. Without a token the slower request wins simply by
+    // finishing last, overwriting newer numbers with older ones.
+    let token = (self.refreshTokens[provider] ?? 0) + 1
+    self.refreshTokens[provider] = token
+    func isCurrent() -> Bool { self.refreshTokens[provider] == token }
+
     defer {
-      self.states[provider]?.isRefreshing = false
-      if notify { self.changed() }
+      if isCurrent() {
+        self.states[provider]?.isRefreshing = false
+        if notify { self.changed() }
+      }
     }
 
     let fetcher: any UsageProvider =
@@ -784,11 +833,14 @@ final class UsageStore {
       case .grok: GrokProvider()
       }
     let previousHealth = self.states[provider]?.serviceStatus?.health
-    self.states[provider]?.serviceStatus = await self.serviceStatusClient.fetch(provider)
+    let status = await self.serviceStatusClient.fetch(provider)
+    guard isCurrent() else { return }
+    self.states[provider]?.serviceStatus = status
     self.reportServiceHealth(provider, previous: previousHealth)
     do {
       let previous = self.states[provider]?.snapshot
       let snapshot = try await fetcher.fetch()
+      guard isCurrent() else { return }
       self.states[provider]?.snapshot = snapshot
       self.states[provider]?.error = nil
       self.notifications.update(
@@ -797,8 +849,12 @@ final class UsageStore {
         nextPlanRenewal: self.nextRenewal(for: provider))
       if persist { await self.persistSnapshots() }
     } catch {
+      guard isCurrent() else { return }
+      // The cached snapshot is deliberately kept: a failed refresh should leave
+      // the last known numbers on screen with an error beside them.
       self.states[provider]?.error = String(error.localizedDescription.prefix(500))
     }
+    guard isCurrent() else { return }
     self.reportStaleness(provider)
   }
 

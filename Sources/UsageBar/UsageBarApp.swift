@@ -33,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let providersRenderIndex = CommandLine.arguments.firstIndex(of: "--render-providers")
     let menuBarRenderIndex = CommandLine.arguments.firstIndex(of: "--render-menu-bar")
     let isUIStressTest = CommandLine.arguments.contains("--stress-ui")
+    let isLifecycleSelfTest = CommandLine.arguments.contains("--self-test-lifecycle")
+    let lifecycleCaptureIndex = CommandLine.arguments.firstIndex(of: "--capture-lifecycle")
     let isDashboardRender = renderIndex != nil
     let isSettingsRender = settingsRenderIndex != nil
     let isAppearanceRender = appearanceRenderIndex != nil
@@ -41,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if isUISelfTest || isDashboardRender || isSettingsRender || isAppearanceRender
       || isAboutRender || alertsRenderIndex != nil || insightsRenderIndex != nil
       || providersRenderIndex != nil || menuBarRenderIndex != nil || isUIStressTest
+      || isLifecycleSelfTest || lifecycleCaptureIndex != nil
     {
       let testDefaults = UserDefaults(
         suiteName: "UsageBar.UISelfTest.\(UUID().uuidString)")!
@@ -50,7 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     if isUISelfTest || isDashboardRender || isSettingsRender || isAppearanceRender || isAboutRender
       || alertsRenderIndex != nil || insightsRenderIndex != nil || providersRenderIndex != nil
-      || menuBarRenderIndex != nil || isUIStressTest
+      || menuBarRenderIndex != nil || isUIStressTest || isLifecycleSelfTest
+      || lifecycleCaptureIndex != nil
     {
       let scenario = CommandLine.arguments.firstIndex(of: "--scenario").flatMap { index in
         CommandLine.arguments.indices.contains(index + 1)
@@ -136,6 +140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       self.verifyNotifications()
     } else if isUIStressTest {
       self.runUIStressTest()
+    } else if let lifecycleCaptureIndex,
+      CommandLine.arguments.indices.contains(lifecycleCaptureIndex + 1)
+    {
+      self.runLifecycleCapture(directory: CommandLine.arguments[lifecycleCaptureIndex + 1])
+    } else if isLifecycleSelfTest {
+      self.runLifecycleSelfTest()
     } else if isUISelfTest {
       self.runUISelfTest()
     } else if CommandLine.arguments.contains("--show-settings") {
@@ -391,6 +401,134 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     self.store?.refreshAfterResumeIfNeeded()
   }
 
+  /// Drives real state transitions through the live surfaces: appearance changes
+  /// while both are open, and provider disclosure with the popover on screen.
+  private func runLifecycleSelfTest() {
+    guard let store = self.store,
+      let statusController = self.statusController,
+      let settingsController = self.settingsControllerForUse()
+    else {
+      Self.finishUISelfTest(success: false, details: "lifecycle controllers were not created")
+      return
+    }
+    Task { @MainActor in
+      settingsController.showWindow(nil)
+      statusController.setStressTestAnimationsEnabled(false)
+      // The status item needs a run-loop turn before its button has a window,
+      // and a popover cannot be shown from a view that is not in one yet.
+      try? await Task.sleep(for: .milliseconds(600))
+      statusController.showMenu()
+      try? await Task.sleep(for: .milliseconds(400))
+      guard statusController.isDashboardShownForTesting else {
+        Self.finishUISelfTest(
+          success: false,
+          details: "the dashboard popover could not be shown; lifecycle checks need a real "
+            + "status item, so run this from Reserve.app in a logged-in session")
+        return
+      }
+
+      var failures: [String] = []
+      let observation = LifecycleSelfTest.checkObservation(store: store)
+      failures.append(contentsOf: observation.failures)
+      failures.append(contentsOf: LifecycleSelfTest.checkGeometry().failures)
+
+      let disclosure = LifecycleSelfTest.checkDisclosure(
+        store: store, controller: statusController,
+        toggle: { statusController.toggleProviderDetailForTesting($0) })
+      failures.append(contentsOf: disclosure.failures)
+
+      let enablement = LifecycleSelfTest.checkEnablement(
+        store: store, controller: statusController)
+      failures.append(contentsOf: enablement.failures)
+
+      let appearance = LifecycleSelfTest.checkAppearance(
+        store: store, controller: statusController, settings: settingsController)
+      failures.append(contentsOf: appearance.failures)
+
+      settingsController.window?.orderOut(nil)
+      statusController.closeMenuForStressTest()
+      try? await Task.sleep(for: .milliseconds(400))
+      if statusController.mouseMonitorCountForTesting != 0 {
+        failures.append("mouse monitors survived the popover closing")
+      }
+
+      Self.finishUISelfTest(
+        success: failures.isEmpty,
+        details: failures.isEmpty
+          ? "appearance reaches every open surface across \(AppearanceMode.allCases.count) modes "
+            + "and \(AppearanceTheme.allCases.count) themes, provider disclosure never costs a "
+            + "card, enabling a provider moves only that provider, and the store notifies every "
+            + "observer"
+          : "\(failures.count) lifecycle failures: " + failures.prefix(12).joined(separator: " | "))
+    }
+  }
+
+  /// Captures the two reported failures from the live popover: an appearance
+  /// change with Settings and the dashboard both open, and provider disclosure.
+  private func runLifecycleCapture(directory: String) {
+    guard let store = self.store,
+      let statusController = self.statusController,
+      let settingsController = self.settingsControllerForUse()
+    else {
+      Self.finishUISelfTest(success: false, details: "capture controllers were not created")
+      return
+    }
+    let folder = URL(fileURLWithPath: directory, isDirectory: true)
+    Task { @MainActor in
+      try? FileManager.default.createDirectory(
+        at: folder, withIntermediateDirectories: true)
+      settingsController.showWindow(nil)
+      statusController.setStressTestAnimationsEnabled(false)
+      try? await Task.sleep(for: .milliseconds(600))
+      statusController.showMenu()
+      try? await Task.sleep(for: .milliseconds(400))
+      guard statusController.isDashboardShownForTesting else {
+        Self.finishUISelfTest(success: false, details: "the popover could not be shown")
+        return
+      }
+
+      var written: [String] = []
+      @MainActor func capture(_ name: String) async {
+        try? await Task.sleep(for: .milliseconds(220))
+        do {
+          try statusController.renderLiveDashboard(
+            to: folder.appendingPathComponent("\(name).png"))
+          written.append(name)
+        } catch {
+          written.append("\(name)=FAILED")
+        }
+      }
+
+      // Appearance: the popover is left open across every change.
+      for (mode, theme) in [
+        (AppearanceMode.light, AppearanceTheme.matrix),
+        (AppearanceMode.dark, AppearanceTheme.matrix),
+        (AppearanceMode.light, AppearanceTheme.ember),
+        (AppearanceMode.dark, AppearanceTheme.ocean),
+        (AppearanceMode.light, AppearanceTheme.graphite),
+        (AppearanceMode.dark, AppearanceTheme.graphite),
+      ] {
+        store.appearanceMode = mode
+        store.appearanceTheme = theme
+        await capture("appearance-\(mode.rawValue)-\(theme.rawValue)")
+      }
+
+      // Disclosure: collapsed, each provider open, and collapsed again.
+      store.appearanceMode = .dark
+      store.appearanceTheme = .ocean
+      await capture("disclosure-collapsed")
+      for provider in ProviderID.allCases where store.isEnabled(provider) {
+        statusController.toggleProviderDetailForTesting(provider)
+        await capture("disclosure-open-\(provider.rawValue)")
+        statusController.toggleProviderDetailForTesting(provider)
+        await capture("disclosure-collapsed-after-\(provider.rawValue)")
+      }
+      Self.finishUISelfTest(
+        success: !written.contains { $0.hasSuffix("FAILED") },
+        details: "captured \(written.count) frames to \(folder.path)")
+    }
+  }
+
   private func runUISelfTest() {
     guard let statusController = self.statusController,
       let settingsController = self.settingsControllerForUse()
@@ -419,8 +557,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       // Warm both lazily created surfaces first; the comparison is about
       // repeated-cycle growth, not AppKit's one-time window-server allocation.
       statusController.setStressTestAnimationsEnabled(false)
+      // The status item needs a run-loop turn before its button has a window;
+      // without it the popover silently never opens and the cycles below would
+      // only exercise Settings.
+      try? await Task.sleep(for: .milliseconds(600))
       statusController.showMenu()
-      try? await Task.sleep(for: .milliseconds(100))
+      try? await Task.sleep(for: .milliseconds(200))
+      guard statusController.isDashboardShownForTesting else {
+        Self.finishUISelfTest(
+          success: false, details: "the popover never opened, so no cycle was exercised")
+        return
+      }
       statusController.closeMenuForStressTest()
       settingsController.showWindow(nil)
       settingsController.window?.orderOut(nil)

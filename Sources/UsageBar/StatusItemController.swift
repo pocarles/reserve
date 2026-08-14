@@ -17,6 +17,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   private var minuteTimer: Timer?
   private var dashboardIsDirty = true
   private var lastDashboardMinute: Int?
+  /// Whether the popover animates. A resize switches this off for Reduce Motion
+  /// and has to restore the configured value rather than assume it was on.
+  private var animatesPopover = true
 
   init(
     store: UsageStore,
@@ -36,16 +39,47 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.popover.behavior = .applicationDefined
     self.popover.animates = true
     self.popover.delegate = self
-    self.store.onChange = { [weak self] in
-      self?.dashboardIsDirty = true
-      self?.updateStatusIcon()
-      if self?.popover.isShown == true {
-        self?.updateDashboardIfNeeded(force: true)
+    self.store.observe { [weak self] in
+      guard let self else { return }
+      self.dashboardIsDirty = true
+      self.applyAppearance()
+      self.updateStatusIcon()
+      if self.popover.isShown {
+        self.updateDashboardIfNeeded(force: true)
       }
-      self?.updateMinuteTimer()
+      self.updateMinuteTimer()
     }
+    // While Reserve follows the system, a system light/dark switch changes no
+    // Reserve state, so nothing else would rebuild the open dashboard.
+    DistributedNotificationCenter.default.addObserver(
+      self, selector: #selector(self.systemAppearanceChanged),
+      name: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil)
+    self.applyAppearance()
     self.updateStatusIcon()
     self.updateMinuteTimer()
+  }
+
+  deinit {
+    DistributedNotificationCenter.default.removeObserver(self)
+  }
+
+  @objc private func systemAppearanceChanged() {
+    // The notification arrives fractionally before AppKit updates its own
+    // effective appearance.
+    Task { @MainActor [weak self] in
+      guard let self, self.store.appearanceMode == .system else { return }
+      self.applyAppearance()
+      self.dashboardIsDirty = true
+      if self.popover.isShown { self.updateDashboardIfNeeded(force: true) }
+      self.updateStatusIcon()
+    }
+  }
+
+  /// Pushes the chosen appearance onto the popover, which does not inherit it.
+  private func applyAppearance() {
+    let appearance = ReserveAppearance.resolvedAppearance
+    self.popover.appearance = appearance
+    self.popover.contentViewController?.view.window?.appearance = appearance
   }
 
   func showMenu() {
@@ -56,7 +90,29 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.popover.performClose(nil)
   }
 
+  /// The window the popover is actually drawing, so lifecycle checks can inspect
+  /// what a person can see rather than a controller's detached view.
+  var dashboardWindowForTesting: NSWindow? {
+    self.popover.contentViewController?.view.window
+  }
+
+  var isDashboardShownForTesting: Bool { self.popover.isShown }
+
+  var dashboardControllerForTesting: DashboardViewController { self.dashboardControllerForUse() }
+
+  var mouseMonitorCountForTesting: Int {
+    (self.localMouseMonitor == nil ? 0 : 1) + (self.globalMouseMonitor == nil ? 0 : 1)
+  }
+
+  /// The same path the disclosure control takes, so lifecycle checks exercise
+  /// the real toggle rather than writing the store directly.
+  func toggleProviderDetailForTesting(_ provider: ProviderID) {
+    self.store.expandedProvider = self.store.expandedProvider == provider ? nil : provider
+    self.expandDashboard()
+  }
+
   func setStressTestAnimationsEnabled(_ enabled: Bool) {
+    self.animatesPopover = enabled
     self.popover.animates = enabled
   }
 
@@ -90,6 +146,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         needsConnection: summary.needsConnection, error: summary.error,
         lastUpdated: summary.lastUpdated, localUsage: summary.localUsage,
         subscriptionCostUSD: summary.subscriptionCostUSD, quotaSource: summary.quotaSource)
+    }
+    // Aggregate copy is checked against three providers. Indexing directly would
+    // crash whenever a provider is disabled, which is an ordinary state.
+    guard previewSummaries.count >= 3 else {
+      return (false, "aggregate copy needs three enabled providers to check")
     }
     let pluralSummary = AllowanceBuilder.headline(
       for: [
@@ -409,6 +470,24 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     )
   }
 
+  /// Captures the dashboard as the popover is actually showing it, in the
+  /// popover window's own appearance. `renderDashboard` draws the controller's
+  /// view offscreen, which cannot show a popover-only defect.
+  func renderLiveDashboard(to url: URL) throws {
+    guard let view = self.popover.contentViewController?.view,
+      view.window != nil
+    else { throw DashboardRenderError.statusButtonUnavailable }
+    view.layoutSubtreeIfNeeded()
+    guard let representation = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+      throw DashboardRenderError.bitmapUnavailable
+    }
+    view.cacheDisplay(in: view.bounds, to: representation)
+    guard let data = representation.representation(using: .png, properties: [:]) else {
+      throw DashboardRenderError.pngUnavailable
+    }
+    try data.write(to: url, options: .atomic)
+  }
+
   func renderDashboard(to url: URL) throws {
     let dashboardController = self.dashboardControllerForUse()
     self.updateDashboardIfNeeded(force: true)
@@ -510,16 +589,20 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // NSPopover is not an animatable property container, so the resize is
     // animated by the popover itself and simply switched off for Reduce Motion.
     let reduced = ReserveMotion.isReduced
-    self.popover.animates = !reduced
+    self.popover.animates = self.animatesPopover && !reduced
     self.popover.contentSize = controller.preferredContentSize
-    self.popover.animates = true
+    self.popover.animates = self.animatesPopover
   }
 
   private func showDashboard() {
     guard let button = self.statusItem.button else { return }
     let dashboardController = self.dashboardControllerForUse()
+    // A reopened surface has to come back in the current appearance, so this is
+    // applied before the content is built rather than after it is on screen.
+    self.applyAppearance()
     self.updateDashboardIfNeeded()
     self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    self.applyAppearance()
     self.popover.contentViewController?.view.window?.level = .normal
     self.startMouseMonitors()
     self.updateMinuteTimer()

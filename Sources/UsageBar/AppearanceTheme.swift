@@ -120,6 +120,19 @@ enum ReserveAppearance {
   static func apply() {
     NSApplication.shared.appearance = Self.mode.nsAppearance
   }
+
+  /// The concrete appearance every Reserve surface has to be given.
+  ///
+  /// Setting `NSApplication.appearance` is enough for ordinary windows, but a
+  /// popover's window is built by AppKit against the status bar and keeps the
+  /// menu bar's appearance (`NSAppearanceNameVibrantLight`) no matter what the
+  /// app asks for. Surfaces that are not plain app windows have to be told.
+  static var resolvedAppearance: NSAppearance {
+    if let explicit = self.mode.nsAppearance { return explicit }
+    let system = NSApplication.shared.effectiveAppearance
+    let match = system.bestMatch(from: [.aqua, .darkAqua]) ?? .aqua
+    return NSAppearance(named: match) ?? system
+  }
 }
 
 private func adaptive(light: UInt32, dark: UInt32) -> NSColor {

@@ -31,6 +31,9 @@ final class DashboardViewController: NSViewController {
   override func loadView() { self.update() }
 
   func update() {
+    // `self.view` would load the view and recurse back into this method, so the
+    // screen is only consulted once there is a view to ask.
+    let screen = (self.isViewLoaded ? self.view.window?.screen : nil) ?? NSScreen.main
     let dashboard = UsageDashboardView(
       states: self.store.orderedStates.filter { self.store.isEnabled($0.provider) },
       selectedMenuBarProvider: self.store.menuBarProvider,
@@ -38,9 +41,15 @@ final class DashboardViewController: NSViewController {
       isRefreshing: self.store.isRefreshingAll || self.store.isScanningLocalUsage,
       refreshStartedAt: self.store.refreshStartedAt,
       now: Date(),
+      maximumHeight: DashboardMetrics.availableHeight(on: screen),
       actions: self.actions)
+    // The size has to be read before the view is installed. Assigning `view`
+    // hands it to the popover, which immediately resizes it to the size the
+    // popover still believes it is — so reading the frame afterwards reports the
+    // previous height and the popover is then told to keep it.
+    let intrinsicSize = dashboard.frame.size
     self.view = dashboard
-    self.preferredContentSize = dashboard.frame.size
+    self.preferredContentSize = intrinsicSize
   }
 
   /// The first provider row, so opening the popover puts the keyboard on the
@@ -62,6 +71,9 @@ final class DashboardViewController: NSViewController {
 @MainActor
 final class UsageDashboardView: NSView {
   private let dismiss: () -> Void
+  /// The height this dashboard was laid out for. The popover has to display it
+  /// at this height; showing it at any other height means rows are off screen.
+  private(set) var intendedHeight: CGFloat = DashboardMetrics.minimumHeight
 
   init(
     states: [ProviderViewState],
@@ -70,14 +82,16 @@ final class UsageDashboardView: NSView {
     isRefreshing: Bool,
     refreshStartedAt: Date? = nil,
     now: Date,
+    maximumHeight: CGFloat = DashboardMetrics.maximumHeight,
     actions: DashboardActions
   ) {
+    let ceiling = max(DashboardMetrics.minimumHeight, maximumHeight)
     self.dismiss = actions.dismiss
     super.init(frame: NSRect(origin: .zero, size: DashboardMetrics.size))
     self.identifier = NSUserInterfaceItemIdentifier("usage-dashboard")
     self.setAccessibilityLabel("Reserve dashboard")
     self.wantsLayer = true
-    self.layer?.backgroundColor = ReserveColor.background.cgColor
+    self.layer?.backgroundColor = self.resolvedCGColor(ReserveColor.background)
 
     let summaries = states.map { AllowanceBuilder.summary(for: $0, now: now) }
 
@@ -126,15 +140,15 @@ final class UsageDashboardView: NSView {
     stack.addArrangedSubview(footer)
     stack.setCustomSpacing(DashboardMetrics.footerGap, after: last)
 
-    // Content-sized, with a ceiling that keeps the popover clear of the menu bar.
-    self.frame = NSRect(
-      x: 0, y: 0, width: DashboardMetrics.width, height: DashboardMetrics.maximumHeight)
+    // Content-sized, with a ceiling that keeps the popover clear of the menu bar
+    // and inside the screen it opens on.
+    self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: ceiling)
     self.layoutSubtreeIfNeeded()
     let content = ceil(stack.frame.height) + 2 * DashboardMetrics.inset
-    let height = min(
-      DashboardMetrics.maximumHeight, max(DashboardMetrics.minimumHeight, content))
+    let height = min(ceiling, max(DashboardMetrics.minimumHeight, content))
+    self.intendedHeight = height
     self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: height)
-    if content > DashboardMetrics.maximumHeight {
+    if content > height {
       self.makeScrollable(stack: stack, contentHeight: content)
     }
     self.layoutSubtreeIfNeeded()
@@ -174,8 +188,14 @@ final class UsageDashboardView: NSView {
 
   override func viewDidChangeEffectiveAppearance() {
     super.viewDidChangeEffectiveAppearance()
-    self.layer?.backgroundColor = ReserveColor.background.cgColor
+    self.layer?.backgroundColor = self.resolvedCGColor(ReserveColor.background)
+    // Every child draws its own adaptive colours, so the whole tree redraws.
     self.needsDisplay = true
+    for view in Self.allDescendants(of: self) { view.needsDisplay = true }
+  }
+
+  private static func allDescendants(of view: NSView) -> [NSView] {
+    view.subviews + view.subviews.flatMap { self.allDescendants(of: $0) }
   }
 
   override var acceptsFirstResponder: Bool { true }
@@ -1093,6 +1113,22 @@ enum DashboardMetrics {
   static let cardPadding: CGFloat = 14
   static var cardContentWidth: CGFloat { self.contentWidth - 2 * self.cardPadding }
   static var size: NSSize { NSSize(width: self.width, height: self.minimumHeight) }
+
+  /// The popover's own frame and arrow, on top of the content.
+  static let popoverChrome: CGFloat = 26
+
+  /// The ceiling the dashboard may actually use on a given screen.
+  ///
+  /// The design ceiling alone is not enough: a 1280×800 display leaves roughly
+  /// 775pt below the menu bar, so a popover built to the full 860 is taller than
+  /// the screen and the rows past the bottom edge cannot be reached at all.
+  static func availableHeight(on screen: NSScreen?, visibleHeight: CGFloat? = nil) -> CGFloat {
+    guard let visible = visibleHeight ?? screen?.visibleFrame.height else {
+      return self.maximumHeight
+    }
+    let usable = visible - self.popoverChrome - 8
+    return max(self.minimumHeight, min(self.maximumHeight, usable))
+  }
 
   static let rowGap: CGFloat = 12
   static let headerGap: CGFloat = 16
