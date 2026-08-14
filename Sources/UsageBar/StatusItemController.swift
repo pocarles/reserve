@@ -443,6 +443,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         == "auth.x.ai"
       && UsageStore.authorizationURL(
         in: "https://example.com/oauth/authorize?code=not-trusted", for: .anthropic) == nil
+    // Only a release page of this repository is ever opened.
+    let updateURLsAreRestricted =
+      UpdateChecker.isReserveReleaseURL(
+        URL(string: "https://github.com/pocarles/Reserve/releases/tag/v0.2.0")!)
+      && !UpdateChecker.isReserveReleaseURL(URL(string: "https://example.com/releases/tag/v1")!)
+      && !UpdateChecker.isReserveReleaseURL(
+        URL(string: "https://github.com/attacker/Reserve/releases/tag/v1")!)
+      && !UpdateChecker.isReserveReleaseURL(
+        URL(string: "http://github.com/pocarles/Reserve/releases/tag/v1")!)
     let unrelatedWindow = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
       styleMask: [.titled], backing: .buffered, defer: false)
@@ -458,12 +467,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       providerStatusWorks, directProviderSelectionWorks, fullCardSelectionHitTargetWorks,
       firstClickSelectionWorks, footerButtonsArePadded, providerButtonsArePadded,
       refreshButtonIsPadded, dashboardTypographyIsReadable, oauthURLParsingIsSafe,
-      outsideClickDismissalWorks, automaticSourceWorks, pinnedModelWorks, aggregateCopyWorks,
+      outsideClickDismissalWorks, updateURLsAreRestricted, automaticSourceWorks,
+      pinnedModelWorks, aggregateCopyWorks,
       semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), motion=\(motionIsPurposeful), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), motion=\(motionIsPurposeful), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (

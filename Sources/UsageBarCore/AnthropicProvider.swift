@@ -278,26 +278,28 @@ enum ClaudeCredentialLoader {
       return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
     }
 
+    /// Reads the secret through Security.framework rather than by shelling out
+    /// to `/usr/bin/security -w`.
+    ///
+    /// The old path spawned a child process that printed another application's
+    /// OAuth token on its stdout on every refresh, and attributed the access to
+    /// `security` rather than to Reserve. `SecItemCopyMatching` keeps the secret
+    /// in this process's memory and lets macOS attribute the access honestly.
     private static func keychainCredentialsWithoutPrompt() async throws -> ClaudeCredentials? {
-      let output: String
-      do {
-        output = try await ProcessRunner.output(
-          executable: "/usr/bin/security",
-          arguments: [
-            "find-generic-password",
-            "-w",
-            "-s",
-            "Claude Code-credentials",
-          ],
-          environment: ProcessInfo.processInfo.environment,
-          timeout: .seconds(5))
-      } catch let error as UsageProviderError {
-        if case .timedOut = error {
-          throw UsageProviderError.timedOut("Claude Keychain read")
-        }
+      let context = LAContext()
+      context.interactionNotAllowed = true
+      let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: "Claude Code-credentials",
+        kSecMatchLimit as String: kSecMatchLimitOne,
+        kSecReturnData as String: true,
+        kSecUseAuthenticationContext as String: context,
+      ]
+      var result: CFTypeRef?
+      let status = SecItemCopyMatching(query as CFDictionary, &result)
+      guard status == errSecSuccess, let data = result as? Data, data.count <= 1_048_576 else {
         return nil
       }
-      guard let data = output.data(using: .utf8), data.count <= 1_048_576 else { return nil }
       return try? self.decode(data: data, source: "Claude Keychain")
     }
   #endif

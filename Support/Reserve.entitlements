@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Reserve launches the provider CLIs the user already has installed
+	     (codex, claude, grok), so the hardened runtime has to permit exec of
+	     code Reserve did not sign. Nothing else is granted: no JIT, no
+	     unsigned memory, no library validation bypass, no debugger. -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<false/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<false/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<false/>
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<false/>
+	<key>com.apple.security.automation.apple-events</key>
+	<false/>
+</dict>
+</plist>

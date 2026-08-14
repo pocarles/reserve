@@ -359,28 +359,44 @@ public actor LocalUsageScanner {
     extension fileExtension: String?,
     cutoff: Date
   ) -> [URL] {
+    // These trees hold conversation transcripts. A symlink inside one would
+    // otherwise point the scanner at any readable file on the machine — or at a
+    // FIFO, which blocks the reader indefinitely — so links are refused outright
+    // and every resolved path has to stay under the root it came from.
+    let jail = root.resolvingSymlinksInPath().standardizedFileURL.path
     guard
       let enumerator = self.fileManager.enumerator(
         at: root,
-        includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+        includingPropertiesForKeys: [
+          .isRegularFileKey, .isSymbolicLinkKey, .contentModificationDateKey,
+        ],
         options: [.skipsHiddenFiles, .skipsPackageDescendants])
     else { return [] }
     var files: [URL] = []
     for case let file as URL in enumerator {
+      guard files.count < Self.maximumScannedFiles else { break }
       if let named, file.lastPathComponent != named { continue }
       if let fileExtension, file.pathExtension != fileExtension { continue }
       guard
         let values = try? file.resourceValues(forKeys: [
-          .isRegularFileKey, .contentModificationDateKey,
+          .isRegularFileKey, .isSymbolicLinkKey, .contentModificationDateKey,
         ]),
+        values.isSymbolicLink != true,
         values.isRegularFile == true,
         let modified = values.contentModificationDate,
         modified >= cutoff
       else { continue }
+      // Resolve after the link check, so a link anywhere in the ancestry that
+      // escapes the root is caught too.
+      let resolved = file.resolvingSymlinksInPath().standardizedFileURL.path
+      guard resolved == jail || resolved.hasPrefix(jail + "/") else { continue }
       files.append(file)
     }
     return files
   }
+
+  /// A ceiling on how much of a tree one scan will walk.
+  private static let maximumScannedFiles = 5_000
 
   private func metadata(_ file: URL) throws -> (size: Int64, modifiedAt: TimeInterval, date: Date) {
     let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])

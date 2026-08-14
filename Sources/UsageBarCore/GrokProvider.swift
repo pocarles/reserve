@@ -20,7 +20,7 @@ public struct GrokProvider: UsageProvider {
     let versionOutput = try await ProcessRunner.output(
       executable: executable,
       arguments: ["--version"],
-      environment: self.environment)
+      environment: BinaryLocator.childEnvironment(self.environment))
     guard let version = SemanticVersion.first(in: versionOutput),
       version >= SemanticVersion(1, 0, 0)
     else {

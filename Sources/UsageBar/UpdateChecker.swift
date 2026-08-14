@@ -28,7 +28,10 @@ actor UpdateChecker {
       if http.statusCode == 404 { return .unpublished }
       guard http.statusCode == 200, data.count <= 100_000,
         let release = try? JSONDecoder().decode(GitHubRelease.self, from: data),
-        let url = URL(string: release.htmlURL)
+        let url = URL(string: release.htmlURL),
+        // Only a release page of this repository is ever opened. An `https`
+        // check alone would let an unexpected body point Reserve anywhere.
+        Self.isReserveReleaseURL(url)
       else { return .failed }
       let latest = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
       return Self.isNewer(latest, than: currentVersion)
@@ -37,6 +40,14 @@ actor UpdateChecker {
     } catch {
       return .failed
     }
+  }
+
+  static func isReserveReleaseURL(_ url: URL) -> Bool {
+    guard url.scheme?.lowercased() == "https",
+      url.host?.lowercased() == "github.com",
+      url.user == nil, url.password == nil, url.port == nil
+    else { return false }
+    return url.path.hasPrefix("/pocarles/Reserve/releases/")
   }
 
   private static func isNewer(_ candidate: String, than current: String) -> Bool {

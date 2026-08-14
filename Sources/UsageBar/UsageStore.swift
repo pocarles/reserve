@@ -389,7 +389,7 @@ final class UsageStore {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = configuration.arguments
-    process.environment = ProcessInfo.processInfo.environment
+    process.environment = BinaryLocator.childEnvironment()
     process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
     let input = Pipe()
     let output = Pipe()
@@ -422,6 +422,11 @@ final class UsageStore {
         try? await Task.sleep(for: .seconds(300))
         guard !Task.isCancelled, process?.isRunning == true else { return }
         process?.terminate()
+        // A CLI that ignores SIGTERM must not outlive its own timeout.
+        try? await Task.sleep(for: .seconds(2))
+        if process?.isRunning == true, let identifier = process?.processIdentifier {
+          kill(identifier, SIGKILL)
+        }
         await MainActor.run {
           self?.states[provider]?.error =
             "\(configuration.displayName) sign-in timed out. Click Connect to try again."
@@ -660,7 +665,9 @@ final class UsageStore {
       "provider.openAI.enabled": true,
       "provider.anthropic.enabled": true,
       "provider.grok.enabled": true,
-      "anthropic.keychainReadAllowed": true,
+      // Reading Claude Code's Keychain item is another application's OAuth
+      // token, so it is opt-in and stays off until asked for.
+      "anthropic.keychainReadAllowed": false,
       "refresh.intervalMinutes": 10,
       "notifications.enabled": true,
       // Smart alerts are the default stream: they only fire when the forecast
@@ -715,7 +722,6 @@ final class UsageStore {
     self.openedLoginURLs.remove(provider)
     self.states[provider]?.isConnecting = false
     if status == 0 {
-      if provider == .anthropic { self.defaults.set(true, forKey: "anthropic.keychainReadAllowed") }
       self.states[provider]?.error = nil
       self.refresh(provider)
     } else if self.states[provider]?.error == nil {

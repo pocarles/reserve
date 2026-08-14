@@ -468,6 +468,55 @@ public enum UsageBarSelfTests {
     guard await cache.load().isEmpty else { throw Failure("oversized cache rejection") }
     passed.append("oversized cache rejection")
 
+
+    // MARK: Security regressions
+
+    // A world-writable directory must never supply an executable Reserve runs.
+    let sandbox = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reserve-locator-\(UUID().uuidString)")
+    let openDirectory = sandbox.appendingPathComponent("open")
+    try FileManager.default.createDirectory(
+      at: openDirectory, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o777])
+    let planted = openDirectory.appendingPathComponent("reserve-fake-cli")
+    FileManager.default.createFile(
+      atPath: planted.path, contents: Data("#!/bin/sh\n".utf8),
+      attributes: [.posixPermissions: 0o755])
+    defer { try? FileManager.default.removeItem(at: sandbox) }
+    guard
+      BinaryLocator.find(
+        "reserve-fake-cli", environment: ["PATH": openDirectory.path]) == nil
+    else { throw Failure("world-writable PATH entry was accepted") }
+
+    // A private directory on PATH still works, so the check is not vacuous.
+    let closedDirectory = sandbox.appendingPathComponent("closed")
+    try FileManager.default.createDirectory(
+      at: closedDirectory, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o755])
+    let trusted = closedDirectory.appendingPathComponent("reserve-fake-cli")
+    FileManager.default.createFile(
+      atPath: trusted.path, contents: Data("#!/bin/sh\n".utf8),
+      attributes: [.posixPermissions: 0o755])
+    guard
+      BinaryLocator.find(
+        "reserve-fake-cli", environment: ["PATH": closedDirectory.path]) == trusted.path
+    else { throw Failure("a private PATH entry was rejected") }
+    passed.append("executable lookup rejects world-writable directories")
+
+    // The dynamic linker must not be steerable through an inherited variable.
+    let sanitized = BinaryLocator.childEnvironment([
+      "PATH": "/usr/bin",
+      "DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib",
+      "DYLD_LIBRARY_PATH": "/tmp",
+      "LD_PRELOAD": "/tmp/evil.so",
+      "HOME": "/Users/someone",
+    ])
+    guard sanitized["PATH"] == "/usr/bin", sanitized["HOME"] == "/Users/someone",
+      sanitized["DYLD_INSERT_LIBRARIES"] == nil, sanitized["DYLD_LIBRARY_PATH"] == nil,
+      sanitized["LD_PRELOAD"] == nil
+    else { throw Failure("child environment kept a dynamic-linker variable") }
+    passed.append("child environment strips dynamic-linker variables")
+
     return passed
   }
 

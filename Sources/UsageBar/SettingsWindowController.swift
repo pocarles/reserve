@@ -449,6 +449,18 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
               size: 13, weight: .medium, color: .labelColor)
           ]),
         self.section(
+          title: "Reserve reads",
+          footer: "Reserve reuses the sign-ins of the provider tools you already have. It never "
+            + "asks for a password and never stores a token.",
+          rows: [
+            self.bullets([
+              "Claude Code's Keychain item, only if you turn that on in Providers",
+              "Provider credential files such as ~/.claude/.credentials.json and "
+                + "~/.codex/auth.json",
+              "Session logs under ~/.claude, ~/.codex and ~/.grok, for token counts only",
+            ])
+          ]),
+        self.section(
           title: "Reserve stores",
           rows: [
             self.bullets([
@@ -464,6 +476,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
               "Prompts or responses",
               "Raw provider payloads",
               "OAuth tokens, account identifiers or passwords",
+            ])
+          ]),
+        self.section(
+          title: "Reserve contacts",
+          footer: "Nothing else. There is no analytics, no telemetry, and no Reserve server.",
+          rows: [
+            self.bullets([
+              "Your providers, to read your limits",
+              "Their official status pages",
+              "GitHub, only to look for a Reserve update",
             ])
           ]),
         self.section(
@@ -641,7 +663,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     ]
     if provider == .anthropic {
       let checkbox = NSButton(
-        checkboxWithTitle: "Use my existing Claude Code sign-in",
+        checkboxWithTitle: "Read my Claude Code sign-in from the Keychain",
         target: self, action: #selector(self.keychainChanged(_:)))
       checkbox.identifier = NSUserInterfaceItemIdentifier("settings-automatic-claude")
       checkbox.state = self.store.claudeKeychainReadAllowed ? .on : .off
@@ -931,7 +953,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func checkForUpdates(_: NSButton) {
-    if let availableReleaseURL {
+    if let availableReleaseURL, UpdateChecker.isReserveReleaseURL(availableReleaseURL) {
       NSWorkspace.shared.open(availableReleaseURL)
       return
     }

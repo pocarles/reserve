@@ -408,9 +408,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let key = "onboarding.firstLaunchCompleted"
     guard !defaults.bool(forKey: key) else { return }
     defaults.set(true, forKey: key)
-    if Bundle.main.bundleURL.pathExtension == "app", SMAppService.mainApp.status == .notRegistered {
-      try? SMAppService.mainApp.register()
-    }
+    // Launching at login is persistence, so it waits for the checkbox in
+    // Settings rather than being arranged on the user's behalf.
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
       self?.statusController?.showMenu()
     }
