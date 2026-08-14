@@ -15,6 +15,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     case appearance
     case insights
     case privacy
+    case about
 
     var title: String {
       switch self {
@@ -24,6 +25,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       case .appearance: "Appearance"
       case .insights: "Insights"
       case .privacy: "Privacy"
+      case .about: "About"
       }
     }
 
@@ -35,6 +37,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       case .appearance: "paintpalette"
       case .insights: "chart.bar"
       case .privacy: "hand.raised"
+      case .about: "info.circle"
       }
     }
 
@@ -193,6 +196,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     case .appearance: self.appearancePane()
     case .insights: self.insightsPane()
     case .privacy: self.privacyPane()
+    case .about: self.aboutPane()
     }
   }
 
@@ -215,9 +219,6 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             self.formRow("Details:", self.menuBarDetailControls()),
             self.formRow("Preview:", MenuBarPreview(store: self.store)),
           ]),
-        self.section(
-          title: "Updates",
-          rows: [self.formRow("Version:", self.updateControls())]),
       ])
   }
 
@@ -306,7 +307,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let total = SettingsLabel(
       measured.isEmpty
         ? "No local usage has been measured yet"
-        : "\(DashboardFormat.money(apiValue, approximate: true)) of API-equivalent usage against "
+        : "\(DashboardFormat.money(apiValue)) of API-equivalent usage against "
           + "\(DashboardFormat.money(plans)) of plans",
       size: 13, weight: .medium, color: .labelColor)
     total.identifier = NSUserInterfaceItemIdentifier("insights-total")
@@ -339,6 +340,101 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             + "through an API. Treat this as an estimate of comparable value, not money saved.",
           rows: [total]),
       ])
+  }
+
+  /// Identity, updates and links, in the order someone looks for them. This is
+  /// the About surface: the standard AppKit panel opens at the normal window
+  /// level, which is below this floating Settings window, so it was invisible
+  /// whenever it was opened from here.
+  private func aboutPane() -> NSView {
+    self.pane(
+      identifier: "pane-about",
+      sections: [
+        self.section(title: nil, rows: [AboutHeaderView()]),
+        self.section(
+          title: "Updates",
+          rows: [
+            self.automaticUpdateCheckbox(),
+            self.updateControls(),
+          ]),
+        self.section(
+          title: "Links",
+          rows: [
+            self.linkRow("GitHub", symbol: "chevron.left.forwardslash.chevron.right",
+              url: ReserveLinks.repository),
+            self.linkRow("@pocarles on X", symbol: "at", url: ReserveLinks.xProfile),
+          ]),
+        self.section(
+          title: nil,
+          rows: [
+            SettingsLabel(
+              "© 2026 Pierre-Olivier Carles. MIT License.",
+              size: 11, color: .secondaryLabelColor),
+            SettingsLabel(
+              "Made in Florida with love.", size: 11, color: .tertiaryLabelColor),
+          ]),
+      ])
+  }
+
+  private func automaticUpdateCheckbox() -> NSView {
+    let checkbox = NSButton(
+      checkboxWithTitle: "Check for updates automatically", target: self,
+      action: #selector(self.automaticUpdatesChanged(_:)))
+    checkbox.identifier = NSUserInterfaceItemIdentifier("updates-automatic")
+    checkbox.state = self.store.automaticUpdateChecks ? .on : .off
+    return checkbox
+  }
+
+  /// A row that opens a URL, with the standard outward arrow so it reads as
+  /// leaving the app.
+  private func linkRow(_ title: String, symbol: String, url: URL) -> NSView {
+    let button = NSButton(title: "", target: self, action: #selector(self.openLink(_:)))
+    button.identifier = NSUserInterfaceItemIdentifier("link-\(url.absoluteString)")
+    button.isBordered = false
+    button.title = ""
+    button.setAccessibilityLabel("\(title), opens in your browser")
+    button.toolTip = url.absoluteString
+
+    let icon = NSImageView(
+      image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
+    icon.contentTintColor = .secondaryLabelColor
+    icon.setAccessibilityElement(false)
+    icon.translatesAutoresizingMaskIntoConstraints = false
+    icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
+    let label = SettingsLabel(title, size: 13, color: .labelColor)
+    let arrow = NSImageView(
+      image: NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: nil) ?? NSImage())
+    arrow.contentTintColor = .tertiaryLabelColor
+    arrow.setAccessibilityElement(false)
+    arrow.translatesAutoresizingMaskIntoConstraints = false
+    arrow.widthAnchor.constraint(equalToConstant: 12).isActive = true
+    let spacer = NSView()
+    spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+    let row = NSStackView(views: [icon, label, spacer, arrow])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 9
+    row.translatesAutoresizingMaskIntoConstraints = false
+    button.addSubview(row)
+    NSLayoutConstraint.activate([
+      row.leadingAnchor.constraint(equalTo: button.leadingAnchor),
+      row.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+      row.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+      button.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth),
+      button.heightAnchor.constraint(equalToConstant: 30),
+    ])
+    return button
+  }
+
+  @objc private func openLink(_ sender: NSButton) {
+    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(of: "link-", with: "")
+    guard let url = URL(string: raw), url.scheme == "https" else { return }
+    NSWorkspace.shared.open(url)
+  }
+
+  @objc private func automaticUpdatesChanged(_ sender: NSButton) {
+    self.store.automaticUpdateChecks = sender.state == .on
   }
 
   private func privacyPane() -> NSView {
@@ -433,27 +529,39 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func updateControls() -> NSView {
+    // A release found by an earlier check is reported straight away, rather than
+    // only while a check happens to be running.
+    let found = self.store.availableUpdate
+    if let found { self.availableReleaseURL = found.url }
+    let statusText: String
+    if let found {
+      statusText = "Reserve \(found.version) is available"
+    } else if let checked = self.store.lastUpdateCheck {
+      let ago = DashboardFormat.updated(checked, now: Date())
+        .replacingOccurrences(of: "Updated ", with: "")
+      statusText = "Up to date · checked \(ago)"
+    } else {
+      statusText = "Not checked yet"
+    }
     let status = SettingsLabel(
-      "Reserve \(Self.version) (\(Self.build))", size: 12, color: .secondaryLabelColor)
+      statusText, size: 12,
+      color: found == nil ? .secondaryLabelColor : .controlAccentColor)
     status.identifier = NSUserInterfaceItemIdentifier("about-update-status")
     self.updateStatusLabel = status
     let button = NSButton(
-      title: "Check for Updates…", target: self, action: #selector(self.checkForUpdates(_:)))
+      title: found == nil ? "Check for Updates…" : "Open Release",
+      target: self, action: #selector(self.checkForUpdates(_:)))
     button.identifier = NSUserInterfaceItemIdentifier("about-check-updates")
     button.bezelStyle = .rounded
     self.updateButton = button
-    let about = NSButton(
-      title: "About Reserve", target: self, action: #selector(self.showAboutPanel(_:)))
-    about.identifier = NSUserInterfaceItemIdentifier("about-panel")
-    about.bezelStyle = .rounded
-    let buttons = NSStackView(views: [button, about])
-    buttons.orientation = .horizontal
-    buttons.spacing = 8
-    let stack = NSStackView(views: [status, buttons])
-    stack.orientation = .vertical
-    stack.alignment = .leading
-    stack.spacing = 8
-    return stack
+    let spacer = NSView()
+    spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let row = NSStackView(views: [status, spacer, button])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 10
+    row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+    return row
   }
 
   private func dataFolderControls() -> NSView {
@@ -637,7 +745,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       size: 12, color: .secondaryLabelColor)
     rolling.widthAnchor.constraint(equalToConstant: 150).isActive = true
     let value = SettingsLabel(
-      usage.map { DashboardFormat.money($0.apiEquivalentCostUSD, approximate: true) } ?? "—",
+      usage.map { DashboardFormat.money($0.apiEquivalentCostUSD) } ?? "—",
       size: 12, weight: .medium, color: .labelColor)
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -835,8 +943,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.updateButton?.isEnabled = true
       switch result {
       case .current(let version):
+        self.store.lastUpdateCheck = Date()
+        self.store.availableUpdate = nil
         self.updateStatusLabel?.stringValue = "Reserve \(version) is up to date"
       case .available(let version, let url):
+        self.store.lastUpdateCheck = Date()
+        self.store.availableUpdate = (version, url)
         self.availableReleaseURL = url
         self.updateStatusLabel?.stringValue = "Reserve \(version) is available"
         self.updateButton?.title = "Open Release"
@@ -846,47 +958,6 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         self.updateStatusLabel?.stringValue = "Could not reach GitHub Releases"
       }
     }
-  }
-
-  /// The conventional macOS About panel, with the links in its credits.
-  @objc func showAboutPanel(_: Any?) {
-    let body: [NSAttributedString.Key: Any] = [
-      .font: NSFont.systemFont(ofSize: 11),
-      .foregroundColor: NSColor.secondaryLabelColor,
-    ]
-    let credits = NSMutableAttributedString(
-      string: "Keep subscription limits, resets and local usage clearly in view.\n\n",
-      attributes: body)
-    credits.append(Self.link("GitHub repository", ReserveLinks.repository))
-    credits.append(NSAttributedString(string: "   ", attributes: body))
-    credits.append(Self.link("@pocarles on X", ReserveLinks.xProfile))
-    if let license = Self.licenseURL() {
-      credits.append(NSAttributedString(string: "   ", attributes: body))
-      credits.append(Self.link("MIT License", license))
-    }
-    NSApplication.shared.activate(ignoringOtherApps: true)
-    NSApplication.shared.orderFrontStandardAboutPanel(
-      options: [
-        .credits: credits,
-        NSApplication.AboutPanelOptionKey(rawValue: "Copyright"):
-          "Copyright © 2026 Pierre-Olivier Carles",
-      ])
-  }
-
-  private static func link(_ title: String, _ url: URL) -> NSAttributedString {
-    NSAttributedString(
-      string: title,
-      attributes: [
-        .font: NSFont.systemFont(ofSize: 11),
-        .link: url,
-        .foregroundColor: NSColor.linkColor,
-      ])
-  }
-
-  private static func licenseURL() -> URL? {
-    let bundled = Bundle.main.resourceURL?.appendingPathComponent("LICENSE.txt")
-    if let bundled, FileManager.default.fileExists(atPath: bundled.path) { return bundled }
-    return URL(string: "https://github.com/pocarles/Reserve/blob/main/LICENSE")
   }
 
   @objc private func showDataFolder(_: NSButton) {
@@ -1122,8 +1193,6 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && generalIDs.contains("menu-bar-remaining")
       && generalIDs.contains("menu-bar-reset")
       && generalIDs.contains("menu-bar-preview")
-      && generalIDs.contains("about-check-updates")
-      && generalIDs.contains("about-panel")
       // Opacity is gone; system materials adapt on their own.
       && !generalIDs.contains("appearance-window-opacity")
 
@@ -1230,24 +1299,52 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.applyPane(animated: false)
     let privacySuccess = identifiers().contains("privacy-data-folder")
 
+    // About: identity, the update controls, and the links — in one place, and
+    // reachable, which the standard AppKit panel was not from a floating window.
+    self.pane = .about
+    self.applyPane(animated: false)
+    let aboutIDs = identifiers()
+    let originalAutomatic = self.store.automaticUpdateChecks
+    let automaticBox = descendants().compactMap { $0 as? NSButton }.first {
+      $0.identifier?.rawValue == "updates-automatic"
+    }
+    automaticBox?.state = originalAutomatic ? .off : .on
+    let automaticUpdatesToggle =
+      automaticBox.flatMap { box -> Bool? in
+        guard let action = box.action else { return nil }
+        return NSApp.sendAction(action, to: box.target, from: box)
+          && self.store.automaticUpdateChecks == !originalAutomatic
+      } ?? false
+    self.store.automaticUpdateChecks = originalAutomatic
+    let aboutSuccess =
+      aboutIDs.contains("about-header")
+      && aboutIDs.contains("about-version")
+      && aboutIDs.contains("about-check-updates")
+      && aboutIDs.contains("updates-automatic")
+      && aboutIDs.contains("link-\(ReserveLinks.repository.absoluteString)")
+      && aboutIDs.contains("link-\(ReserveLinks.xProfile.absoluteString)")
+      && automaticUpdatesToggle
+      // The update controls must not also live in General.
+      && !generalIDs.contains("about-check-updates")
+
     self.pane = originalPane
     self.applyPane(animated: false)
 
     let success =
       isNative && staysAboveDashboard && allPanesFit && allPanesReadable && generalSuccess
       && providersSuccess && notificationsSuccess && appearanceSuccess && insightsSuccess
-      && privacySuccess
+      && privacySuccess && aboutSuccess
     let details =
       success
-      ? "settings is a native toolbar window with \(Pane.allCases.count) resizable panes, one General menu-bar model, adaptive full-surface themes with fixed quota semantics, deficit transition alerts, provider detail behind disclosure, and a standard About panel"
-      : "settings native=\(isNative), floating=\(staysAboveDashboard), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess)"
+      ? "settings is a native toolbar window with \(Pane.allCases.count) resizable panes, one General menu-bar model, adaptive full-surface themes with fixed quota semantics, deficit transition alerts, provider detail behind disclosure, and an About pane carrying identity, updates and links"
+      : "settings native=\(isNative), floating=\(staysAboveDashboard), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess), about=\(aboutSuccess)"
     return (success, details)
   }
 
   // MARK: - Rendering
 
   func render(to url: URL) throws { try self.renderPane(.general, to: url) }
-  func renderAbout(to url: URL) throws { try self.renderPane(.privacy, to: url) }
+  func renderAbout(to url: URL) throws { try self.renderPane(.about, to: url) }
   func renderAppearance(to url: URL) throws { try self.renderPane(.appearance, to: url) }
   func renderAlerts(to url: URL) throws { try self.renderPane(.notifications, to: url) }
   func renderInsights(to url: URL) throws { try self.renderPane(.insights, to: url) }
@@ -1472,6 +1569,79 @@ private final class AccentChoiceButton: NSButton {
         .foregroundColor: self.selected ? NSColor.labelColor : NSColor.secondaryLabelColor,
       ])
     name.draw(at: NSPoint(x: (self.bounds.width - name.size().width) / 2, y: 2))
+  }
+}
+
+/// Reserve's identity: the app's own icon, its version, when this copy was
+/// built, and one line on what it is for.
+@MainActor
+private final class AboutHeaderView: NSView {
+  init() {
+    super.init(frame: .zero)
+    self.identifier = NSUserInterfaceItemIdentifier("about-header")
+    self.setAccessibilityRole(.group)
+    self.wantsLayer = true
+    self.layer?.cornerRadius = 10
+    self.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+    self.layer?.borderWidth = 1
+    self.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+
+    let icon = NSImageView(image: NSApplication.shared.applicationIconImage ?? NSImage())
+    icon.imageScaling = .scaleProportionallyUpOrDown
+    icon.setAccessibilityElement(false)
+    icon.translatesAutoresizingMaskIntoConstraints = false
+    icon.widthAnchor.constraint(equalToConstant: 72).isActive = true
+    icon.heightAnchor.constraint(equalToConstant: 72).isActive = true
+
+    let name = SettingsLabel("Reserve", size: 20, weight: .semibold, color: .labelColor)
+    name.alignment = .center
+    let version = SettingsLabel(
+      "Version \(Self.version) (\(Self.build))", size: 12, color: .secondaryLabelColor)
+    version.identifier = NSUserInterfaceItemIdentifier("about-version")
+    version.alignment = .center
+    let built = SettingsLabel(Self.builtLine(), size: 11, color: .tertiaryLabelColor)
+    built.alignment = .center
+    let tagline = SettingsLabel(
+      "Keep subscription limits, resets and local usage clearly in view.",
+      size: 11, color: .tertiaryLabelColor)
+    tagline.alignment = .center
+
+    let stack = NSStackView(views: [icon, name, version, built, tagline])
+    stack.orientation = .vertical
+    stack.alignment = .centerX
+    stack.spacing = 3
+    stack.setCustomSpacing(10, after: icon)
+    stack.setCustomSpacing(6, after: name)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(stack)
+    NSLayoutConstraint.activate([
+      stack.centerXAnchor.constraint(equalTo: self.centerXAnchor),
+      stack.topAnchor.constraint(equalTo: self.topAnchor, constant: 20),
+      stack.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -20),
+      self.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth),
+    ])
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  private static var version: String {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
+  }
+
+  private static var build: String {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+  }
+
+  /// Taken from the executable itself, so it describes this copy rather than a
+  /// date baked in at some earlier point.
+  private static func builtLine() -> String {
+    guard let executable = Bundle.main.executableURL,
+      let attributes = try? FileManager.default.attributesOfItem(atPath: executable.path),
+      let date = attributes[.modificationDate] as? Date
+    else { return "" }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
+    return "Built \(formatter.string(from: date))"
   }
 }
 

@@ -177,7 +177,10 @@ final class UsageDashboardView: NSView {
     scroll.hasVerticalScroller = true
     scroll.scrollerStyle = .overlay
     scroll.drawsBackground = false
-    scroll.autohidesScrollers = true
+    // A card that continues past the bottom edge has to announce itself. With
+    // auto-hiding overlay scrollers the column simply stopped, and the provider
+    // below the fold read as missing rather than as scrolled out of view.
+    scroll.autohidesScrollers = false
     scroll.automaticallyAdjustsContentInsets = false
     scroll.autoresizingMask = [.width, .height]
     self.addSubview(scroll)
@@ -907,7 +910,7 @@ private final class UsageDetailGrid: NSView {
         "Last 30 days", usage.map { DashboardFormat.tokens($0.totalTokens) } ?? "—"),
       Self.cell(
         "Estimated API value",
-        usage.map { DashboardFormat.money($0.apiEquivalentCostUSD, approximate: true) } ?? "—"),
+        usage.map { DashboardFormat.money($0.apiEquivalentCostUSD) } ?? "—"),
       Self.cell("Plan", "\(DashboardFormat.money(summary.subscriptionCostUSD))/mo"),
     ]
     let top = NSStackView.row([cells[0], NSStackView.spacer(), cells[1]], spacing: 8)
@@ -1107,6 +1110,8 @@ private final class DashboardFooterView: NSView {
 enum DashboardMetrics {
   static let width: CGFloat = 490
   static let minimumHeight: CGFloat = 320
+  /// The fallback ceiling, used only when no screen is known — offscreen
+  /// rendering and tests. On a real screen `availableHeight` governs.
   static let maximumHeight: CGFloat = 860
   static let inset: CGFloat = 16
   static var contentWidth: CGFloat { self.width - 2 * self.inset }
@@ -1119,15 +1124,19 @@ enum DashboardMetrics {
 
   /// The ceiling the dashboard may actually use on a given screen.
   ///
-  /// The design ceiling alone is not enough: a 1280×800 display leaves roughly
-  /// 775pt below the menu bar, so a popover built to the full 860 is taller than
-  /// the screen and the rows past the bottom edge cannot be reached at all.
+  /// The screen is the only real constraint. A fixed 860pt ceiling cut both
+  /// ways: on a 1280×800 display it was taller than the screen, and on a large
+  /// display it forced an expanded provider (around 960pt) to scroll for no
+  /// reason, pushing the last card past the bottom edge.
+  ///
+  /// This only *clamps* — the dashboard is still content-sized, so a roomier
+  /// screen does not produce a taller popover, it just stops truncating one.
   static func availableHeight(on screen: NSScreen?, visibleHeight: CGFloat? = nil) -> CGFloat {
     guard let visible = visibleHeight ?? screen?.visibleFrame.height else {
       return self.maximumHeight
     }
     let usable = visible - self.popoverChrome - 8
-    return max(self.minimumHeight, min(self.maximumHeight, usable))
+    return max(self.minimumHeight, usable)
   }
 
   static let rowGap: CGFloat = 12
@@ -1206,7 +1215,7 @@ enum DashboardFormat {
     now: Date
   ) -> String {
     let projected = allowance.projectedRemainingAtResetPercent.map {
-      "≈\(Int($0.rounded()))% projected left at reset"
+      "\(Int($0.rounded()))% projected left at reset"
     }
     switch paceState {
     case .exhausted:
@@ -1271,14 +1280,13 @@ enum DashboardFormat {
     return "\(value)"
   }
 
-  static func money(_ value: Double, approximate: Bool = false) -> String {
-    let prefix = approximate ? "≈ " : ""
+  static func money(_ value: Double) -> String {
     if value >= 1_000_000 {
-      return prefix + Self.compact(value / 1_000_000, prefix: "$", suffix: "M")
+      return Self.compact(value / 1_000_000, prefix: "$", suffix: "M")
     }
-    if value >= 10_000 { return prefix + Self.compact(value / 1_000, prefix: "$", suffix: "K") }
+    if value >= 10_000 { return Self.compact(value / 1_000, prefix: "$", suffix: "K") }
     let formatter = value < 100 ? self.currencyDetailedFormatter : self.currencyWholeFormatter
-    return prefix + (formatter.string(from: NSNumber(value: value)) ?? "$—")
+    return (formatter.string(from: NSNumber(value: value)) ?? "$—")
   }
 
   static func savings(_ value: Double) -> String {
@@ -1316,6 +1324,6 @@ enum DashboardFormat {
     suffix: String
   ) -> String {
     let digits = value >= 100 ? 0 : value >= 10 ? 1 : 2
-    return prefix + String(format: "%.*f", digits, value) + suffix
+    return String(format: "%.*f", digits, value) + suffix
   }
 }

@@ -98,6 +98,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
   var isDashboardShownForTesting: Bool { self.popover.isShown }
 
+  var popoverContentSizeForTesting: NSSize { self.popover.contentSize }
+
   var dashboardControllerForTesting: DashboardViewController { self.dashboardControllerForUse() }
 
   var mouseMonitorCountForTesting: Int {

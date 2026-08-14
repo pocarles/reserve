@@ -156,6 +156,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
     } else {
       self.completeFirstLaunchIfNeeded()
+      self.checkForUpdatesIfEnabled()
+    }
+  }
+
+  /// Looks for a newer release at most once a day, and only when asked to. The
+  /// request carries the running version and nothing else, and the result is
+  /// remembered so Settings can report it without checking again.
+  private func checkForUpdatesIfEnabled() {
+    guard let store, store.automaticUpdateChecks else { return }
+    if let last = store.lastUpdateCheck, Date().timeIntervalSince(last) < 24 * 3_600 { return }
+    let version =
+      Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
+    Task { [weak self] in
+      let result = await UpdateChecker().check(currentVersion: version)
+      await MainActor.run {
+        guard let store = self?.store else { return }
+        store.lastUpdateCheck = Date()
+        if case .available(let newVersion, let url) = result {
+          store.availableUpdate = (newVersion, url)
+        } else {
+          store.availableUpdate = nil
+        }
+      }
     }
   }
 
@@ -427,10 +450,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return
       }
 
+      if CommandLine.arguments.contains("--diagnose") {
+        print("=== disclosure geometry ===")
+        LifecycleSelfTest.dumpGeometry("collapsed  ", store: store, controller: statusController)
+        for provider in ProviderID.allCases where store.isEnabled(provider) {
+          statusController.toggleProviderDetailForTesting(provider)
+          try? await Task.sleep(for: .milliseconds(250))
+          LifecycleSelfTest.dumpGeometry(
+            "expand \(provider.rawValue)", store: store, controller: statusController)
+          statusController.toggleProviderDetailForTesting(provider)
+          try? await Task.sleep(for: .milliseconds(250))
+          LifecycleSelfTest.dumpGeometry(
+            "collapse \(provider.rawValue)", store: store, controller: statusController)
+        }
+        print("=== appearance ===")
+        for mode in AppearanceMode.allCases {
+          store.appearanceMode = mode
+          try? await Task.sleep(for: .milliseconds(250))
+          let window = statusController.dashboardWindowForTesting
+          let root = window?.contentView
+          print(
+            "  mode=\(mode.rawValue)"
+              + " app=\(NSApp.effectiveAppearance.name.rawValue)"
+              + " popoverWindow=\(window?.effectiveAppearance.name.rawValue ?? "nil")"
+              + " dashboardView=\(root?.effectiveAppearance.name.rawValue ?? "nil")"
+              + " settingsWindow=\(settingsController.window?.effectiveAppearance.name.rawValue ?? "nil")"
+              + " layerBG=\(root.flatMap { LifecycleSelfTest.resolvedBackground($0) }.map { String(format: "%.3f", $0.redComponent) } ?? "nil")")
+        }
+        exit(0)
+      }
+
       var failures: [String] = []
       let observation = LifecycleSelfTest.checkObservation(store: store)
       failures.append(contentsOf: observation.failures)
       failures.append(contentsOf: LifecycleSelfTest.checkGeometry().failures)
+      failures.append(contentsOf: LifecycleSelfTest.checkSpinnerGeometry().failures)
 
       let disclosure = LifecycleSelfTest.checkDisclosure(
         store: store, controller: statusController,

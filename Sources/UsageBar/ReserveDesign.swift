@@ -530,10 +530,32 @@ final class ReserveIconButton: NSButton {
     rotation.isRemovedOnCompletion = false
     rotation.timeOffset = phase.truncatingRemainder(dividingBy: duration)
     self.wantsLayer = true
-    // Rotate about the middle rather than the corner.
-    self.layer?.anchorPoint = NSPoint(x: 0.5, y: 0.5)
-    self.layer?.frame = self.layer?.frame ?? .zero
+    self.centreRotationAnchor()
     self.layer?.add(rotation, forKey: "reserve.refresh.spin")
+  }
+
+  /// Moves the layer's anchor to its middle so `transform.rotation.z` turns the
+  /// control in place.
+  ///
+  /// `position` is expressed relative to `anchorPoint`, so moving the anchor
+  /// without restoring `position` slides the layer by half its size — the
+  /// previous `layer.frame = layer.frame` could not undo that, because the
+  /// getter already reflects the shifted anchor and assigning it back re-derives
+  /// the very same position. The control then drew off-centre and swung around a
+  /// point beside itself instead of spinning.
+  ///
+  /// AppKit does not re-sync the layer afterwards, and it hands the view its real
+  /// frame only once constraints resolve, so this is re-applied on every layout
+  /// rather than once during `init`.
+  private func centreRotationAnchor() {
+    guard let layer = self.layer else { return }
+    layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+    layer.position = CGPoint(x: self.frame.midX, y: self.frame.midY)
+  }
+
+  override func layout() {
+    super.layout()
+    self.centreRotationAnchor()
   }
 
   var isSpinning: Bool { self.layer?.animation(forKey: "reserve.refresh.spin") != nil }

@@ -39,20 +39,90 @@ enum LifecycleSelfTest {
     return self.descendants(of: root).compactMap { $0 as? ProviderDashboardCard }
   }
 
-  /// A card counts as reachable when it is inside the window's content bounds.
-  /// A card that is present in the hierarchy but sitting outside the visible
-  /// rectangle has, from the user's point of view, disappeared.
-  static func isReachable(_ card: ProviderDashboardCard, in window: NSWindow) -> Bool {
-    guard let root = window.contentView else { return false }
+  /// Why a card is reachable, or why it is not.
+  ///
+  /// The first version of this returned true for anything inside a scroll view,
+  /// which excused the exact failure it existed to catch: a card pushed past the
+  /// popover's edge sat in a scroll view, so the check passed while the provider
+  /// was invisible. Being in a scroll view is not reachability — the card has to
+  /// lie within the document's scrollable range, and the scroll view has to
+  /// advertise that there is more to see.
+  static func unreachableReason(_ card: ProviderDashboardCard, in window: NSWindow) -> String? {
+    guard let root = window.contentView else { return "no content view" }
     let frame = card.convert(card.bounds, to: root)
-    // Clipped by an enclosing scroll view is fine — it can be scrolled back into
-    // view. Outside the window entirely is not.
-    let visible = root.bounds.insetBy(dx: -1, dy: -1)
-    return visible.intersects(frame) || card.enclosingScrollView != nil
+    if root.bounds.insetBy(dx: -1, dy: -1).contains(frame) { return nil }
+
+    guard let scroll = card.enclosingScrollView, let document = scroll.documentView else {
+      return "outside the popover with nothing to scroll"
+    }
+    let inDocument = card.convert(card.bounds, to: document)
+    guard inDocument.minY >= -0.5, inDocument.maxY <= document.frame.height + 0.5 else {
+      return "outside the scrollable document, so no amount of scrolling reveals it"
+    }
+    guard document.frame.height > scroll.contentView.bounds.height + 0.5 else {
+      return "past the edge but the document is not taller than the viewport"
+    }
+    // Reachable only if the scroll view says so. An auto-hiding overlay scroller
+    // leaves no sign that the column continues.
+    guard scroll.hasVerticalScroller, !scroll.autohidesScrollers else {
+      return "only reachable by scrolling, with no visible scroller to suggest it"
+    }
+    return nil
+  }
+
+  static func isReachable(_ card: ProviderDashboardCard, in window: NSWindow) -> Bool {
+    self.unreachableReason(card, in: window) == nil
   }
 
   static func providerIdentifier(_ card: ProviderDashboardCard) -> String {
     card.identifier?.rawValue ?? "unknown"
+  }
+
+  /// Prints what the popover actually looks like, step by step. Diagnostic
+  /// only — it asserts nothing, so it cannot hide a failure behind a passing
+  /// condition the way an over-permissive assertion can.
+  static func dumpGeometry(
+    _ step: String,
+    store: UsageStore,
+    controller: StatusItemController
+  ) {
+    guard let window = controller.dashboardWindowForTesting,
+      let root = window.contentView
+    else {
+      print("  \(step): NO WINDOW")
+      return
+    }
+    let screen = window.screen ?? NSScreen.main
+    let win: Int = Int(window.frame.height)
+    let content: Int = Int(root.frame.height)
+    let popoverSize: Int = Int(controller.popoverContentSizeForTesting.height)
+    let preferred: Int = Int(controller.dashboardControllerForTesting.preferredContentSize.height)
+    let hasScroll: Bool = self.descendants(of: root).contains { $0 is NSScrollView }
+    let visible: Int = Int(screen?.visibleFrame.height ?? 0)
+    var line = "  \(step)  window=\(win) content=\(content)"
+    line += " popoverContentSize=\(popoverSize) preferred=\(preferred)"
+    line += " scroll=\(hasScroll) screenVisible=\(visible)"
+    print(line)
+    for card in self.visibleCards(in: window) {
+      let f = card.convert(card.bounds, to: nil)
+      let name = self.providerIdentifier(card).replacingOccurrences(
+        of: "provider-card-", with: "")
+      let insideWindow: Bool = f.minY >= -0.5 && f.maxY <= window.frame.height + 0.5
+      let lo: Int = Int(f.minY)
+      let hi: Int = Int(f.maxY)
+      let h: Int = Int(f.height)
+      var cardLine = "      \(name): y=\(lo)..\(hi) h=\(h)"
+      if !insideWindow { cardLine += "   <-- OUTSIDE WINDOW" }
+      if let scroll = card.enclosingScrollView, let doc = scroll.documentView {
+        let inDoc = card.convert(card.bounds, to: doc)
+        let maxScroll = max(0, doc.frame.height - scroll.contentView.bounds.height)
+        let reachable = inDoc.minY >= -0.5 && inDoc.maxY <= doc.frame.height + 0.5
+        cardLine += "  [doc y=\(Int(inDoc.minY))..\(Int(inDoc.maxY))"
+        cardLine += " docH=\(Int(doc.frame.height)) maxScroll=\(Int(maxScroll))"
+        cardLine += " scrollReachable=\(reachable)]"
+      }
+      print(cardLine)
+    }
   }
 
   // MARK: - Provider disclosure
@@ -79,9 +149,11 @@ enum LifecycleSelfTest {
       result.expect(
         present == expected,
         "\(step): visible cards \(present.sorted()) but expected \(expected.sorted())")
-      for card in cards where !self.isReachable(card, in: window) {
-        result.failures.append(
-          "\(step): \(self.providerIdentifier(card)) is outside the visible dashboard")
+      for card in cards {
+        if let reason = self.unreachableReason(card, in: window) {
+          result.failures.append(
+            "\(step): \(self.providerIdentifier(card)) is \(reason)")
+        }
       }
       // The window must be able to show the content it was sized for.
       if let root = window.contentView {
@@ -182,6 +254,21 @@ enum LifecycleSelfTest {
     return NSColor(cgColor: cgColor)?.usingColorSpace(.sRGB)
   }
 
+  /// The appearance the person actually asked for, which is the only correct
+  /// yardstick. Resolving an expectation in the *view's* appearance compares a
+  /// stale surface against a stale expectation, so a surface stuck in the wrong
+  /// mode agrees with itself and the check passes while the window is visibly
+  /// wrong. Every appearance assertion has to be anchored outside the view.
+  static func intendedAppearance(mode: AppearanceMode) -> NSAppearance {
+    if let explicit = mode.nsAppearance { return explicit }
+    let system = NSApplication.shared.effectiveAppearance
+    return NSAppearance(named: system.bestMatch(from: [.aqua, .darkAqua]) ?? .aqua) ?? system
+  }
+
+  static func isDark(_ appearance: NSAppearance) -> Bool {
+    appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+  }
+
   static func matches(_ color: NSColor?, _ expected: NSColor, in appearance: NSAppearance) -> Bool {
     guard let color else { return false }
     var resolved: NSColor?
@@ -203,10 +290,6 @@ enum LifecycleSelfTest {
     settings: SettingsWindowController
   ) -> Result {
     var result = Result()
-    guard let window = controller.dashboardWindowForTesting else {
-      result.failures.append("popover window was not created")
-      return result
-    }
     let originalTheme = store.appearanceTheme
     let originalMode = store.appearanceMode
     defer {
@@ -221,11 +304,27 @@ enum LifecycleSelfTest {
         self.settle()
         let label = "\(mode.rawValue)+\(theme.rawValue)"
 
+        // Re-fetched every time: the popover builds a new window on each show,
+        // so a window captured once goes stale and reports old colours.
+        guard let window = controller.dashboardWindowForTesting else {
+          result.failures.append("\(label): popover window was not created")
+          continue
+        }
         guard let root = window.contentView else {
           result.failures.append("\(label): popover has no content view")
           continue
         }
-        let appearance = root.effectiveAppearance
+        // Anchored to what was asked for, never to the view's own appearance.
+        let appearance = self.intendedAppearance(mode: mode)
+        // The window itself has to be in the right mode before its colours can
+        // possibly be. This is the check the old tautological one could not make.
+        result.expect(
+          self.isDark(window.effectiveAppearance) == self.isDark(appearance),
+          "\(label): popover window is \(self.isDark(window.effectiveAppearance) ? "dark" : "light")"
+            + " but \(self.isDark(appearance) ? "dark" : "light") was asked for")
+        result.expect(
+          self.isDark(root.effectiveAppearance) == self.isDark(appearance),
+          "\(label): dashboard view is in the wrong light/dark mode")
         // The dashboard surface itself.
         result.expect(
           self.matches(self.resolvedBackground(root), theme.palette.windowBase, in: appearance),
@@ -267,7 +366,7 @@ enum LifecycleSelfTest {
       result.expect(
         self.matches(
           self.resolvedBackground(root), AppearanceTheme.ember.palette.windowBase,
-          in: root.effectiveAppearance),
+          in: self.intendedAppearance(mode: store.appearanceMode)),
         "a reopened dashboard kept the appearance it was closed in")
     } else {
       result.failures.append("the dashboard did not come back after being closed")
@@ -294,10 +393,63 @@ enum LifecycleSelfTest {
       smallCeiling >= DashboardMetrics.minimumHeight,
       "the small-display ceiling collapsed below the minimum dashboard height")
 
+    // A roomy screen must not truncate. A fully expanded provider is around
+    // 960pt, so a ceiling pinned to 860 forced it to scroll and pushed the last
+    // card past the bottom edge even though the screen had room to spare.
     let roomy = DashboardMetrics.availableHeight(on: nil, visibleHeight: 1_400)
     result.expect(
-      roomy == DashboardMetrics.maximumHeight,
-      "a large display should still respect the design ceiling, got \(Int(roomy))")
+      roomy > DashboardMetrics.maximumHeight,
+      "a large display is still clamped to the old \(Int(DashboardMetrics.maximumHeight))pt "
+        + "ceiling, got \(Int(roomy))")
+    result.expect(
+      roomy + DashboardMetrics.popoverChrome <= 1_400,
+      "the roomy ceiling \(Int(roomy))pt does not leave room for the popover's own chrome")
+    result.expect(
+      roomy >= 1_000,
+      "the ceiling \(Int(roomy))pt is still below a fully expanded provider, which scrolls "
+        + "at roughly 960pt")
+    return result
+  }
+
+  /// A control that spins has to spin in place.
+  ///
+  /// The invariant is that moving the anchor leaves the layer's geometry alone:
+  /// `layer.frame` must still match the view's frame. When `position` is not
+  /// restored the layer slides by half its size, so the control both draws
+  /// off-centre and rotates around a point beside itself.
+  static func checkSpinnerGeometry() -> Result {
+    var result = Result()
+    let host = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+    host.wantsLayer = true
+    let button = ReserveIconButton(
+      symbol: "arrow.clockwise", toolTip: "Refresh now", diameter: 26,
+      spinningSince: 0.3, action: {})
+    button.translatesAutoresizingMaskIntoConstraints = false
+    host.addSubview(button)
+    NSLayoutConstraint.activate([
+      button.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 40),
+      button.topAnchor.constraint(equalTo: host.topAnchor, constant: 60),
+    ])
+    host.layoutSubtreeIfNeeded()
+    host.layout()
+
+    guard let layer = button.layer else {
+      result.failures.append("the refresh control has no layer to rotate")
+      return result
+    }
+    result.expect(
+      abs(layer.anchorPoint.x - 0.5) < 0.001 && abs(layer.anchorPoint.y - 0.5) < 0.001,
+      "the refresh control rotates about \(layer.anchorPoint) rather than its middle")
+    // The decisive one: a displaced layer is what reads as orbiting.
+    let dx = abs(layer.frame.origin.x - button.frame.origin.x)
+    let dy = abs(layer.frame.origin.y - button.frame.origin.y)
+    result.expect(
+      dx < 0.5 && dy < 0.5,
+      "the refresh control's layer is displaced by (\(Int(dx)), \(Int(dy)))pt from the control "
+        + "itself, so it swings around a point beside itself instead of turning in place")
+    if !ReserveMotion.isReduced {
+      result.expect(button.isSpinning, "the refresh control did not start turning")
+    }
     return result
   }
 

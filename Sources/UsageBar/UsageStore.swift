@@ -259,6 +259,41 @@ final class UsageStore {
     }
   }
 
+  /// Whether Reserve looks for a new release on its own. The check contacts
+  /// GitHub and sends nothing but the current version, and it can be switched
+  /// off entirely.
+  var automaticUpdateChecks: Bool {
+    get { self.defaults.bool(forKey: "updates.automatic") }
+    set {
+      self.defaults.set(newValue, forKey: "updates.automatic")
+      self.changed()
+    }
+  }
+
+  /// When the last automatic check ran, so launching Reserve repeatedly does not
+  /// mean asking GitHub repeatedly.
+  var lastUpdateCheck: Date? {
+    get { self.defaults.object(forKey: "updates.lastCheckedAt") as? Date }
+    set { self.defaults.set(newValue, forKey: "updates.lastCheckedAt") }
+  }
+
+  /// The newest release Reserve has seen, remembered so Settings can report it
+  /// whenever it is next opened rather than only while a check is running.
+  var availableUpdate: (version: String, url: URL)? {
+    get {
+      guard let version = self.defaults.string(forKey: "updates.availableVersion"),
+        let raw = self.defaults.string(forKey: "updates.availableURL"),
+        let url = URL(string: raw), url.scheme == "https"
+      else { return nil }
+      return (version, url)
+    }
+    set {
+      self.defaults.set(newValue?.version, forKey: "updates.availableVersion")
+      self.defaults.set(newValue?.url.absoluteString, forKey: "updates.availableURL")
+      self.changed()
+    }
+  }
+
   var menuBarProvider: ProviderID? {
     get {
       guard let raw = self.defaults.string(forKey: "menuBar.provider"), raw != "reserve" else {
@@ -644,6 +679,7 @@ final class UsageStore {
       "notifications.sound": false,
       "appearance.theme": AppearanceTheme.matrix.rawValue,
       "appearance.mode": AppearanceMode.system.rawValue,
+      "updates.automatic": true,
       "menuBar.provider": "reserve",
       "menuBar.showsRemaining": true,
       "menuBar.showsReset": true,
