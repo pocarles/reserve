@@ -376,6 +376,7 @@ public actor LocalUsageScanner {
         options: [.skipsHiddenFiles, .skipsPackageDescendants])
     else { return [] }
     var files: [URL] = []
+    var resolvedDirectories: [String: Bool] = [:]
     for case let file as URL in enumerator {
       guard files.count < Self.maximumScannedFiles else { break }
       if let named, file.lastPathComponent != named { continue }
@@ -389,10 +390,21 @@ public actor LocalUsageScanner {
         let modified = values.contentModificationDate,
         modified >= cutoff
       else { continue }
-      // Resolve after the link check, so a link anywhere in the ancestry that
-      // escapes the root is caught too.
-      let resolved = file.resolvingSymlinksInPath().standardizedFileURL.path
-      guard resolved == jail || resolved.hasPrefix(jail + "/") else { continue }
+      // The file itself is already known not to be a link. What still has to be
+      // checked is its ancestry, and that is per *directory*, not per file —
+      // resolving every one of several thousand files was pure syscall cost for
+      // an answer shared by all the files in a folder.
+      let parent = file.deletingLastPathComponent().path
+      let inside: Bool
+      if let known = resolvedDirectories[parent] {
+        inside = known
+      } else {
+        let resolved = URL(fileURLWithPath: parent).resolvingSymlinksInPath()
+          .standardizedFileURL.path
+        inside = resolved == jail || resolved.hasPrefix(jail + "/")
+        resolvedDirectories[parent] = inside
+      }
+      guard inside else { continue }
       files.append(file)
     }
     return files

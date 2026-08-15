@@ -79,6 +79,7 @@ final class UsageStore {
   /// The newest refresh request per provider. Results from any older request are
   /// discarded rather than applied.
   private var refreshTokens: [ProviderID: Int] = [:]
+  private var lastRefreshCompletedAt: Date?
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
   /// Which provider row is open in the popover. Transient interface state, so
@@ -363,6 +364,19 @@ final class UsageStore {
     }
   }
 
+  /// The scheduled sweep. Skips the round when nothing on screen could change.
+  private func refreshAllIfWorthwhile(now: Date = Date()) {
+    guard
+      Self.scheduledRefreshIsWorthwhile(
+        states: ProviderID.allCases.compactMap { self.states[$0] }
+          .filter { self.isEnabled($0.provider) },
+        lastCompletedAt: self.lastRefreshCompletedAt,
+        intervalMinutes: self.refreshIntervalMinutes,
+        now: now)
+    else { return }
+    self.refreshAll(manual: false)
+  }
+
   func refreshAfterResumeIfNeeded(now: Date = Date()) {
     if self.shouldRefreshAfterResume(now: now) { self.refreshAll(manual: false) }
   }
@@ -519,7 +533,24 @@ final class UsageStore {
     return Self.billingDate(day: day, inMonthContaining: nextMonth)
   }
 
+  /// Billing dates are pure arithmetic over (day, month) and are recomputed for
+  /// every provider on every read of `orderedStates` — which happens several
+  /// times per update cycle. `Calendar` date math is not cheap, so the answers
+  /// are memoized; there are only a handful of distinct keys in play.
+  private static var billingDateCache: [String: Date?] = [:]
+
   private static func billingDate(day: Int, inMonthContaining date: Date) -> Date? {
+    let calendar = Calendar.current
+    let month = calendar.dateComponents([.year, .month], from: date)
+    let key = "\(day)-\(month.year ?? 0)-\(month.month ?? 0)"
+    if let cached = Self.billingDateCache[key] { return cached }
+    let computed = Self.computeBillingDate(day: day, inMonthContaining: date)
+    if Self.billingDateCache.count > 256 { Self.billingDateCache.removeAll(keepingCapacity: true) }
+    Self.billingDateCache[key] = computed
+    return computed
+  }
+
+  private static func computeBillingDate(day: Int, inMonthContaining date: Date) -> Date? {
     let calendar = Calendar.current
     var components = calendar.dateComponents([.year, .month], from: date)
     components.day = 1
@@ -663,7 +694,10 @@ final class UsageStore {
       // Reading Claude Code's Keychain item is another application's OAuth
       // token, so it is opt-in and stays off until asked for.
       "anthropic.keychainReadAllowed": false,
-      "refresh.intervalMinutes": 10,
+      // Weekly quotas move slowly, and every sweep spawns a provider CLI that
+      // costs far more than Reserve itself. Half-hourly is plenty; the interval
+      // remains configurable.
+      "refresh.intervalMinutes": 30,
       "notifications.enabled": true,
       // Smart alerts are the default stream: they only fire when the forecast
       // changes what you should do.
@@ -800,6 +834,36 @@ final class UsageStore {
     Task { await self.performLocalUsageScan() }
   }
 
+  /// Whether a scheduled sweep earns the provider subprocesses it costs.
+  ///
+  /// A refresh spawns a provider CLI — `codex app-server` alone peaks near
+  /// 100 MB — so a calm plan is not worth waking for on every tick. Anything
+  /// that could actually change what the menu bar says still refreshes on time:
+  /// data that is missing, stale or errored, a window close to its reset, or a
+  /// plan far enough through its allowance that the number moves.
+  static func scheduledRefreshIsWorthwhile(
+    states: [ProviderViewState],
+    lastCompletedAt: Date?,
+    intervalMinutes: Int,
+    now: Date = Date()
+  ) -> Bool {
+    guard let lastCompletedAt else { return true }
+    // Never let the data get more than twice the configured interval old.
+    let interval = TimeInterval(max(1, intervalMinutes) * 60)
+    if now.timeIntervalSince(lastCompletedAt) >= interval * 2 { return true }
+    return states.contains { state in
+      if state.error != nil { return true }
+      guard let snapshot = state.snapshot else { return true }
+      if now.timeIntervalSince(snapshot.fetchedAt) >= UsagePaceState.stalenessLimit { return true }
+      return snapshot.windows.contains { window in
+        if window.usedPercent >= 80 { return true }
+        guard let reset = window.resetsAt else { return false }
+        // Near a reset the numbers are about to move.
+        return reset.timeIntervalSince(now) <= 3_600 && reset > now
+      }
+    }
+  }
+
   private func startScheduler() {
     self.schedulerTask?.cancel()
     let minutes = self.refreshIntervalMinutes
@@ -807,7 +871,7 @@ final class UsageStore {
       while !Task.isCancelled {
         try? await Task.sleep(for: .seconds(minutes * 60))
         guard !Task.isCancelled else { break }
-        await MainActor.run { self?.refreshAll(manual: false) }
+        await MainActor.run { self?.refreshAllIfWorthwhile() }
       }
     }
   }
@@ -821,6 +885,7 @@ final class UsageStore {
       await self.performLocalUsageScan(notify: false)
     }
     self.isRefreshingAll = false
+    self.lastRefreshCompletedAt = Date()
     self.changed()
   }
 

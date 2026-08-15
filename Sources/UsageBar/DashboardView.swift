@@ -17,6 +17,7 @@ struct DashboardActions {
 final class DashboardViewController: NSViewController {
   private let store: UsageStore
   private let actions: DashboardActions
+  private var lastSignature: String?
 
   init(store: UsageStore, actions: DashboardActions) {
     self.store = store
@@ -30,17 +31,72 @@ final class DashboardViewController: NSViewController {
 
   override func loadView() { self.update() }
 
+  /// What the dashboard would currently render, as text.
+  ///
+  /// The whole view tree used to be rebuilt on every store change *and* every
+  /// minute tick, even when only the clock had moved and nothing on screen
+  /// differed. Comparing the rendered strings first is far cheaper than
+  /// allocating several hundred AppKit views to discover they were identical.
+  private static func signature(
+    summaries: [ProviderSummary],
+    selectedMenuBarProvider: ProviderID?,
+    expandedProvider: ProviderID?,
+    isRefreshing: Bool,
+    now: Date
+  ) -> String {
+    var parts: [String] = [
+      // Appearance is part of what is rendered: a theme or light/dark change
+      // alters every colour while leaving all the text identical.
+      ReserveAppearance.current.rawValue,
+      ReserveAppearance.resolvedAppearance.name.rawValue,
+      selectedMenuBarProvider?.rawValue ?? "-",
+      expandedProvider?.rawValue ?? "-",
+      isRefreshing ? "busy" : "idle",
+      AllowanceBuilder.headline(for: summaries, now: now).primary,
+      DashboardFormat.updated(
+        summaries.compactMap(\.lastUpdated).max() ?? .distantPast, now: now),
+    ]
+    for summary in summaries {
+      parts.append(summary.provider.rawValue)
+      parts.append(summary.planName)
+      parts.append(summary.error ?? "-")
+      parts.append(summary.needsConnection ? "connect" : "-")
+      parts.append(summary.isConnecting ? "connecting" : "-")
+      parts.append(summary.serviceIsExceptional ? (summary.serviceStatus?.detail ?? "!") : "-")
+      for allowance in summary.allowances {
+        parts.append(allowance.id)
+        parts.append(String(Int(allowance.remainingPercent.rounded())))
+        parts.append(DashboardFormat.limitLine(allowance, now: now))
+        parts.append(
+          DashboardFormat.forecast(
+            allowance, paceState: summary.paceState, lastUpdated: summary.lastUpdated, now: now))
+        parts.append(DashboardFormat.secondaryDetail(allowance, now: now))
+      }
+    }
+    return parts.joined(separator: "\u{1}")
+  }
+
   func update() {
     // `self.view` would load the view and recurse back into this method, so the
     // screen is only consulted once there is a view to ask.
     let screen = (self.isViewLoaded ? self.view.window?.screen : nil) ?? NSScreen.main
+    let now = Date()
+    let visibleStates = self.store.orderedStates.filter { self.store.isEnabled($0.provider) }
+    let signature = Self.signature(
+      summaries: visibleStates.map { AllowanceBuilder.summary(for: $0, now: now) },
+      selectedMenuBarProvider: self.store.menuBarProvider,
+      expandedProvider: self.store.expandedProvider,
+      isRefreshing: self.store.isRefreshingAll || self.store.isScanningLocalUsage,
+      now: now)
+    if self.isViewLoaded, signature == self.lastSignature { return }
+    self.lastSignature = signature
     let dashboard = UsageDashboardView(
-      states: self.store.orderedStates.filter { self.store.isEnabled($0.provider) },
+      states: visibleStates,
       selectedMenuBarProvider: self.store.menuBarProvider,
       expandedProvider: self.store.expandedProvider,
       isRefreshing: self.store.isRefreshingAll || self.store.isScanningLocalUsage,
       refreshStartedAt: self.store.refreshStartedAt,
-      now: Date(),
+      now: now,
       maximumHeight: DashboardMetrics.availableHeight(on: screen),
       actions: self.actions)
     // The size has to be read before the view is installed. Assigning `view`

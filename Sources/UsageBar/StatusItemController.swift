@@ -485,6 +485,45 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         URL(string: "https://github.com/pocarles/reserve/releases/%2e%2e/%2e%2e/attacker/evil")!)
       && !UpdateChecker.isReserveReleaseURL(
         URL(string: "https://github.com/pocarles/reserve/releases/..%2f..%2fattacker%2fevil")!)
+    // A calm plan does not earn the provider subprocess a sweep costs; anything
+    // that could change the menu bar still refreshes on time.
+    func state(_ used: Double, fetchedMinutesAgo: Double, resetsInHours: Double) -> ProviderViewState {
+      var value = ProviderViewState(provider: .openAI)
+      value.snapshot = UsageSnapshot(
+        provider: .openAI,
+        windows: [
+          UsageWindow(
+            id: "weekly", label: "Weekly", usedPercent: used, windowMinutes: 10_080,
+            resetsAt: Date().addingTimeInterval(resetsInHours * 3_600))
+        ],
+        fetchedAt: Date().addingTimeInterval(-fetchedMinutesAgo * 60),
+        source: "scheduling check")
+      return value
+    }
+    let calm = state(20, fetchedMinutesAgo: 5, resetsInHours: 100)
+    let adaptiveSchedulingWorks =
+      // Calm and recently refreshed: skip.
+      !UsageStore.scheduledRefreshIsWorthwhile(
+        states: [calm], lastCompletedAt: Date().addingTimeInterval(-5 * 60), intervalMinutes: 30)
+      // Never let data age past twice the interval.
+      && UsageStore.scheduledRefreshIsWorthwhile(
+        states: [calm], lastCompletedAt: Date().addingTimeInterval(-61 * 60), intervalMinutes: 30)
+      // Nothing cached yet.
+      && UsageStore.scheduledRefreshIsWorthwhile(
+        states: [ProviderViewState(provider: .openAI)],
+        lastCompletedAt: Date().addingTimeInterval(-60), intervalMinutes: 30)
+      // Close to a limit.
+      && UsageStore.scheduledRefreshIsWorthwhile(
+        states: [state(85, fetchedMinutesAgo: 5, resetsInHours: 100)],
+        lastCompletedAt: Date().addingTimeInterval(-5 * 60), intervalMinutes: 30)
+      // Close to a reset.
+      && UsageStore.scheduledRefreshIsWorthwhile(
+        states: [state(20, fetchedMinutesAgo: 5, resetsInHours: 0.5)],
+        lastCompletedAt: Date().addingTimeInterval(-5 * 60), intervalMinutes: 30)
+      // Stale data.
+      && UsageStore.scheduledRefreshIsWorthwhile(
+        states: [state(20, fetchedMinutesAgo: 45, resetsInHours: 100)],
+        lastCompletedAt: Date().addingTimeInterval(-5 * 60), intervalMinutes: 30)
     let unrelatedWindow = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
       styleMask: [.titled], backing: .buffered, defer: false)
@@ -500,13 +539,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       providerStatusWorks, directProviderSelectionWorks, fullCardSelectionHitTargetWorks,
       firstClickSelectionWorks, footerButtonsArePadded, providerButtonsArePadded,
       refreshButtonIsPadded, dashboardTypographyIsReadable, oauthURLParsingIsSafe,
-      outsideClickDismissalWorks, updateURLsAreRestricted, automaticSourceWorks,
+      outsideClickDismissalWorks, updateURLsAreRestricted, adaptiveSchedulingWorks,
+      automaticSourceWorks,
       pinnedModelWorks, aggregateCopyWorks,
       semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), motion=\(motionIsPurposeful), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), motion=\(motionIsPurposeful), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (
@@ -707,11 +747,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   private func updateStatusIcon() {
     guard let button = self.statusItem.button else { return }
     let now = Date()
-    let summaries = self.store.orderedStates
-      .filter { self.store.isEnabled($0.provider) }
-      .map { AllowanceBuilder.summary(for: $0, now: now) }
-    let selection = AllowanceBuilder.menuBarSummary(
-      from: summaries, pinnedProvider: self.store.menuBarProvider)
+    let selection = self.menuBarSelection(now: now)
     let summary = selection.summary
     let remaining = summary?.primary?.remainingPercent
     let image: NSImage
@@ -779,20 +815,29 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     return "\(minutes)m"
   }
 
-  private var needsMinuteUpdates: Bool {
-    if self.popover.isShown { return true }
-    guard self.store.menuBarShowsReset else { return false }
-    let now = Date()
+  /// The menu-bar model, computed once per update rather than rebuilt by each
+  /// caller that happens to need it.
+  private var cachedSelection: (at: Date, selection: (summary: ProviderSummary?, isPinned: Bool))?
+
+  private func menuBarSelection(now: Date) -> (summary: ProviderSummary?, isPinned: Bool) {
+    if let cachedSelection, cachedSelection.at == now { return cachedSelection.selection }
     let summaries = self.store.orderedStates
       .filter { self.store.isEnabled($0.provider) }
       .map { AllowanceBuilder.summary(for: $0, now: now) }
-    return AllowanceBuilder.menuBarSummary(
-      from: summaries, pinnedProvider: self.store.menuBarProvider
-    ).summary?.primary?.resetsAt.map { $0 > now } == true
+    let selection = AllowanceBuilder.menuBarSummary(
+      from: summaries, pinnedProvider: self.store.menuBarProvider)
+    self.cachedSelection = (now, selection)
+    return selection
   }
 
-  private func updateMinuteTimer() {
-    guard self.needsMinuteUpdates else {
+  private func needsMinuteUpdates(now: Date) -> Bool {
+    if self.popover.isShown { return true }
+    guard self.store.menuBarShowsReset else { return false }
+    return self.menuBarSelection(now: now).summary?.primary?.resetsAt.map { $0 > now } == true
+  }
+
+  private func updateMinuteTimer(now: Date = Date()) {
+    guard self.needsMinuteUpdates(now: now) else {
       self.minuteTimer?.invalidate()
       self.minuteTimer = nil
       return
@@ -865,10 +910,25 @@ private enum DashboardRenderError: Error {
   case pngUnavailable
 }
 
+@MainActor
 private enum ReserveStatusIcon {
   static let size = NSSize(width: 18, height: 18)
 
+  /// The gauge is redrawn only when the number it shows changes. It used to be
+  /// re-rendered — arcs, needle and hub — on every store change and every
+  /// minute tick, almost always producing an identical image.
+  private static var cache: [Int: NSImage] = [:]
+
   static func image(remainingPercent: Double?) -> NSImage {
+    let key = remainingPercent.map { Int($0.rounded()) } ?? -1
+    if let cached = Self.cache[key] { return cached }
+    let image = Self.render(remainingPercent: remainingPercent)
+    // 0...100 plus the unknown state; small and bounded.
+    Self.cache[key] = image
+    return image
+  }
+
+  private static func render(remainingPercent: Double?) -> NSImage {
     let image = NSImage(size: self.size, flipped: false) { rect in
       NSColor.black.setStroke()
       NSColor.black.setFill()
