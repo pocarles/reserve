@@ -38,7 +38,11 @@ enum ProcessRunner {
       deadline.trigger()
       if process.isRunning { process.terminate() }
       try? await Task.sleep(for: .milliseconds(250))
-      if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+      // On macOS 15 Foundation can flip `isRunning` to false as soon as
+      // `terminate()` is sent, even when the child ignored SIGTERM and has not
+      // exited. Escalate against the captured PID regardless; an already-exited
+      // process simply returns ESRCH.
+      kill(process.processIdentifier, SIGKILL)
       try? stdout.fileHandleForReading.close()
       try? stderr.fileHandleForReading.close()
     }

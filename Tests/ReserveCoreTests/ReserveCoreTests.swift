@@ -250,6 +250,24 @@ struct ReserveCoreTests {
   }
 
   @Test
+  func testProcessRunnerEscalatesWhenTerminateIsIgnored() async {
+    let start = ContinuousClock.now
+    do {
+      _ = try await ProcessRunner.output(
+        executable: "/bin/sh",
+        arguments: ["-c", "trap '' TERM; while :; do sleep 1; done"],
+        environment: ProcessInfo.processInfo.environment,
+        timeout: .milliseconds(200))
+      XCTFail("SIGTERM-ignoring process should hit the deadline")
+    } catch let error as UsageProviderError {
+      guard case .timedOut = error else { return XCTFail("unexpected error: \(error)") }
+    } catch {
+      XCTFail("unexpected error: \(error)")
+    }
+    XCTAssertLessThan(start.duration(to: .now), .seconds(2))
+  }
+
+  @Test
   func testBoundedHTTPReceptionRejectsOversizedBody() async throws {
     MockURLProtocol.body = Data(repeating: 0x41, count: 1_025)
     let configuration = URLSessionConfiguration.ephemeral
