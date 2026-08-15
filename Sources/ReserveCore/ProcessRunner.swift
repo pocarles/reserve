@@ -16,10 +16,12 @@ enum ProcessRunner {
     process.environment = environment
     process.standardOutput = stdout
     process.standardError = stderr
+    let deadline = ProcessDeadlineState()
     let events = AsyncStream.makeStream(
       of: ProcessEvent.self,
       bufferingPolicy: .bufferingNewest(4))
     process.terminationHandler = { terminatedProcess in
+      deadline.noteProcessTerminated()
       events.continuation.yield(.terminated(terminatedProcess.terminationStatus))
     }
     try process.run()
@@ -37,7 +39,6 @@ enum ProcessRunner {
     // The deadline remains armed until both pipes drain. A child spawned by the
     // CLI can inherit stdout and keep it open after the parent exits; closing
     // our read ends at the deadline guarantees capture still terminates.
-    let deadline = ProcessDeadlineState()
     let timeoutTask = Task.detached {
       do {
         try await Task.sleep(for: timeout)
@@ -49,11 +50,16 @@ enum ProcessRunner {
       // internal state as stopped before a SIGTERM-ignoring child has actually
       // exited, which can leave Foundation's synchronous waiter blocked on
       // macOS 15.
-      kill(processIdentifier, SIGTERM)
+      if deadline.shouldSignalProcess {
+        kill(processIdentifier, SIGTERM)
+      }
       try? await Task.sleep(for: .milliseconds(250))
-      // Escalate against the same captured PID regardless; an already-exited
-      // process simply returns ESRCH.
-      kill(processIdentifier, SIGKILL)
+      // Foundation tells us when the original Process instance exits. Do not
+      // send a delayed signal to a bare PID after that point: macOS may already
+      // have recycled the number for an unrelated same-user process.
+      if deadline.shouldSignalProcess {
+        kill(processIdentifier, SIGKILL)
+      }
       try? stdout.fileHandleForReading.close()
       try? stderr.fileHandleForReading.close()
       events.continuation.yield(.timedOut)
@@ -136,6 +142,19 @@ private final class ProcessDeadlineState: @unchecked Sendable {
     case timedOut
   }
   private var state = State.running
+  private var processTerminated = false
+
+  var shouldSignalProcess: Bool {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    return !self.processTerminated
+  }
+
+  func noteProcessTerminated() {
+    self.lock.lock()
+    self.processTerminated = true
+    self.lock.unlock()
+  }
 
   func beginTimeout() -> Bool {
     self.lock.lock()
