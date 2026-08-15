@@ -26,17 +26,14 @@ enum ProcessRunner {
     }
     try process.run()
     let processIdentifier = process.processIdentifier
-    guard let processAuditToken = Self.auditToken(for: processIdentifier) else {
-      // Same-user children expose a task-name port on supported macOS releases.
-      // If the kernel cannot bind this launch to an immutable audit token, do
-      // not keep using a bare numeric PID for later timeout enforcement.
-      process.terminate()
-      try? stdout.fileHandleForReading.close()
-      try? stderr.fileHandleForReading.close()
-      throw UsageProviderError.processFailed(
-        "\(URL(fileURLWithPath: executable).lastPathComponent) identity could not be verified."
-      )
-    }
+    // A very short-lived command can exit before its audit token is available.
+    // That remains a normal completion path. Without an immutable token we
+    // never fall back to signalling a bare, potentially recycled numeric PID.
+    let auditTokenCandidate = Self.auditToken(for: processIdentifier)
+    // Check Foundation's launch state *after* acquisition. If the original was
+    // already reaped while the PID was recycled, discard the candidate rather
+    // than retaining the replacement process's token.
+    let processAuditToken = process.isRunning ? auditTokenCandidate : nil
 
     Task.detached {
       events.continuation.yield(
@@ -60,14 +57,16 @@ enum ProcessRunner {
       // Signal the captured process identity directly. `Process.terminate()`
       // can mark its internal state as stopped before a SIGTERM-ignoring child
       // has actually exited on macOS 15.
-      if deadline.shouldSignalProcess {
-        Self.signal(processAuditToken, SIGTERM)
-      }
-      try? await Task.sleep(for: .milliseconds(250))
-      // The audit token remains bound to this launch even if macOS recycles its
-      // numeric PID before the delayed escalation.
-      if deadline.shouldSignalProcess {
-        Self.signal(processAuditToken, SIGKILL)
+      if let processAuditToken {
+        if deadline.shouldSignalProcess {
+          Self.signal(processAuditToken, SIGTERM)
+        }
+        try? await Task.sleep(for: .milliseconds(250))
+        // The audit token remains bound to this launch even if macOS recycles
+        // its numeric PID before the delayed escalation.
+        if deadline.shouldSignalProcess {
+          Self.signal(processAuditToken, SIGKILL)
+        }
       }
       try? stdout.fileHandleForReading.close()
       try? stderr.fileHandleForReading.close()
