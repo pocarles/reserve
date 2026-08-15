@@ -213,7 +213,7 @@ struct ReserveCoreTests {
 
     XCTAssertEqual(files.count, 2)
     XCTAssertEqual(files.first?.lastPathComponent, "small.jsonl")
-    XCTAssertTrue(files.contains(large))
+    XCTAssertTrue(files.map(\.lastPathComponent).contains("large.jsonl"))
   }
 
   @Test
