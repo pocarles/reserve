@@ -35,7 +35,15 @@ enum BoundedFileReader {
       throw UsageProviderError.invalidResponse("could not write \(url.lastPathComponent)")
     }
     do {
-      _ = try fileManager.replaceItemAt(url, withItemAt: temp)
+      // replaceItemAt keeps the original item's mode unless told otherwise, so
+      // an existing 0644 cache would stay 0644 forever. Take the temp file's
+      // 0600 metadata, then set the destination again in case this OS still
+      // copies the old mode.
+      _ = try fileManager.replaceItemAt(
+        url, withItemAt: temp, backupItemName: nil, options: [.usingNewMetadataOnly])
+      try fileManager.setAttributes(
+        [.posixPermissions: NSNumber(value: Int16(0o600))],
+        ofItemAtPath: url.path)
     } catch {
       try? fileManager.removeItem(at: temp)
       throw error

@@ -445,6 +445,18 @@ public enum UsageBarSelfTests {
     else { throw Failure("normalized snapshot cache") }
     passed.append("normalized snapshot cache")
 
+    try Data("[]".utf8).write(to: url, options: .atomic)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o644], ofItemAtPath: url.path)
+    try await cache.save([.openAI: snapshot])
+    let repairedMode =
+      try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]
+      as? NSNumber
+    guard repairedMode?.intValue == 0o600 else {
+      throw Failure("restricted cache repairs existing mode")
+    }
+    passed.append("restricted cache repairs existing mode")
+
     let older = UsageSnapshot(
       provider: .openAI,
       planName: "Old",

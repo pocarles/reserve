@@ -479,6 +479,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         URL(string: "https://github.com/attacker/reserve/releases/tag/v1")!)
       && !UpdateChecker.isReserveReleaseURL(
         URL(string: "http://github.com/pocarles/reserve/releases/tag/v1")!)
+      && !UpdateChecker.isReserveReleaseURL(
+        URL(string: "https://github.com/pocarles/reserve/releases/../../attacker/evil")!)
+      && !UpdateChecker.isReserveReleaseURL(
+        URL(string: "https://github.com/pocarles/reserve/releases/%2e%2e/%2e%2e/attacker/evil")!)
+      && !UpdateChecker.isReserveReleaseURL(
+        URL(string: "https://github.com/pocarles/reserve/releases/..%2f..%2fattacker%2fevil")!)
     let unrelatedWindow = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
       styleMask: [.titled], backing: .buffered, defer: false)

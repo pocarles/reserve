@@ -45,9 +45,19 @@ actor UpdateChecker {
   static func isReserveReleaseURL(_ url: URL) -> Bool {
     guard url.scheme?.lowercased() == "https",
       url.host?.lowercased() == "github.com",
-      url.user == nil, url.password == nil, url.port == nil
+      url.user == nil, url.password == nil, url.port == nil,
+      let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
     else { return false }
-    return url.path.lowercased().hasPrefix("/pocarles/reserve/releases/")
+    let raw = components.percentEncodedPath
+    // `URL.path` percent-decodes, so a prefix test accepts `..` and `%2f`.
+    // The raw path must be a plain `/pocarles/reserve/releases/…` with no
+    // escapes and no traversal.
+    guard !raw.contains("%") else { return false }
+    let parts = raw.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+    guard !parts.contains(".."), !parts.contains("."), parts.count >= 3 else { return false }
+    return parts[0].lowercased() == "pocarles"
+      && parts[1].lowercased() == "reserve"
+      && parts[2].lowercased() == "releases"
   }
 
   private static func isNewer(_ candidate: String, than current: String) -> Bool {
