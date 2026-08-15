@@ -79,7 +79,9 @@ if [[ "$mode" != local ]]; then
     }
   done
   developer_dir=$(xcode-select -p 2>/dev/null || true)
-  [[ "$developer_dir" == *Xcode.app/Contents/Developer ]] || {
+  # GitHub-hosted runners select versioned bundles such as Xcode_16.4.app;
+  # local installations commonly use the unversioned Xcode.app name.
+  [[ "$developer_dir" == *.app/Contents/Developer ]] || {
     echo "error: Universal 2 packaging requires full Xcode selected with xcode-select" >&2
     exit 69
   }
