@@ -255,7 +255,7 @@ struct ReserveCoreTests {
     do {
       _ = try await ProcessRunner.output(
         executable: "/bin/sh",
-        arguments: ["-c", "trap '' TERM; while :; do sleep 1; done"],
+        arguments: ["-c", "trap '' TERM; while :; do :; done"],
         environment: ProcessInfo.processInfo.environment,
         timeout: .milliseconds(200))
       XCTFail("SIGTERM-ignoring process should hit the deadline")
