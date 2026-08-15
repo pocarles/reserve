@@ -17,6 +17,7 @@ enum ProcessRunner {
     process.standardOutput = stdout
     process.standardError = stderr
     try process.run()
+    let processIdentifier = process.processIdentifier
 
     let stdoutTask = Task.detached {
       Self.capture(stdout.fileHandleForReading, maximumBytes: 65_536)
@@ -36,13 +37,14 @@ enum ProcessRunner {
         return
       }
       deadline.trigger()
-      if process.isRunning { process.terminate() }
+      // Signal the captured PID directly. `Process.terminate()` can mark its
+      // internal state as stopped before a SIGTERM-ignoring child has actually
+      // exited, which leaves `waitUntilExit()` waiting forever on macOS 15.
+      kill(processIdentifier, SIGTERM)
       try? await Task.sleep(for: .milliseconds(250))
-      // On macOS 15 Foundation can flip `isRunning` to false as soon as
-      // `terminate()` is sent, even when the child ignored SIGTERM and has not
-      // exited. Escalate against the captured PID regardless; an already-exited
+      // Escalate against the same captured PID regardless; an already-exited
       // process simply returns ESRCH.
-      kill(process.processIdentifier, SIGKILL)
+      kill(processIdentifier, SIGKILL)
       try? stdout.fileHandleForReading.close()
       try? stderr.fileHandleForReading.close()
     }
