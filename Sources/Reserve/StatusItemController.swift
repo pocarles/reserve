@@ -288,11 +288,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let firstClickSelectionWorks = directCard?.acceptsFirstMouse(for: nil) == true
     self.store.menuBarProvider = originalDirectProvider
     let hasScrollView = descendants.contains { $0 is NSScrollView }
+    let size = dashboardController.preferredContentSize
     let contentFits =
       descendants.compactMap { $0 as? NSStackView }.first.map {
-        $0.frame.minY >= 0 && $0.frame.maxY <= dashboardController.view.bounds.height
+        let container = $0.enclosingScrollView?.documentView ?? dashboardController.view
+        return $0.frame.minY >= 0 && $0.frame.maxY <= container.bounds.height
       } ?? false
-    let size = dashboardController.preferredContentSize
+    // A short screen is expected to add a scroll view, but only once the
+    // dashboard has consumed all space that can safely fit below the menu bar.
+    let scrollingMatchesAvailableSpace =
+      !hasScrollView
+      || abs(size.height - DashboardMetrics.availableHeight(on: NSScreen.main)) <= 1
     let dashboardFits =
       size.width == DashboardMetrics.width
       && size.height >= DashboardMetrics.minimumHeight
@@ -533,7 +539,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       settingsWindow.map { !self.shouldDismissDashboard(forClickedWindow: $0) } == true
       && self.shouldDismissDashboard(forClickedWindow: unrelatedWindow)
     guard providerCards == ProviderID.allCases.count, actionsPresent, quitRemainsReachable,
-      logosPresent, !hasScrollView, contentFits, dashboardFits, headlinePresent,
+      logosPresent, scrollingMatchesAvailableSpace, contentFits, dashboardFits, headlinePresent,
       activityMetricsAreGone, percentagesAreLabelled, forecastsPresent, disclosuresPresent,
       detailLayersPresent, keyboardReachable, spaceSelectsProvider, returnOpensDetail,
       rowsAreSpoken, decorationIsSilent, metersAreSpoken, motionIsPurposeful,
@@ -548,12 +554,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), scroll=\(hasScrollView), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), motion=\(motionIsPurposeful), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), motion=\(motionIsPurposeful), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (
       true,
-      "dashboard leads with one factual conclusion, gives \(providerCards) providers the same reserve/on-pace/deficit anatomy, uses fixed semantic colors without red quota states, selects the automatic or pinned menu-bar source, opens one provider at a time onto limits, usage and provenance, shares one minute clock, refreshes stale data after resume, takes keyboard focus with Space and Return, and fits without scrolling when collapsed"
+      "dashboard leads with one factual conclusion, gives \(providerCards) providers the same reserve/on-pace/deficit anatomy, uses fixed semantic colors without red quota states, selects the automatic or pinned menu-bar source, opens one provider at a time onto limits, usage and provenance, shares one minute clock, refreshes stale data after resume, takes keyboard focus with Space and Return, and fits adaptively on the available screen"
     )
   }
 
