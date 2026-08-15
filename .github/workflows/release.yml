@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without a leading v (rehearsal only)
+        required: true
+        default: 1.0.0
+        type: string
+      build_number:
+        description: Positive integer bundle build number
+        required: true
+        default: "1"
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Sign and notarize
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release_metadata.outputs.version }}
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate source and release metadata
+        id: release_metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "Release commit is not contained in origin/main" >&2
+            exit 1
+          }
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            [[ "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+              echo "Tag must use the stable vX.Y.Z form" >&2
+              exit 1
+            }
+            version=${REF_NAME#v}
+            build_number=$GITHUB_RUN_NUMBER
+          else
+            [[ "$INPUT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+              echo "Version must use the stable X.Y.Z form" >&2
+              exit 1
+            }
+            [[ "$INPUT_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+              echo "Build number must be a positive integer" >&2
+              exit 1
+            }
+            version=$INPUT_VERSION
+            build_number=$INPUT_BUILD_NUMBER
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
+
+      - name: Re-run source gates on the release commit
+        run: make check
+
+      - name: Import release credentials into temporary files
+        id: credentials
+        env:
+          CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          set +x
+          [[ -n "$CERTIFICATE_P12" && -n "$CERTIFICATE_PASSWORD" && -n "$API_KEY_P8" && -n "$API_KEY_ID" ]]
+
+          keychain="$RUNNER_TEMP/reserve-signing.keychain-db"
+          keychain_password=$(uuidgen)
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          api_key="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
+
+          printf '%s' "$CERTIFICATE_P12" | /usr/bin/base64 -D > "$certificate"
+          printf '%s' "$API_KEY_P8" > "$api_key"
+          chmod 600 "$certificate" "$api_key"
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$certificate"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+
+          available_identities=$(security find-identity -v -p codesigning "$keychain")
+          identity=$(sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' \
+            <<< "$available_identities" | sed -n '1p')
+          [[ -n "$identity" ]] || {
+            echo "No Developer ID Application identity was imported" >&2
+            exit 1
+          }
+
+          echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+          echo "api_key=$api_key" >> "$GITHUB_OUTPUT"
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign, notarize, and verify
+        env:
+          RESERVE_SIGN_IDENTITY: ${{ steps.credentials.outputs.identity }}
+          RESERVE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_PATH: ${{ steps.credentials.outputs.api_key }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          RESERVE_VERSION: ${{ steps.release_metadata.outputs.version }}
+          RESERVE_BUILD_NUMBER: ${{ steps.release_metadata.outputs.build_number }}
+          RESERVE_OUTPUT_DIR: ${{ runner.temp }}/reserve-release
+        run: ./Scripts/package_app.sh --mode release
+
+      - name: Remove temporary credentials
+        if: always()
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          set +e
+          security delete-keychain "$RUNNER_TEMP/reserve-signing.keychain-db" 2>/dev/null
+          rm -f "$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8" "$RUNNER_TEMP/developer-id.p12"
+
+      - name: Upload signed rehearsal or release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Reserve-${{ steps.release_metadata.outputs.version }}
+          path: |
+            ${{ runner.temp }}/reserve-release/Reserve.dmg
+            ${{ runner.temp }}/reserve-release/Reserve.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: Reserve-${{ needs.package.outputs.version }}
+          path: release-assets
+
+      - name: Publish immutable tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum -c Reserve.dmg.sha256
+          gh release create "$TAG" Reserve.dmg Reserve.dmg.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Reserve ${TAG#v}" \
+            --generate-notes \
+            --draft
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

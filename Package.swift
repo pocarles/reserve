@@ -2,25 +2,25 @@
 import PackageDescription
 
 let package = Package(
-    name: "UsageBar",
+    name: "Reserve",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "UsageBarCore", targets: ["UsageBarCore"]),
-        .executable(name: "UsageBar", targets: ["UsageBar"]),
-        .executable(name: "usagebar-probe", targets: ["UsageBarProbe"]),
-        .executable(name: "usagebar-selftest", targets: ["UsageBarSelfTest"]),
+        .library(name: "ReserveCore", targets: ["ReserveCore"]),
+        .executable(name: "Reserve", targets: ["Reserve"]),
+        .executable(name: "reserve-probe", targets: ["ReserveProbe"]),
+        .executable(name: "reserve-selftest", targets: ["ReserveSelfTest"]),
     ],
     targets: [
-        .target(name: "UsageBarCore"),
+        .target(name: "ReserveCore"),
         .executableTarget(
-            name: "UsageBar",
-            dependencies: ["UsageBarCore"],
-            resources: [.copy("Resources")]),
+            name: "Reserve",
+            dependencies: ["ReserveCore"]),
         .executableTarget(
-            name: "UsageBarProbe",
-            dependencies: ["UsageBarCore"]),
+            name: "ReserveProbe",
+            dependencies: ["ReserveCore"]),
         .executableTarget(
-            name: "UsageBarSelfTest",
-            dependencies: ["UsageBarCore"],
+            name: "ReserveSelfTest",
+            dependencies: ["ReserveCore"],
             resources: [.copy("Fixtures")]),
+        .testTarget(name: "ReserveCoreTests", dependencies: ["ReserveCore"]),
     ])

@@ -1,226 +1,213 @@
 # Reserve
 
-Reserve is a deliberately small macOS menu-bar application that shows the
-subscription quota windows for OpenAI Codex, Anthropic Claude, and Grok.
+Reserve is a native macOS menu-bar app that shows how much subscription
+capacity remains in OpenAI Codex, Anthropic Claude, and Grok, when each window
+resets, and whether the current pace is likely to last.
 
-Build it on your Mac with `make run`. There is no official binary download.
+It is deliberately small: no Reserve account, browser automation, WebView,
+cookie extraction, telemetry, crash reporting, cloud service, third-party
+status aggregator, automatic updater, or third-party Swift package dependency.
 
-## Product boundary
+## Install
 
-Reserve does one job: combine current subscription limits with a compact
-view of today's and the rolling last 30 days of locally observed token usage. It does not include:
+Reserve requires macOS 14 or newer and is distributed as a signed, notarized
+Universal 2 app for Apple silicon and Intel Macs.
 
-- browser automation, hidden WebViews, or cookie extraction;
-- transcript storage or a raw usage-history database;
-- widgets, plugins, multi-account switching, or iCloud sync;
-- cloud analytics or third-party status aggregators.
+1. Download [`Reserve.dmg`](https://github.com/pocarles/reserve/releases/latest/download/Reserve.dmg)
+   and [`Reserve.dmg.sha256`](https://github.com/pocarles/reserve/releases/latest/download/Reserve.dmg.sha256).
+2. In Terminal, verify the download from its directory:
 
-The app has no third-party package dependencies. Provider subprocesses exist only
-for the duration of a bounded limits refresh. The token scanner reads local CLI
-session files directly and keeps only daily aggregates.
+   ```sh
+   shasum -a 256 -c Reserve.dmg.sha256
+   ```
 
-## Requirements
+3. Open the DMG and drag Reserve to Applications.
 
-- macOS 14 or newer
-- Swift 6 (the current Apple Command Line Tools are sufficient to build)
-- `codex` logged into the OpenAI subscription
-- `claude` logged into the Anthropic subscription
-- Grok Build 1.0.0 or newer, authenticated using `grok login`
+Release assets are produced only by the protected GitHub release workflow. A
+source build is ad-hoc signed and is intended only for the Mac that built it.
 
-On first launch, Reserve opens its dashboard, detects the three installed CLIs,
-reuses their existing sign-ins, and starts collecting the available local usage
-totals. Launch at login stays off until you enable it in Settings. There is no
-account wizard and no separate Reserve account. If a provider is signed out, one
-Connect click runs that provider's official CLI login (`codex login`, `claude
-auth login --claudeai`, or `grok login --oauth`) and hands the sign-in to the
-default browser. Temporary login output stays in memory, URLs are restricted to
-that provider's HTTPS hosts, and neither is logged or cached.
+## Provider requirements
 
-The practical zero-action path assumes the provider CLIs above are already
-installed and signed in. Reserve deliberately does not install or update those
-tools itself; if one is missing, the dashboard reports it explicitly.
+Reserve reuses sign-ins belonging to the official provider CLIs. It does not
+create another account or copy credentials into its own storage.
 
-Anthropic's subscription usage endpoint is not a documented public API and may
-rate limit callers. Reserve persists a backoff of at least 15 minutes after a
-429 and retains the last successful snapshot.
+- `codex`, signed into an OpenAI subscription;
+- `claude`, signed into an Anthropic subscription;
+- Grok Build 1.0.0 or newer, authenticated with `grok login`.
 
-## Build and run
+If a CLI is absent or signed out, Reserve reports that state. A Connect action
+runs the provider's official login command and restricts browser handoff URLs to
+that provider's expected HTTPS hosts. Temporary login output stays in memory.
+
+Anthropic's subscription-usage endpoint is not a documented public API and may
+change or rate-limit Reserve without notice. Grok Build 1.x does not expose its
+billing method through ACP, so Reserve reads the authenticated billing endpoint
+used by the CLI. OpenAI limits come from Codex app-server JSON-RPC. Provider
+changes can temporarily break a refresh even when the local app is healthy;
+the last valid snapshot remains visible and is marked stale.
+
+## Build from source
+
+Swift 6 and the current Apple Command Line Tools are enough to build and run
+the app locally:
 
 ```sh
-make check
+git clone https://github.com/pocarles/reserve.git
+cd reserve
 make run
 ```
 
-`make run` creates an ad-hoc signed `Reserve.app` in the repository and opens it.
-The generated app is ignored by Git and includes the project license and
-third-party notices in its Resources directory. An ad-hoc signature is enough to
-run Reserve on the Mac that built it. Gatekeeper will refuse a copied bundle on
-another machine.
-
-To test a provider without the menu UI:
+`make run` builds and ad-hoc signs `Reserve.app`, then opens it. Do not
+redistribute that generated app: it is neither Developer ID signed nor
+notarized. The complete test gate and Universal 2 packaging dry run require
+full Xcode:
 
 ```sh
-swift run usagebar-probe openai
-swift run usagebar-probe anthropic
-swift run usagebar-probe grok
-swift run usagebar-probe local
+make check
+make package-dry
 ```
 
-The probe prints snapshots and errors only. It never prints credential material.
-The Anthropic probe honors the same explicit Keychain-consent setting as the app.
+Useful developer commands:
 
-`make check` also runs a native AppKit UI self-test. It constructs the real status
-dashboard and settings window, then verifies the shared pace-state model, provider
-cards, automatic and pinned menu-bar modes, theme tokens, actions, checkboxes, and
-refresh decisions without retaining any test setting.
+```sh
+make build
+make swift-test
+make selftest
+make ui-test
+make lifecycle-test
+swift run reserve-probe openai
+swift run reserve-probe anthropic
+swift run reserve-probe grok
+swift run reserve-probe local
+```
 
-## Sharing a build
+The probe prints snapshots and errors, never credential material. The
+Anthropic probe honors the same explicit Keychain-consent setting as the app.
 
-If someone else wants Reserve, they clone this repository and run `make run` on
-their Mac. Do not AirDrop or zip `Reserve.app`. That copy will not open cleanly,
-and that is expected: there is no Developer ID or notarized release.
+## What Reserve shows
 
-The popover fits its complete dashboard without scrolling. Clicking elsewhere
-closes it, while clicks in Reserve Settings leave it open.
+Every allowance uses the same projection model: reserve, on pace, deficit,
+exhausted, stale, or unknown. Provider cards combine remaining capacity, reset
+time, progress, pace marker, and a short projection. Five-hour windows stay
+secondary to plan-level allowances. Grok's Build and Chat shares are shown as
+components of its shared weekly pool, not as extra quota.
 
-Both surfaces share one design system in `Sources/UsageBar/ReserveDesign.swift`:
-a single type scale, restrained spacing and radii, plus semantic tokens for the
-window, elevated surfaces, cards, borders, progress tracks, hover and selection.
-The Matrix, Ember, Ocean, and Graphite themes provide visibly different adaptive
-light/dark palettes for those structural tokens. Quota meaning remains separate:
-green is reserve, blue is on pace, and orange is deficit or exhausted. Red is
-reserved for provider-service incidents, never normal subscription pressure.
+The optional savings view is an API-equivalent estimate, not a provider bill.
+OpenAI and Anthropic use the observed input/cache/output mix when available;
+Grok exposes an aggregate token count, so its comparison is approximate.
+Subscription prices remain user-editable.
 
-The dashboard leads with one factual conclusion. Every allowance is classified by
-the same shared projection model as `reserve`, `on pace`, `deficit`, `exhausted`,
-`stale`, or `unknown`; a two-percentage-point tolerance around the pace marker
-prevents boundary flicker. Provider cards use one anatomy: identity, remaining
-capacity, reset, progress and pace marker, then a short projection. Reserve and
-deficit magnitudes are explicit, stale data keeps its last value but says the
-forecast may be outdated, and an expired reset becomes unknown until refreshed.
-Five-hour sessions remain secondary quotas with their own usage and reset.
-Expanded detail keeps token totals, estimated API value, source provenance, and
-the plan cost. Subscription costs remain editable because plan prices vary.
-An optional billing day controls renewal alerts only; it never gates usage or savings.
-Days 29–31 use the month's final day when needed.
+Service-health labels come from the providers' official status sources. The
+default notification stream reports state transitions such as deficit,
+exhaustion, recovery, stale data, and incidents. Fixed thresholds, renewal
+notices, reset notices, and sounds are optional.
 
-Grok reports one shared weekly allowance. When the billing response includes its
-product split, Reserve lists the Grok Build and Grok Chat shares below the main
-bar with the shared pool's expiry. These are components of the weekly allowance,
-not extra independent quotas.
-
-Savings uses an internal API-equivalent estimate, not a provider bill. OpenAI and
-Anthropic calculations use the observed input, cache, cache-write, and output mix
-when available. Grok's local records expose an aggregate token count, so its
-comparison remains approximate.
-
-Each provider card also shows the current service health reported by that
-provider's official status page. OpenAI and Claude use their official Statuspage
-JSON summaries; xAI uses its official RSS feed. The health label opens the source.
-
-Notifications are enabled by default, subject to macOS permission. The default
-stream is forecast-driven: Reserve notifies when an allowance enters deficit,
-when one is exhausted, when capacity returns, when a provider's numbers go stale,
-and when a provider reports a service incident. Each reports a transition, so a
-condition that persists does not notify again.
-Fixed usage thresholds (50%, 90%), plan-renewal notices, five-hour reset notices,
-and sound are available under Advanced and are off by default.
-
-Settings is a native toolbar window with General, Providers, Notifications,
-Appearance, Insights, and Privacy panes. Each pane sizes the window to its own
-content, and About is the standard macOS About panel.
-
-Appearance separates palette from meaning. System, Light, or Dark chooses the
-effective appearance. Matrix, Ember, Ocean, or Graphite then supplies the full
-adaptive structural palette, including window, elevated and card surfaces,
-borders, progress tracks, accent, hover, selected, and chart colors. Every pace
-state also carries an icon and text, so color is never the only signal.
-
-The menu bar has one model. A pinned OpenAI, Anthropic, or Grok provider uses its
-monochrome logo and that provider's percentage/reset details. Automatic mode uses
-Reserve's monochrome gauge and selects the most relevant enabled provider: an
-exhausted or deficit plan first, otherwise the least comfortable on-pace/reserve
-plan. With both detail switches off it becomes a true icon-only item. General owns
-these controls; Appearance shows only appearance, theme, and its live palette
-preview. Clicking a provider card pins it immediately without opening Settings.
-
-The compact About page shows the installed version, links to the GitHub
-repository and [@pocarles on X](https://x.com/pocarles), and opens the MIT
-license bundled inside the app. Its update check looks at GitHub Releases of
-this repo and reports that no public release is available until one exists. It
-does not download an app. Automatic checks are off by default.
+The menu-bar item can follow the most constrained enabled provider or remain
+pinned to one provider. Automatic update checks are off by default. A manual or
+enabled automatic check reads GitHub Releases and offers to open the exact
+GitHub release page; Reserve never downloads or executes an update.
 
 ## Privacy and storage
 
-The caches live at:
+Reserve keeps aggregate caches under:
 
 ```text
-~/Library/Application Support/UsageBar/snapshots.json
-~/Library/Application Support/UsageBar/local-usage-index.json
+~/Library/Application Support/Reserve/snapshots.json
+~/Library/Application Support/Reserve/local-usage-index.json
 ```
 
+Preferences use the `com.pocarles.reserve` defaults domain. On the first v1
+launch, Reserve can copy a fixed allowlist of preferences and validated cache
+data from the former UsageBar locations. It never migrates credentials, raw
+provider responses, paths, prompts, transcripts, or session records. Migration
+is idempotent; invalid legacy data is left untouched and Reserve starts with a
+clean new store.
+
 The snapshot cache is capped at 100 KB. The local index is capped at 12 MB and
-contains only daily token/cost aggregates plus hashed file keys and byte offsets
-for incremental scans. OAuth tokens, account identifiers, local paths, prompts,
-responses, cookies, authorization headers, raw provider payloads, and subprocess
+contains daily token/cost aggregates plus hashed file keys and byte offsets for
+incremental scans. OAuth tokens, account identifiers, local paths, prompts,
+responses, cookies, authorization headers, raw provider payloads, and process
 logs are never cached.
 
-Claude Code may store its OAuth credential in macOS Keychain rather than
-`~/.claude/.credentials.json`. Reserve does not read that Keychain item unless
-you turn on “Read my Claude Code sign-in from the Keychain” under Providers.
-The read uses Security.framework (`SecItemCopyMatching`) so macOS attributes
-the access to Reserve. Credential JSON stays in memory only and is never logged
-or cached.
+Local totals come from session logs under `~/.claude/projects`,
+`~/.codex/sessions`, and `~/.grok/sessions`; only bounded daily aggregates are
+retained. Reserve may read `~/.claude/.credentials.json` and
+`~/.grok/auth.json` when present. Claude Code can instead keep its sign-in in
+Keychain; Reserve reads it only after the user enables the explicit provider
+setting, through Security.framework, and retains it in memory only.
 
-Reserve also reads `~/.claude/.credentials.json` and Grok's `~/.grok/auth.json`
-when those files exist. OpenAI limits come from the Codex CLI over JSON-RPC, not
-from a credential file Reserve opens itself. Local token totals come from
-session logs under `~/.claude/projects`, `~/.codex/sessions`, and
-`~/.grok/sessions`; only daily aggregates are kept.
+See [SECURITY.md](SECURITY.md) for reporting and support policy.
 
 ## Resource contract
 
-- provider-limit refresh interval: configurable to 1, 5, 10, 15, or 30 minutes;
-- official service-health refresh interval: 10 minutes minimum;
-- local token-history scans: every 30 minutes, or immediately on manual refresh;
-- scheduled refreshes are skipped in Low Power Mode;
-- activation and wake refresh only when cached provider data is due;
-- one shared minute-level UI clock updates visible reset countdowns; there are no
-  per-card or one-second timers;
-- no provider subprocess survives success, failure, or timeout;
-- cached data remains visible when a provider is offline or rate limited;
-- local usage scans run off the main thread and are incremental after first use;
-- target idle CPU: below 0.2% over a 30-minute release-build sample;
-- target idle physical footprint: below 80 MB as measured by `footprint`;
-- snapshot cache: below 100 KB; local aggregate index: below 12 MB.
+- provider-limit refresh: configurable from 1 to 30 minutes;
+- official service health: no more than once every 10 minutes;
+- local aggregate scan: every 30 minutes or on manual refresh;
+- scheduled work is skipped in Low Power Mode;
+- wake/activation refreshes only data that is due;
+- provider subprocess calls have deadlines, and descendant-held pipes cannot
+  extend those deadlines;
+- network bodies, streams, process output, local files, records, allocations,
+  counters, cache sizes, backoff, and notification identifiers are bounded;
+- target idle CPU: below 0.2% in a 30-minute packaged-release sample;
+- target physical footprint: below 80 MB in that sample.
 
-CPU and memory targets are release gates and must be measured on a packaged build
-before public distribution.
+Those CPU and memory targets are release gates, not promises for every provider
+CLI or Mac configuration.
 
 ## Architecture
 
 ```text
 AppKit NSStatusItem + NSPopover
              |
-     AppKit dashboard popover
+        native dashboard
              |
-             UsageStore
-          /       |       \
-SnapshotCache Scanner  UsageProvider
-                local    /    |    \
-                logs  OpenAI Claude Grok
-                       RPC  HTTPS HTTPS
+         UsageStore
+       /      |       \
+  cache   local scan   providers
+                       /   |   \
+                  Codex Claude Grok
+                   RPC  HTTPS HTTPS
 ```
 
-OpenAI uses the documented Codex app-server `account/rateLimits/read` method.
-Anthropic uses the Claude OAuth usage endpoint with conservative backoff. Grok
-uses the authenticated `cli-chat-proxy.grok.com/v1/billing?format=credits`
-request implemented by Grok Build itself. Grok Build 1.x does not expose its
-billing method through ACP, so Reserve avoids launching the agent subprocess only
-to receive a method-not-found response. This reads CLI-owned OAuth state only; it
-does not read browser cookies.
+`ReserveCore` owns provider, cache, scanner, and notification-domain behavior.
+The `Reserve` executable owns AppKit surfaces and orchestration. The repository
+also contains `reserve-probe`, `reserve-selftest`, and a standard SwiftPM test
+target.
+
+## Troubleshooting
+
+**A provider says it is disconnected.** Run that provider CLI in Terminal and
+complete its official login. Then use Refresh in Reserve.
+
+**Claude is connected in the CLI but not Reserve.** If Claude Code stores its
+credential in Keychain, enable the explicit Keychain access option under
+Settings > Providers and approve the macOS prompt.
+
+**Data is stale or rate limited.** Reserve keeps the last valid snapshot and
+retries after a bounded backoff. Check the provider's linked official status
+page before reconnecting.
+
+**A source-built app is blocked on another Mac.** Build it on that Mac or use
+the signed and notarized DMG from GitHub Releases. Ad-hoc builds are not
+portable.
+
+**The checksum fails.** Delete both downloads and retrieve them again from the
+same GitHub Release. Do not open the DMG.
+
+## Contributing and release process
+
+Focused contributions that improve the lightweight three-provider product are
+welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md). Maintainer release operations
+are documented in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
+
+## Independence and trademarks
+
+Reserve is an independent open-source project. It is not affiliated with,
+endorsed by, sponsored by, or an official product of OpenAI, Anthropic, or xAI.
+Provider names and marks belong to their respective owners. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 
-MIT. Copyright © 2026 Pierre-Olivier Carles. See [LICENSE](LICENSE) and
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+MIT. Copyright © 2026 Pierre-Olivier Carles. See [LICENSE](LICENSE).
