@@ -26,6 +26,17 @@ enum ProcessRunner {
     }
     try process.run()
     let processIdentifier = process.processIdentifier
+    guard let processAuditToken = Self.auditToken(for: processIdentifier) else {
+      // Same-user children expose a task-name port on supported macOS releases.
+      // If the kernel cannot bind this launch to an immutable audit token, do
+      // not keep using a bare numeric PID for later timeout enforcement.
+      process.terminate()
+      try? stdout.fileHandleForReading.close()
+      try? stderr.fileHandleForReading.close()
+      throw UsageProviderError.processFailed(
+        "\(URL(fileURLWithPath: executable).lastPathComponent) identity could not be verified."
+      )
+    }
 
     Task.detached {
       events.continuation.yield(
@@ -46,19 +57,17 @@ enum ProcessRunner {
         return
       }
       guard deadline.beginTimeout() else { return }
-      // Signal the captured PID directly. `Process.terminate()` can mark its
-      // internal state as stopped before a SIGTERM-ignoring child has actually
-      // exited, which can leave Foundation's synchronous waiter blocked on
-      // macOS 15.
+      // Signal the captured process identity directly. `Process.terminate()`
+      // can mark its internal state as stopped before a SIGTERM-ignoring child
+      // has actually exited on macOS 15.
       if deadline.shouldSignalProcess {
-        kill(processIdentifier, SIGTERM)
+        Self.signal(processAuditToken, SIGTERM)
       }
       try? await Task.sleep(for: .milliseconds(250))
-      // Foundation tells us when the original Process instance exits. Do not
-      // send a delayed signal to a bare PID after that point: macOS may already
-      // have recycled the number for an unrelated same-user process.
+      // The audit token remains bound to this launch even if macOS recycles its
+      // numeric PID before the delayed escalation.
       if deadline.shouldSignalProcess {
-        kill(processIdentifier, SIGKILL)
+        Self.signal(processAuditToken, SIGKILL)
       }
       try? stdout.fileHandleForReading.close()
       try? stderr.fileHandleForReading.close()
@@ -119,6 +128,30 @@ enum ProcessRunner {
       }
     }
     return CapturedOutput(data: data, exceeded: exceeded)
+  }
+
+  /// Captures the kernel audit token, whose PID-version field remains unique
+  /// even after the numeric PID is recycled.
+  private static func auditToken(for processIdentifier: pid_t) -> audit_token_t? {
+    var taskName = mach_port_name_t()
+    guard task_name_for_pid(mach_task_self_, processIdentifier, &taskName) == KERN_SUCCESS else {
+      return nil
+    }
+    defer { mach_port_deallocate(mach_task_self_, taskName) }
+    var token = audit_token_t()
+    var count = mach_msg_type_number_t(
+      MemoryLayout<audit_token_t>.size / MemoryLayout<natural_t>.size)
+    let result = withUnsafeMutablePointer(to: &token) { pointer in
+      pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+        task_info(taskName, task_flavor_t(TASK_AUDIT_TOKEN), $0, &count)
+      }
+    }
+    return result == KERN_SUCCESS ? token : nil
+  }
+
+  private static func signal(_ auditToken: audit_token_t, _ signal: Int32) {
+    var token = auditToken
+    _ = proc_signal_with_audittoken(&token, signal)
   }
 }
 
