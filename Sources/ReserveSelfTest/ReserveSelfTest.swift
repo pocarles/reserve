@@ -28,10 +28,11 @@ struct ReserveSelfTest {
       openAIData: try Data(contentsOf: fixtures.appendingPathComponent("openai-rate-limits.json")),
       anthropicData: try Data(contentsOf: fixtures.appendingPathComponent("anthropic-usage.json")),
       grokData: try Data(contentsOf: fixtures.appendingPathComponent("grok-billing.json")),
-      helperExecutable: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path)
-    for name in passed {
-      print("PASS \(name)")
-    }
+      helperExecutable: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path,
+      progress: { name in
+        print("PASS \(name)")
+        fflush(stdout)
+      })
     print("\n\(passed.count) self-tests passed")
   }
 }

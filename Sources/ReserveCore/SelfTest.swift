@@ -5,14 +5,19 @@ public enum ReserveSelfTests {
     openAIData: Data,
     anthropicData: Data,
     grokData: Data,
-    helperExecutable: String? = nil
+    helperExecutable: String? = nil,
+    progress: @Sendable (String) -> Void = { _ in }
   ) async throws -> [String] {
     var passed: [String] = []
+    func record(_ name: String) {
+      passed.append(name)
+      progress(name)
+    }
 
     guard UsageWindow(id: "low", label: "Low", usedPercent: -2).usedPercent == 0,
       UsageWindow(id: "high", label: "High", usedPercent: 103).usedPercent == 100
     else { throw Failure("usage percentage clamping") }
-    passed.append("usage percentage clamping")
+    record("usage percentage clamping")
 
     let saturated = LocalUsageSummary(
       provider: .anthropic, periodDays: 30,
@@ -23,7 +28,7 @@ public enum ReserveSelfTests {
       LocalUsageScanner.parseGrokSignal(
         Data(#"{"totalTokensBeforeCompaction":9223372036854775807,"contextTokensUsed":9223372036854775807}"#.utf8))?.input == .max
     else { throw Failure("saturating token aggregation") }
-    passed.append("saturating token aggregation")
+    record("saturating token aggregation")
 
     let boundedWindow = UsageWindow(
       id: String(repeating: "x", count: 5_000),
@@ -43,7 +48,7 @@ public enum ReserveSelfTests {
       boundedSnapshot.windows.count == UsageSnapshot.maximumWindows,
       notificationID.count == 32
     else { throw Failure("bounded provider identifiers") }
-    passed.append("bounded provider identifiers")
+    record("bounded provider identifiers")
 
     let lineBuffer = BoundedLineBuffer(maximumBytes: 8)
     guard !lineBuffer.append(Data("12345678".utf8)).exceeded,
@@ -61,7 +66,7 @@ public enum ReserveSelfTests {
       String(decoding: outputGate.drain(), as: UTF8.self) == "abcde",
       outputGate.append(Data("fghi".utf8)) == .overflow
     else { throw Failure("bounded callback output") }
-    passed.append("bounded line and callback output")
+    record("bounded line and callback output")
 
     let paceNow = Date(timeIntervalSince1970: 1_900_000_000)
     let paceReset = paceNow.addingTimeInterval(6 * 24 * 60 * 60)
@@ -119,7 +124,7 @@ public enum ReserveSelfTests {
           id: "expired", label: "Weekly", usedPercent: 20,
           windowMinutes: 7 * 24 * 60, resetsAt: paceNow), now: paceNow) == nil
     else { throw Failure("usage pace projection") }
-    passed.append("usage pace projection")
+    record("usage pace projection")
 
     // Smart alerts fire on the transition into deficit, not on every refresh.
     let riskReset = paceNow.addingTimeInterval(2 * 24 * 60 * 60)
@@ -168,7 +173,7 @@ public enum ReserveSelfTests {
       !SmartAlertDetector.isIncident(.unknown),
       !SmartAlertDetector.isIncident(nil)
     else { throw Failure("smart alert detection") }
-    passed.append("smart alert detection")
+    record("smart alert detection")
 
     // The daily series is continuous, ordered oldest first, and quiet days are
     // present rather than missing.
@@ -190,7 +195,7 @@ public enum ReserveSelfTests {
       Set(seriesSummary.dailyTokens.map(\.day)).count == 30,
       DailyUsage(day: "2026-01-01", tokens: -5).tokens == 0
     else { throw Failure("daily usage series") }
-    passed.append("daily usage series")
+    record("daily usage series")
 
     let httpConfiguration = ProviderHTTPSession.shared.configuration
     guard httpConfiguration.urlCache == nil,
@@ -198,7 +203,7 @@ public enum ReserveSelfTests {
       httpConfiguration.httpShouldSetCookies == false,
       httpConfiguration.requestCachePolicy == .reloadIgnoringLocalCacheData
     else { throw Failure("ephemeral provider HTTP session") }
-    passed.append("ephemeral provider HTTP session")
+    record("ephemeral provider HTTP session")
 
     let healthyStatus = try ServiceStatusClient.decodeStatuspage(
       Data(#"{"status":{"indicator":"none","description":"All Systems Operational"}}"#.utf8),
@@ -217,7 +222,7 @@ public enum ReserveSelfTests {
       degradedStatus.health == .degraded,
       xAIStatus.health == .degraded
     else { throw Failure("official service status decoding") }
-    passed.append("official service status decoding")
+    record("official service status decoding")
 
     let notificationReset = Date(timeIntervalSince1970: 1_900_000_000)
     let oldNotificationSnapshot = UsageSnapshot(
@@ -237,7 +242,7 @@ public enum ReserveSelfTests {
     guard crossings.map(\.threshold) == [50, 90] else {
       throw Failure("usage notification thresholds")
     }
-    passed.append("usage notification thresholds")
+    record("usage notification thresholds")
 
     let openAI = try JSONDecoder().decode(OpenAIRateLimitsResponse.self, from: openAIData)
     guard openAI.rateLimits.primary?.usedPercent == 25.5,
@@ -246,7 +251,7 @@ public enum ReserveSelfTests {
       openAI.rateLimits.secondary?.stableID(fallback: "secondary") == "weekly",
       openAI.rateLimits.planType == "pro"
     else { throw Failure("OpenAI rate-limit decoding") }
-    passed.append("OpenAI rate-limit decoding")
+    record("OpenAI rate-limit decoding")
 
     let anthropic = try JSONDecoder().decode(ClaudeUsageResponse.self, from: anthropicData)
     guard anthropic.fiveHour?.utilization == 14.2,
@@ -256,7 +261,7 @@ public enum ReserveSelfTests {
       ClaudeUsageWindow(utilization: nil, resetsAt: nil).window(
         id: "missing", label: "Missing") == nil
     else { throw Failure("Anthropic usage decoding") }
-    passed.append("Anthropic usage decoding")
+    record("Anthropic usage decoding")
 
     let retryNow = Date(timeIntervalSince1970: 1_800_000_000)
     guard
@@ -271,7 +276,7 @@ public enum ReserveSelfTests {
       AnthropicProvider.conservativeRetryDate(retryAfter: "999999999999", now: retryNow)
         == retryNow.addingTimeInterval(AnthropicProvider.maximumRetryDelay)
     else { throw Failure("Anthropic conservative backoff") }
-    passed.append("Anthropic conservative backoff")
+    record("Anthropic conservative backoff")
 
     let anthropicDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -304,7 +309,7 @@ public enum ReserveSelfTests {
       anthropicSnapshot.source == "Claude OAuth file",
       anthropicSnapshot.windows.first?.id == "five-hour"
     else { throw Failure("Anthropic provider request") }
-    passed.append("Anthropic provider request")
+    record("Anthropic provider request")
 
     let rateLimitedGate = ClaudeRateLimitGate(defaults: nil)
     let rateLimitedProvider = AnthropicProvider(
@@ -328,7 +333,7 @@ public enum ReserveSelfTests {
         blockedUntil >= beforeBackoff.addingTimeInterval(15 * 60)
       else { throw Failure("Anthropic provider backoff") }
     }
-    passed.append("Anthropic provider backoff")
+    record("Anthropic provider backoff")
 
     let grok = try JSONDecoder().decode(GrokBillingEnvelope.self, from: grokData)
     guard grok.config?.usedPercent == 42.5,
@@ -339,12 +344,12 @@ public enum ReserveSelfTests {
       grok.config?.productUsage?.first?.product == "GrokBuild",
       grok.subscriptionTier == "SuperGrok Heavy"
     else { throw Failure("Grok billing decoding") }
-    passed.append("Grok billing decoding")
+    record("Grok billing decoding")
 
     guard SemanticVersion.first(in: "grok 1.0.3") == SemanticVersion(1, 0, 3),
       SemanticVersion(1, 0, 3) > SemanticVersion(0, 1, 210)
     else { throw Failure("semantic version parsing") }
-    passed.append("semantic version parsing")
+    record("semantic version parsing")
 
     let future = "2033-05-18T03:33:20Z"
     let credentialEntries = [
@@ -358,7 +363,7 @@ public enum ReserveSelfTests {
       now: Date(timeIntervalSince1970: 1_800_000_000))
     guard selectedCredentials?.key == "valid-key", selectedCredentials?.userID == "valid-user"
     else { throw Failure("Grok credential selection") }
-    passed.append("Grok credential selection")
+    record("Grok credential selection")
 
     let usageDirectory = FileManager.default.temporaryDirectory
       .appendingPathComponent("usage-index-\(UUID().uuidString)", isDirectory: true)
@@ -423,7 +428,7 @@ public enum ReserveSelfTests {
       let usageCacheData = try? Data(contentsOf: usageCache),
       !String(decoding: usageCacheData, as: UTF8.self).contains(usageDirectory.path)
     else { throw Failure("incremental local usage accounting") }
-    passed.append("incremental local usage accounting")
+    record("incremental local usage accounting")
 
     let oversizedRoot = usageDirectory.appendingPathComponent("oversized", isDirectory: true)
     let oversizedCodex = oversizedRoot.appendingPathComponent("codex", isDirectory: true)
@@ -441,7 +446,7 @@ public enum ReserveSelfTests {
       _ = try await boundedScanner.scan()
       throw Failure("oversized session line rejection")
     } catch UsageProviderError.invalidResponse {
-      passed.append("oversized session line rejection")
+      record("oversized session line rejection")
     }
 
     if let helperExecutable {
@@ -461,7 +466,7 @@ public enum ReserveSelfTests {
       guard timedOut, start.duration(to: .now) < .seconds(2) else {
         throw Failure("subprocess timeout escalation")
       }
-      passed.append("subprocess timeout escalation")
+      record("subprocess timeout escalation")
 
       let oversizedStart = ContinuousClock.now
       var rejectedOversizedOutput = false
@@ -479,7 +484,7 @@ public enum ReserveSelfTests {
       guard rejectedOversizedOutput, oversizedStart.duration(to: .now) < .seconds(2) else {
         throw Failure("bounded subprocess output")
       }
-      passed.append("bounded subprocess output")
+      record("bounded subprocess output")
 
       let drainStart = ContinuousClock.now
       do {
@@ -494,7 +499,7 @@ public enum ReserveSelfTests {
           throw Failure("subprocess descendant pipe deadline")
         }
       }
-      passed.append("subprocess descendant pipe deadline")
+      record("subprocess descendant pipe deadline")
     }
 
     let rpcScript = #"read line; i=0; while [ $i -lt 80 ]; do printf '{"id":999,"result":{}}\n'; i=$((i+1)); done"#
@@ -506,7 +511,7 @@ public enum ReserveSelfTests {
       _ = try await overflowingRPC.request(method: "test", timeout: .seconds(2))
       throw Failure("bounded JSON-RPC queue")
     } catch UsageProviderError.processFailed {
-      passed.append("bounded JSON-RPC queue")
+      record("bounded JSON-RPC queue")
     }
 
     let directory = FileManager.default.temporaryDirectory
@@ -542,7 +547,7 @@ public enum ReserveSelfTests {
       loaded?.source == snapshot.source,
       loaded?.includedSpend == snapshot.includedSpend
     else { throw Failure("normalized snapshot cache") }
-    passed.append("normalized snapshot cache")
+    record("normalized snapshot cache")
 
     let oldSuite = "Reserve.SelfTest.Legacy.\(UUID().uuidString)"
     let newSuite = "Reserve.SelfTest.Current.\(UUID().uuidString)"
@@ -584,7 +589,7 @@ public enum ReserveSelfTests {
       migratedDirectoryMode?.intValue == 0o700,
       repeatedMigration.wasAlreadyCompleted
     else { throw Failure("legacy state migration") }
-    passed.append("legacy state migration")
+    record("legacy state migration")
 
     try Data("[]".utf8).write(to: url, options: .atomic)
     try FileManager.default.setAttributes(
@@ -596,7 +601,7 @@ public enum ReserveSelfTests {
     guard repairedMode?.intValue == 0o600 else {
       throw Failure("restricted cache repairs existing mode")
     }
-    passed.append("restricted cache repairs existing mode")
+    record("restricted cache repairs existing mode")
 
     let older = UsageSnapshot(
       provider: .openAI,
@@ -617,11 +622,11 @@ public enum ReserveSelfTests {
     guard duplicateLoaded?.planName == "New", duplicateLoaded?.windows == newer.windows else {
       throw Failure("duplicate snapshot recovery")
     }
-    passed.append("duplicate snapshot recovery")
+    record("duplicate snapshot recovery")
 
     try Data(repeating: 0x41, count: 100 * 1024 + 1).write(to: url, options: .atomic)
     guard await cache.load().isEmpty else { throw Failure("oversized cache rejection") }
-    passed.append("oversized cache rejection")
+    record("oversized cache rejection")
 
 
     // MARK: Security regressions
@@ -656,7 +661,7 @@ public enum ReserveSelfTests {
       BinaryLocator.find(
         "reserve-fake-cli", environment: ["PATH": closedDirectory.path]) == trusted.path
     else { throw Failure("a private PATH entry was rejected") }
-    passed.append("executable lookup rejects world-writable directories")
+    record("executable lookup rejects world-writable directories")
 
     // The dynamic linker must not be steerable through an inherited variable.
     let sanitized = BinaryLocator.childEnvironment([
@@ -670,7 +675,7 @@ public enum ReserveSelfTests {
       sanitized["DYLD_INSERT_LIBRARIES"] == nil, sanitized["DYLD_LIBRARY_PATH"] == nil,
       sanitized["LD_PRELOAD"] == nil
     else { throw Failure("child environment kept a dynamic-linker variable") }
-    passed.append("child environment strips dynamic-linker variables")
+    record("child environment strips dynamic-linker variables")
 
     return passed
   }
