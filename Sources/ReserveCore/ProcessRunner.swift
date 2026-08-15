@@ -16,14 +16,22 @@ enum ProcessRunner {
     process.environment = environment
     process.standardOutput = stdout
     process.standardError = stderr
+    let events = AsyncStream.makeStream(
+      of: ProcessEvent.self,
+      bufferingPolicy: .bufferingNewest(4))
+    process.terminationHandler = { terminatedProcess in
+      events.continuation.yield(.terminated(terminatedProcess.terminationStatus))
+    }
     try process.run()
     let processIdentifier = process.processIdentifier
 
-    let stdoutTask = Task.detached {
-      Self.capture(stdout.fileHandleForReading, maximumBytes: 65_536)
+    Task.detached {
+      events.continuation.yield(
+        .stdout(Self.capture(stdout.fileHandleForReading, maximumBytes: 65_536)))
     }
-    let stderrTask = Task.detached {
-      Self.capture(stderr.fileHandleForReading, maximumBytes: 0)
+    Task.detached {
+      events.continuation.yield(
+        .stderr(Self.capture(stderr.fileHandleForReading, maximumBytes: 0)))
     }
 
     // The deadline remains armed until both pipes drain. A child spawned by the
@@ -36,10 +44,11 @@ enum ProcessRunner {
       } catch {
         return
       }
-      deadline.trigger()
+      guard deadline.beginTimeout() else { return }
       // Signal the captured PID directly. `Process.terminate()` can mark its
       // internal state as stopped before a SIGTERM-ignoring child has actually
-      // exited, which leaves `waitUntilExit()` waiting forever on macOS 15.
+      // exited, which can leave Foundation's synchronous waiter blocked on
+      // macOS 15.
       kill(processIdentifier, SIGTERM)
       try? await Task.sleep(for: .milliseconds(250))
       // Escalate against the same captured PID regardless; an already-exited
@@ -47,16 +56,38 @@ enum ProcessRunner {
       kill(processIdentifier, SIGKILL)
       try? stdout.fileHandleForReading.close()
       try? stderr.fileHandleForReading.close()
+      events.continuation.yield(.timedOut)
     }
-    let status = await Task.detached {
-      process.waitUntilExit()
-      return process.terminationStatus
-    }.value
-    let capturedStdout = await stdoutTask.value
-    _ = await stderrTask.value
+
+    var status: Int32?
+    var capturedStdout: CapturedOutput?
+    var capturedStderr = false
+    var timedOut = false
+    eventLoop: for await event in events.stream {
+      switch event {
+      case .terminated(let terminationStatus):
+        status = terminationStatus
+      case .stdout(let output):
+        capturedStdout = output
+      case .stderr:
+        capturedStderr = true
+      case .timedOut:
+        timedOut = true
+        break eventLoop
+      }
+      if status != nil, capturedStdout != nil, capturedStderr, deadline.finish() {
+        break eventLoop
+      }
+    }
     timeoutTask.cancel()
-    guard !deadline.wasTriggered else {
+    events.continuation.finish()
+    guard !timedOut else {
       throw UsageProviderError.timedOut(URL(fileURLWithPath: executable).lastPathComponent)
+    }
+    guard let status, let capturedStdout else {
+      throw UsageProviderError.processFailed(
+        "\(URL(fileURLWithPath: executable).lastPathComponent) ended without a complete result."
+      )
     }
     guard status == 0 else {
       throw UsageProviderError.processFailed(
@@ -90,19 +121,35 @@ private struct CapturedOutput: Sendable {
   let exceeded: Bool
 }
 
+private enum ProcessEvent: Sendable {
+  case terminated(Int32)
+  case stdout(CapturedOutput)
+  case stderr(CapturedOutput)
+  case timedOut
+}
+
 private final class ProcessDeadlineState: @unchecked Sendable {
   private let lock = NSLock()
-  private var triggered = false
+  private enum State {
+    case running
+    case finished
+    case timedOut
+  }
+  private var state = State.running
 
-  var wasTriggered: Bool {
+  func beginTimeout() -> Bool {
     self.lock.lock()
     defer { self.lock.unlock() }
-    return self.triggered
+    guard self.state == .running else { return false }
+    self.state = .timedOut
+    return true
   }
 
-  func trigger() {
+  func finish() -> Bool {
     self.lock.lock()
-    self.triggered = true
-    self.lock.unlock()
+    defer { self.lock.unlock() }
+    guard self.state == .running else { return self.state == .finished }
+    self.state = .finished
+    return true
   }
 }
