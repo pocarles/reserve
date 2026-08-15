@@ -1,6 +1,8 @@
 # Third-party notices
 
-Usage Bar is informed by and contains small adapted implementation patterns from
+## Code provenance
+
+Reserve contains small adapted implementation patterns informed by
 [CodexBar](https://github.com/steipete/CodexBar), inspected at commit
 `89ee92124fdab4fe353ffeb48daba9be655fc70d`.
 
@@ -28,6 +30,23 @@ CodexBar is distributed under the following license:
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
-The OpenAI, Anthropic, and Grok provider SVGs are adapted from CodexBar's
-MIT-licensed provider icon resources. No WebKit integration, cookie extraction,
-history database, widget code, updater code, or provider registry is included.
+No CodexBar WebKit integration, cookie extraction, raw history database,
+widget, executable updater, or provider-registry implementation is included.
+
+## Provider names and marks
+
+OpenAI, Codex, Anthropic, Claude, xAI, Grok, and their associated marks belong
+to their respective owners. Their appearance is descriptive and does not imply
+affiliation, sponsorship, or endorsement.
+
+An open-source software license covering code or artwork from another project
+does not grant permission to use a provider's trademarks. Adapted provider SVGs
+from another project are therefore not approved Reserve release assets merely
+because that project uses the MIT License. A public Reserve build must include
+only official, unmodified provider assets whose published terms permit the
+specific use, or replace those assets with plain provider names or neutral
+initials. Provider assets must not be recolored or modified unless the owner
+explicitly permits it.
+
+Reserve is an independent open-source project and is not affiliated with,
+endorsed by, sponsored by, or an official product of OpenAI, Anthropic, or xAI.

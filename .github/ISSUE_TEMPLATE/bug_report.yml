@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible Reserve defect without private account data.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not paste credentials, provider payloads, transcripts, local paths,
+        or security vulnerabilities here. Use private vulnerability reporting
+        for security issues.
+  - type: input
+    id: version
+    attributes:
+      label: Reserve version
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS and Mac architecture
+      placeholder: macOS 15.6, Apple silicon
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider area
+      options:
+        - OpenAI Codex
+        - Anthropic Claude
+        - Grok
+        - Local usage
+        - Packaging or launch
+        - General interface
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction
+      description: Give the smallest sequence that triggers the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Remove credentials, identifiers, paths, prompts, and provider payloads.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed private account and session data.
+          required: true
+        - label: This is not an undisclosed security vulnerability.
+          required: true

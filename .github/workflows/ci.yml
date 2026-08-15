@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      # Keep each part of `make check` visible and independently time-bounded so
+      # a process-lifecycle regression cannot consume the whole job timeout.
+      - name: Build with warnings as errors
+        timeout-minutes: 10
+        run: make warnings-as-errors
+
+      - name: Run SwiftPM tests
+        timeout-minutes: 10
+        run: make swift-test
+
+      - name: Run core self-test
+        timeout-minutes: 10
+        run: make selftest
+
+      - name: Run AppKit UI self-test
+        timeout-minutes: 10
+        run: make ui-test
+
+      - name: Run AppKit lifecycle self-test
+        timeout-minutes: 10
+        run: make lifecycle-test
+
+      - name: Exercise Universal 2 package path without credentials
+        timeout-minutes: 20
+        run: make package-dry

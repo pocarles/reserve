@@ -1,7 +1,6 @@
 .build/
 .swiftpm/
-UsageBar.app/
-Reserve.app/
+*.app/
 QA-Screenshots/
 *.xcuserstate
 .DS_Store

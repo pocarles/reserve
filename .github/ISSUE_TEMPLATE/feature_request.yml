@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a focused improvement within Reserve's product boundary.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful change.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Privacy and product-boundary impact
+      description: Explain any new process, file, network destination, persistence, or dependency.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope confirmation
+      options:
+        - label: This keeps Reserve a lightweight, local-first three-provider Mac app.
+          required: true
