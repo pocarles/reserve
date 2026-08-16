@@ -28,6 +28,12 @@ public struct UsageWindow: Codable, Equatable, Sendable, Identifiable {
   public let windowMinutes: Int?
   public let resetsAt: Date?
 
+  /// Component shares describe part of a larger allowance rather than an
+  /// independently renewable quota, so they must not raise their own alerts.
+  public var isComponentShare: Bool {
+    self.label.localizedCaseInsensitiveContains("share")
+  }
+
   public init(
     id: String,
     label: String,
@@ -160,10 +166,10 @@ public enum UsagePaceState: Equatable, Sendable {
     stalenessLimit: TimeInterval = UsagePaceState.stalenessLimit
   ) -> UsagePaceState {
     guard let window else { return .unknown }
-    if window.usedPercent >= 99.5 { return .exhausted }
     if hasError || fetchedAt.map({ now.timeIntervalSince($0) > stalenessLimit }) == true {
       return .stale
     }
+    if window.usedPercent >= 99.5 { return .exhausted }
     guard let projection = UsagePaceProjection.calculate(for: window, now: now) else {
       return .unknown
     }
@@ -235,6 +241,21 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
 
   public var highestUsedPercent: Double? {
     self.windows.map(\.usedPercent).max()
+  }
+
+  /// Some provider refresh endpoints omit stable account metadata even when
+  /// their quota data is current. Keep the last reported plan label until the
+  /// provider supplies a replacement; usage, resets and spend remain live.
+  public func withFallbackPlanName(_ fallback: String?) -> UsageSnapshot {
+    guard self.planName == nil, let fallback, !fallback.isEmpty else { return self }
+    return UsageSnapshot(
+      provider: self.provider,
+      planName: fallback,
+      windows: self.windows,
+      fetchedAt: self.fetchedAt,
+      source: self.source,
+      includedSpend: self.includedSpend,
+      billingRenewsAt: self.billingRenewsAt)
   }
 }
 

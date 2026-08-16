@@ -19,6 +19,17 @@ public enum ReserveSelfTests {
     else { throw Failure("usage percentage clamping") }
     record("usage percentage clamping")
 
+    let unnamedSnapshot = UsageSnapshot(
+      provider: .grok,
+      windows: [UsageWindow(id: "weekly", label: "Weekly", usedPercent: 1)],
+      source: "metadata fallback check")
+    guard unnamedSnapshot.withFallbackPlanName("X Premium+").planName == "X Premium+",
+      UsageSnapshot(
+        provider: .grok, planName: "SuperGrok", windows: [], source: "named"
+      ).withFallbackPlanName("X Premium+").planName == "SuperGrok"
+    else { throw Failure("snapshot plan-name fallback") }
+    record("snapshot plan-name fallback")
+
     let saturated = LocalUsageSummary(
       provider: .anthropic, periodDays: 30,
       inputTokens: .max, cachedInputTokens: .max,
@@ -54,6 +65,11 @@ public enum ReserveSelfTests {
     guard !lineBuffer.append(Data("12345678".utf8)).exceeded,
       lineBuffer.append(Data("9".utf8)).exceeded
     else { throw Failure("bounded line allocation") }
+    let recoveredLines = lineBuffer.append(Data("tail\nok\n".utf8))
+    guard recoveredLines.exceeded,
+      recoveredLines.lines.map({ String(decoding: $0, as: UTF8.self) }) == ["ok"],
+      recoveredLines.consumedBytes == 8
+    else { throw Failure("oversized line recovery") }
     let cursorBuffer = BoundedLineBuffer(maximumBytes: 32)
     let firstCursor = cursorBuffer.append(Data("one\ntwo\nthree\n".utf8), maximumLines: 2)
     let secondCursor = cursorBuffer.append(Data(), maximumLines: 2)
@@ -98,6 +114,7 @@ public enum ReserveSelfTests {
       for: UsageWindow(
         id: "weekly", label: "Weekly", usedPercent: elapsedPercent - 2.1,
         windowMinutes: 7 * 24 * 60, resetsAt: paceReset), now: paceNow)
+    let earlyReset = paceNow.addingTimeInterval((7 * 24 * 60 - 30) * 60)
     guard deficitPace?.position == .deficit,
       abs((deficitPace?.variancePercent ?? 0) - 5.714) < 0.01,
       deficitPace?.projectedExhaustionAt == paceNow.addingTimeInterval(4 * 24 * 60 * 60),
@@ -117,8 +134,19 @@ public enum ReserveSelfTests {
         for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 100),
         fetchedAt: paceNow, now: paceNow) == .exhausted,
       UsagePaceState.calculate(
+        for: UsageWindow(
+          id: "weekly", label: "Weekly", usedPercent: 1,
+          windowMinutes: 7 * 24 * 60, resetsAt: earlyReset),
+        fetchedAt: paceNow, now: paceNow) == .unknown,
+      UsagePaceState.calculate(
         for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 20),
         fetchedAt: paceNow.addingTimeInterval(-31 * 60), now: paceNow) == .stale,
+      UsagePaceState.calculate(
+        for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 100),
+        fetchedAt: paceNow.addingTimeInterval(-31 * 60), now: paceNow) == .stale,
+      UsagePaceState.calculate(
+        for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 100),
+        fetchedAt: paceNow, hasError: true, now: paceNow) == .stale,
       UsagePaceProjection.calculate(
         for: UsageWindow(
           id: "expired", label: "Weekly", usedPercent: 20,
@@ -145,6 +173,8 @@ public enum ReserveSelfTests {
     let riskySnapshot = weekly(80)
     let entering = SmartAlertDetector.deficitAlerts(
       previous: safeSnapshot, current: riskySnapshot, now: paceNow)
+    let initialFetch = SmartAlertDetector.deficitAlerts(
+      previous: nil, current: riskySnapshot, now: paceNow)
     let staying = SmartAlertDetector.deficitAlerts(
       previous: riskySnapshot, current: riskySnapshot, now: paceNow)
     let neverInDeficit = SmartAlertDetector.deficitAlerts(
@@ -157,6 +187,7 @@ public enum ReserveSelfTests {
       alertWindow == "weekly",
       deficit > 0,
       alertReset == riskReset,
+      initialFetch.isEmpty,
       staying.isEmpty,
       neverInDeficit.isEmpty,
       entering[0].preferenceKey == "deficit",
@@ -229,17 +260,25 @@ public enum ReserveSelfTests {
       provider: .openAI,
       windows: [
         UsageWindow(
-          id: "weekly", label: "Weekly", usedPercent: 49, resetsAt: notificationReset)
+          id: "weekly", label: "Weekly", usedPercent: 49, resetsAt: notificationReset),
+        UsageWindow(
+          id: "build-share", label: "Build share", usedPercent: 49,
+          resetsAt: notificationReset),
       ], source: "test")
     let newNotificationSnapshot = UsageSnapshot(
       provider: .openAI,
       windows: [
         UsageWindow(
-          id: "weekly", label: "Weekly", usedPercent: 91, resetsAt: notificationReset)
+          id: "weekly", label: "Weekly", usedPercent: 91, resetsAt: notificationReset),
+        UsageWindow(
+          id: "build-share", label: "Build share", usedPercent: 91,
+          resetsAt: notificationReset),
       ], source: "test")
     let crossings = UsageNotificationEventDetector.thresholdCrossings(
       previous: oldNotificationSnapshot, current: newNotificationSnapshot)
-    guard crossings.map(\.threshold) == [50, 90] else {
+    guard crossings.map(\.threshold) == [50, 90],
+      crossings.allSatisfy({ $0.windowID == "weekly" })
+    else {
       throw Failure("usage notification thresholds")
     }
     record("usage notification thresholds")
@@ -346,8 +385,50 @@ public enum ReserveSelfTests {
     else { throw Failure("Grok billing decoding") }
     record("Grok billing decoding")
 
+    let unifiedGrokData = Data(
+      #"{"config":{"creditUsagePercent":25,"onDemandCap":{"val":4000},"onDemandUsed":{"val":1000},"isUnifiedBillingUser":true}}"#.utf8)
+    let unifiedGrok = try JSONDecoder().decode(GrokBillingEnvelope.self, from: unifiedGrokData)
+    guard unifiedGrok.config?.usedPercent == 25,
+      unifiedGrok.config?.includedSpend?.label == "On-demand cap",
+      unifiedGrok.config?.includedSpend?.usedMinorUnits == 1000,
+      unifiedGrok.config?.includedSpend?.limitMinorUnits == 4000,
+      unifiedGrok.config?.isUnifiedBillingUser == true
+    else { throw Failure("Grok unified billing decoding") }
+    record("Grok unified billing decoding")
+
+    let incompleteUnifiedGrokData = Data(
+      #"{"config":{"onDemandCap":{"val":4000},"onDemandUsed":{"val":1000},"isUnifiedBillingUser":true}}"#.utf8)
+    let incompleteUnifiedGrok = try JSONDecoder().decode(
+      GrokBillingEnvelope.self, from: incompleteUnifiedGrokData)
+    guard incompleteUnifiedGrok.config?.usedPercent == nil else {
+      throw Failure("Grok on-demand spend treated as included allowance")
+    }
+    record("Grok incomplete unified billing")
+
+    let resetUnifiedGrokData = Data(
+      #"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-15T22:03:41Z","end":"2026-08-22T22:03:41Z"},"monthlyLimit":{"val":99900},"used":{"val":12345},"onDemandCap":{},"onDemandUsed":{},"productUsage":[{"product":"GrokBuild"},{"product":"GrokChat","usagePercent":0}],"isUnifiedBillingUser":true}}"#.utf8)
+    let resetUnifiedGrok = try JSONDecoder().decode(
+      GrokBillingEnvelope.self, from: resetUnifiedGrokData)
+    guard resetUnifiedGrok.config?.usedPercent == 0,
+      resetUnifiedGrok.config?.includedSpend?.usedMinorUnits == 12345,
+      resetUnifiedGrok.config?.includedSpend?.limitMinorUnits == 99900,
+      resetUnifiedGrok.config?.productUsage?.allSatisfy({ $0.usagePercent == 0 }) == true
+    else {
+      throw Failure("Grok reset-period zero normalization")
+    }
+    record("Grok reset-period zero normalization")
+
+    let grokSettings = try JSONDecoder().decode(
+      GrokRemoteSettings.self,
+      from: Data(#"{"subscription_tier_display":"X Premium+"}"#.utf8))
+    guard grokSettings.subscriptionTierDisplay == "X Premium+" else {
+      throw Failure("Grok remote tier decoding")
+    }
+    record("Grok remote tier decoding")
+
     guard SemanticVersion.first(in: "grok 1.0.3") == SemanticVersion(1, 0, 3),
-      SemanticVersion(1, 0, 3) > SemanticVersion(0, 1, 210)
+      SemanticVersion(1, 0, 3) > SemanticVersion(0, 1, 210),
+      SemanticVersion(1, 0, 3).headerValue == "1.0.3"
     else { throw Failure("semantic version parsing") }
     record("semantic version parsing")
 
@@ -363,6 +444,16 @@ public enum ReserveSelfTests {
       now: Date(timeIntervalSince1970: 1_800_000_000))
     guard selectedCredentials?.key == "valid-key", selectedCredentials?.userID == "valid-user"
     else { throw Failure("Grok credential selection") }
+    let deterministicCredentials = GrokCredentialLoader.select(
+      entries: [
+        "zeta": GrokCredentialEntry(key: "zeta-key", userID: "zeta-user", expiresAt: future),
+        "alpha": GrokCredentialEntry(
+          key: "alpha-key", userID: "alpha-user", expiresAt: future),
+      ],
+      now: Date(timeIntervalSince1970: 1_800_000_000))
+    guard deterministicCredentials?.key == "alpha-key" else {
+      throw Failure("deterministic Grok credential selection")
+    }
     record("Grok credential selection")
 
     let usageDirectory = FileManager.default.temporaryDirectory
@@ -437,17 +528,28 @@ public enum ReserveSelfTests {
     for root in [oversizedCodex, oversizedClaude, oversizedGrok] {
       try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
-    try Data(repeating: 0x41, count: 1_048_577).write(
-      to: oversizedClaude.appendingPathComponent("session.jsonl"))
+    let oversizedCodexLines =
+      [
+        #"{"timestamp":"\#(timestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+        #"{"timestamp":"\#(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":0,"output_tokens":20,"total_tokens":1020}}}}"#,
+      ].joined(separator: "\n") + "\n"
+    try Data(oversizedCodexLines.utf8).write(
+      to: oversizedCodex.appendingPathComponent("session.jsonl"))
+    let healthyClaudeLine = claudeLine(output: 5, message: "oversized-m1", request: "oversized-r1")
+    var oversizedClaudeData = Data(repeating: 0x41, count: 1_048_577)
+    oversizedClaudeData.append(Data(("\n" + healthyClaudeLine + "\n").utf8))
+    try oversizedClaudeData.write(to: oversizedClaude.appendingPathComponent("session.jsonl"))
     let boundedScanner = LocalUsageScanner(
       roots: .init(codex: oversizedCodex, claude: oversizedClaude, grok: oversizedGrok),
       cacheURL: oversizedRoot.appendingPathComponent("index.json"))
-    do {
-      _ = try await boundedScanner.scan()
-      throw Failure("oversized session line rejection")
-    } catch UsageProviderError.invalidResponse {
-      record("oversized session line rejection")
-    }
+    let boundedScanDate = Date(timeIntervalSince1970: 1_700_000_000)
+    let boundedUsage = try await boundedScanner.scan(now: boundedScanDate)
+    let repeatedBoundedUsage = try await boundedScanner.scan(now: boundedScanDate)
+    guard boundedUsage[.openAI]?.totalTokens == 1020,
+      boundedUsage[.anthropic]?.totalTokens == 135,
+      repeatedBoundedUsage == boundedUsage
+    else { throw Failure("oversized session line recovery") }
+    record("oversized session line recovery")
 
     if let helperExecutable {
       let start = ContinuousClock.now

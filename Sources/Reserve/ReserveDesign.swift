@@ -86,6 +86,8 @@ enum ReserveColor {
   static var accent: NSColor { ReserveAppearance.accent }
   static var hover: NSColor { ReserveAppearance.palette.hoverFill }
   static var selected: NSColor { ReserveAppearance.palette.selectedFill }
+  static var staleSurface: NSColor { Self.dynamic(light: 0xED_ED_EA, dark: 0x2B2B2B) }
+  static var staleBorder: NSColor { Self.dynamic(light: 0xC8C8C4, dark: 0x4A4A4A) }
   static var chartPrimary: NSColor { ReserveAppearance.palette.chartPrimary }
   static var chartSecondary: NSColor { ReserveAppearance.palette.chartSecondary }
 
@@ -281,37 +283,35 @@ class ReserveSurface: NSView {
   }
 }
 
-/// The allowance meter: a rounded track, a fill, and a pace marker showing how
-/// far through the window the clock has travelled. Usage past the marker is
-/// the deficit the pace projection describes.
+/// The allowance meter uses the same direction as the card's primary number:
+/// fill is capacity left, and the marker is the capacity that should remain at
+/// this point in the window. A fill left of the marker is therefore a deficit.
 @MainActor
 final class ReserveMeter: NSView {
-  private let value: Double
-  private let pacePercent: Double?
-  private let projectedPercent: Double?
+  private let remainingPercent: Double
+  private let paceRemainingPercent: Double?
   private let color: NSColor
 
   init(
-    value: Double,
-    pacePercent: Double?,
-    projectedPercent: Double? = nil,
+    remainingPercent: Double,
+    paceRemainingPercent: Double?,
     label: String? = nil,
     color: NSColor
   ) {
-    self.value = min(100, max(0, value))
-    self.pacePercent = pacePercent.map { min(100, max(0, $0)) }
-    self.projectedPercent = projectedPercent.map { min(100, max(0, $0)) }
+    self.remainingPercent = min(100, max(0, remainingPercent))
+    self.paceRemainingPercent = paceRemainingPercent.map { min(100, max(0, $0)) }
     self.color = color
     super.init(frame: .zero)
     self.wantsLayer = true
     self.setAccessibilityRole(.progressIndicator)
-    self.setAccessibilityLabel(label ?? "Allowance used")
-    self.setAccessibilityValue(
-      "\(Int(self.value.rounded())) percent used, "
-        + "\(Int((100 - self.value).rounded())) percent left")
+    self.setAccessibilityLabel(label ?? "Allowance remaining")
+    self.setAccessibilityValue("\(Int(self.remainingPercent.rounded())) percent left")
   }
 
   required init?(coder: NSCoder) { nil }
+
+  var remainingPercentForTesting: Double { self.remainingPercent }
+  var paceRemainingPercentForTesting: Double? { self.paceRemainingPercent }
 
   override func draw(_ dirtyRect: NSRect) {
     super.draw(dirtyRect)
@@ -319,23 +319,18 @@ final class ReserveMeter: NSView {
     ReserveColor.track.setFill()
     NSBezierPath(roundedRect: self.bounds, xRadius: radius, yRadius: radius).fill()
 
-    // Ghost extension: where usage is projected to land by the reset.
-    if let projectedPercent, projectedPercent > self.value {
-      var ghost = self.bounds
-      ghost.size.width = max(self.bounds.height, self.bounds.width * projectedPercent / 100)
-      self.color.withAlphaComponent(0.28).setFill()
-      NSBezierPath(roundedRect: ghost, xRadius: radius, yRadius: radius).fill()
-    }
-
-    if self.value > 0 {
+    if self.remainingPercent > 0 {
       var fill = self.bounds
-      fill.size.width = max(self.bounds.height, self.bounds.width * self.value / 100)
+      fill.size.width = max(
+        self.bounds.height, self.bounds.width * self.remainingPercent / 100)
       self.color.setFill()
       NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
     }
 
-    guard let pacePercent, pacePercent > 1, pacePercent < 99 else { return }
-    let x = (self.bounds.width * pacePercent / 100).rounded()
+    guard let paceRemainingPercent,
+      paceRemainingPercent > 1, paceRemainingPercent < 99
+    else { return }
+    let x = (self.bounds.width * paceRemainingPercent / 100).rounded()
     // Punch a gap around the marker so it stays visible on top of the fill.
     ReserveColor.background.setFill()
     NSRect(x: x - 1.5, y: self.bounds.minY - 1, width: 3, height: self.bounds.height + 2).fill()
@@ -344,11 +339,15 @@ final class ReserveMeter: NSView {
   }
 }
 
-/// Daily usage as bars: length encodes the value, which people read far more
-/// accurately than area or colour. No axes, no gridlines — the label beside it
-/// carries the magnitude.
+/// Daily activity as bars on a square-root scale. This keeps ordinary days
+/// visible when one outlier would otherwise flatten the month, while preserving
+/// ordering and the zero/peak endpoints. Every chart discloses the compression.
 @MainActor
 final class ReserveSparkline: NSView {
+  static let scaleExplanation =
+    "Compressed square-root scale. It keeps ordinary days visible when one day is unusually "
+    + "large; the order and zero-to-peak range are preserved."
+
   private let series: [DailyUsage]
   private let color: NSColor
   private let peak: Int64
@@ -361,6 +360,7 @@ final class ReserveSparkline: NSView {
     self.wantsLayer = true
     self.setAccessibilityRole(.image)
     self.setAccessibilityLabel(Self.spoken(series: series))
+    self.toolTip = Self.scaleExplanation
   }
 
   required init?(coder: NSCoder) { nil }
@@ -379,7 +379,7 @@ final class ReserveSparkline: NSView {
     let usable = max(1, self.bounds.height - 1)
     for (offset, day) in self.series.enumerated() {
       guard day.tokens > 0 else { continue }
-      let fraction = CGFloat(Double(day.tokens) / Double(self.peak))
+      let fraction = CGFloat(Self.heightFraction(tokens: day.tokens, peak: self.peak))
       let height = max(1.5, usable * fraction)
       let x = CGFloat(offset) * (barWidth + gap)
       // The most recent day is the one being asked about, so it stays solid.
@@ -392,13 +392,19 @@ final class ReserveSparkline: NSView {
     }
   }
 
+  static func heightFraction(tokens: Int64, peak: Int64) -> Double {
+    guard tokens > 0, peak > 0 else { return 0 }
+    return sqrt(min(1, Double(tokens) / Double(peak)))
+  }
+
   private static func spoken(series: [DailyUsage]) -> String {
     guard let peak = series.max(by: { $0.tokens < $1.tokens }), peak.tokens > 0 else {
       return "Daily usage chart, no activity recorded"
     }
     let active = series.filter { $0.tokens > 0 }.count
     return
-      "Daily usage for \(series.count) days, active on \(active), busiest day \(peak.day)"
+      "Daily usage for \(series.count) days on a compressed scale, active on \(active), "
+      + "busiest day \(peak.day)"
   }
 }
 
@@ -588,7 +594,7 @@ final class ReserveProviderLogo: ReserveSurface {
     let accent = ReserveColor.providerAccent(provider)
     super.init(fill: accent, fillAlpha: 0.14, radius: size <= 26 ? 8 : ReserveRadius.logo)
     let image = NSImageView(image: ProviderArtwork.image(for: provider))
-    image.contentTintColor = accent
+    image.contentTintColor = provider != .anthropic ? ReserveColor.text : nil
     image.imageScaling = .scaleProportionallyUpOrDown
     // The mark repeats the row's own label, so it stays silent.
     image.setAccessibilityElement(false)

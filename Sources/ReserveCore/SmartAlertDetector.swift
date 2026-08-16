@@ -37,7 +37,8 @@ public enum SmartAlertDetector {
     current: UsageSnapshot,
     now: Date = Date()
   ) -> [SmartAlert] {
-    current.windows.compactMap { window in
+    guard let previous else { return [] }
+    return current.windows.compactMap { window in
       guard Self.isNotifiable(window) else { return nil }
       guard let resetsAt = window.resetsAt, resetsAt > now else { return nil }
       guard let projection = UsagePaceProjection.calculate(for: window, now: now),
@@ -45,7 +46,7 @@ public enum SmartAlertDetector {
       else { return nil }
 
       // Same window, same cycle: was it already in deficit a moment ago?
-      let before = previous?.windows.first { $0.id == window.id && $0.resetsAt == window.resetsAt }
+      let before = previous.windows.first { $0.id == window.id && $0.resetsAt == window.resetsAt }
       if let before,
         UsagePaceProjection.calculate(for: before, now: now)?.position == .deficit
       {
@@ -82,6 +83,6 @@ public enum SmartAlertDetector {
   /// Component shares of a larger allowance are not separate quotas, so they
   /// never raise their own alert.
   private static func isNotifiable(_ window: UsageWindow) -> Bool {
-    !window.label.lowercased().contains("share")
+    !window.isComponentShare
   }
 }

@@ -332,8 +332,10 @@ public actor LocalUsageScanner {
           || (record?.offset ?? 0) < metadata.size
         ), remainingBytes > 0 {
           var updated = record!
-          let nextOffset = try self.scanLines(
-            file, from: updated.offset, deadline: deadline, remainingBytes: &remainingBytes
+          let scanResult = try self.scanLines(
+            file, from: updated.offset,
+            discardingOversizedLine: updated.discardingOversizedLine ?? false,
+            deadline: deadline, remainingBytes: &remainingBytes
           ) { data in
             guard let row = Self.parseClaudeLine(data), row.dayKey >= cutoffKey else { return }
             if let rowKey = row.key, let previous = updated.recentRows[rowKey] {
@@ -351,7 +353,8 @@ public actor LocalUsageScanner {
             }
           }
           updated.size = metadata.size
-          updated.offset = nextOffset
+          updated.offset = scanResult.offset
+          updated.discardingOversizedLine = scanResult.discardingOversizedLine
           updated.modifiedAt = metadata.modifiedAt
           updated.days = updated.days.filter { $0.key >= cutoffKey }
           record = updated
@@ -578,14 +581,17 @@ public actor LocalUsageScanner {
   private func scanLines(
     _ file: URL,
     from offset: Int64,
+    discardingOversizedLine: Bool,
     deadline: Date,
     remainingBytes: inout Int,
     visit: (Data) -> Void
-  ) throws -> Int64 {
+  ) throws -> (offset: Int64, discardingOversizedLine: Bool) {
     let handle = try FileHandle(forReadingFrom: file)
     defer { try? handle.close() }
     try handle.seek(toOffset: UInt64(max(0, offset)))
-    let buffer = BoundedLineBuffer(maximumBytes: self.maximumLineBytes)
+    let buffer = BoundedLineBuffer(
+      maximumBytes: self.maximumLineBytes,
+      discardingOversizedLine: discardingOversizedLine)
     var fileBytesRemaining = min(self.maximumBytesPerFileScan, remainingBytes)
     var consumedBytes = 0
     var lineCount = 0
@@ -600,9 +606,6 @@ public actor LocalUsageScanner {
       fileBytesRemaining -= chunk.count
       let result = buffer.append(
         chunk, maximumLines: self.maximumLinesPerFile - lineCount)
-      guard !result.exceeded else {
-        throw UsageProviderError.invalidResponse("session record exceeded 1 MB")
-      }
       consumedBytes += result.consumedBytes
       for data in result.lines {
         lineCount += 1
@@ -610,7 +613,9 @@ public actor LocalUsageScanner {
       }
     }
     try Self.checkDeadline(deadline)
-    return max(0, offset) + Int64(consumedBytes)
+    let nextOffset = max(0, offset) + Int64(consumedBytes)
+    let bufferState = buffer.append(Data(), maximumLines: 0)
+    return (nextOffset, bufferState.discardingOversizedLine)
   }
 
   static func parseClaudeLine(_ data: Data) -> CachedRow? {
@@ -788,6 +793,9 @@ private struct CachedFile: Codable {
   var days: [String: UsageTotals]
   var recentRows: [String: CachedRow]
   var recentOrder: [String]
+  /// Persists across the per-file byte budget so an oversized unterminated
+  /// record cannot have its continuation parsed as a fresh record next time.
+  var discardingOversizedLine: Bool? = nil
 
   func totals(since cutoffKey: String) -> UsageTotals {
     self.days.filter { $0.key >= cutoffKey }.values.reduce(into: UsageTotals()) { result, value in

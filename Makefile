@@ -34,8 +34,21 @@ package-dry:
 verify-package:
 	./Scripts/verify_package.sh --mode local Reserve.app
 
+# `open` reuses an already-running app, even after its bundle was replaced.
+# Stop only this checkout's exact packaged binary so `make run` always exercises
+# the build it just produced.
 run: package
-	open Reserve.app
+	@binary="$(CURDIR)/Reserve.app/Contents/MacOS/Reserve"; \
+	pids="$$(pgrep -f -x "$$binary" || true)"; \
+	if [ -n "$$pids" ]; then kill -TERM $$pids; fi; \
+	attempts=0; \
+	while pgrep -f -x "$$binary" >/dev/null 2>&1 && [ $$attempts -lt 30 ]; do \
+		sleep 0.1; attempts=$$((attempts + 1)); \
+	done; \
+	if pgrep -f -x "$$binary" >/dev/null 2>&1; then \
+		echo "error: previous Reserve process did not exit" >&2; exit 1; \
+	fi; \
+	open "$(CURDIR)/Reserve.app"
 
 probe:
 	swift run reserve-probe all

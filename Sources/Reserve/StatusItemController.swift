@@ -17,6 +17,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   private var minuteTimer: Timer?
   private var dashboardIsDirty = true
   private var lastDashboardMinute: Int?
+  /// A popover is positioned relative to its status item. Its contents may
+  /// update live, but its width stays fixed until the popover closes so the
+  /// visible window keeps the same anchor.
+  private var lockedStatusItemLength: CGFloat?
+  private var renderedStatusProvider: ProviderID?
   /// Whether the popover animates. A resize switches this off for Reduce Motion
   /// and has to restore the configured value rather than assume it was on.
   private var animatesPopover = true
@@ -102,6 +107,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
   var popoverContentSizeForTesting: NSSize { self.popover.contentSize }
 
+  var statusItemLengthForTesting: CGFloat { self.statusItem.length }
+
+  var statusItemScreenFrameForTesting: NSRect? {
+    guard let button = self.statusItem.button, let window = button.window else { return nil }
+    return window.convertToScreen(button.convert(button.bounds, to: nil))
+  }
+
+  var statusItemLengthIsLockedForTesting: Bool { self.lockedStatusItemLength != nil }
+
+  var statusItemProviderForTesting: ProviderID? { self.renderedStatusProvider }
+
   var dashboardControllerForTesting: DashboardViewController { self.dashboardControllerForUse() }
 
   var mouseMonitorCountForTesting: Int {
@@ -186,6 +202,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         withState(previewSummaries[1], .onPace),
         withState(previewSummaries[2], .onPace),
       ])
+    let freshWithoutForecast = AllowanceBuilder.headline(
+      for: [
+        withState(previewSummaries[0], .unknown),
+        withState(previewSummaries[1], .reserve(percent: 12)),
+        withState(previewSummaries[2], .reserve(percent: 18)),
+      ])
     let aggregateCopyWorks =
       singleSummary.primary == "1 plan in deficit"
       && pluralSummary.primary == "2 plans in deficit"
@@ -198,7 +220,49 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && mixedStale.secondary.contains("1 is on pace")
       && !mixedStale.secondary.contains("remain on pace")
       && mixedHealthy.primary == "1 plan has reserve · 2 are on pace"
+      && freshWithoutForecast.primary == "1 plan has no pace forecast"
+      && freshWithoutForecast.secondary.contains("2 other plans have reserve")
+      && !freshWithoutForecast.primary.contains("update")
       && !staleSummary.primary.contains("All plans")
+    let forecastNow = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    let forecastReset = forecastNow.addingTimeInterval(4 * 86_400 + 2 * 3_600)
+    let forecastWindow = UsageWindow(
+      id: "forecast-copy", label: "Weekly limit", usedPercent: 75,
+      windowMinutes: (7 * 24 + 2) * 60, resetsAt: forecastReset)
+    let forecastProjection = UsagePaceProjection.calculate(for: forecastWindow, now: forecastNow)
+    let deficitForecastUsesRenewalGap =
+      DashboardFormat.forecast(
+        Allowance(
+          id: forecastWindow.id, title: forecastWindow.label,
+          usedPercent: forecastWindow.usedPercent, resetsAt: forecastWindow.resetsAt,
+          projection: forecastProjection, isPrimary: true, paceState: .deficit(percent: 25)),
+        paceState: .deficit(percent: 25), lastUpdated: forecastNow, now: forecastNow
+      ) == "25% deficit · runs out 3d 2h early"
+    let nonSharePrimary = AllowanceBuilder.summary(
+      for: ProviderViewState(
+        provider: .grok,
+        snapshot: UsageSnapshot(
+          provider: .grok,
+          windows: [
+            UsageWindow(id: "usage-pool", label: "Usage pool", usedPercent: 20),
+            UsageWindow(id: "build-share", label: "Grok Build share", usedPercent: 90),
+          ],
+          source: "self-test")))
+    let primaryWindowIgnoresComponentShares =
+      nonSharePrimary.allowances.first(where: \.isPrimary)?.id == "usage-pool"
+    let compactMoneyKeepsCurrency =
+      DashboardFormat.money(14_200) == "$14.2K"
+      && DashboardFormat.money(1_420_000) == "$1.42M"
+    let localeDate = Date(timeIntervalSince1970: 47_100)
+    let usClock = DashboardFormat.localizedDateFormatter(
+      template: "jm", locale: Locale(identifier: "en_US"))
+    let gbClock = DashboardFormat.localizedDateFormatter(
+      template: "jm", locale: Locale(identifier: "en_GB"))
+    usClock.timeZone = TimeZone(secondsFromGMT: 0)
+    gbClock.timeZone = TimeZone(secondsFromGMT: 0)
+    let localizedTimeUsesRegionalClock =
+      usClock.string(from: localeDate).contains("PM")
+      && !gbClock.string(from: localeDate).contains("PM")
     let semanticColorsWork =
       UsagePaceState.reserve(percent: 10).color.isEqual(NSColor.systemGreen)
       && UsagePaceState.onPace.color.isEqual(NSColor.systemBlue)
@@ -228,7 +292,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.store.menuBarShowsRemaining = true
     self.store.menuBarShowsReset = true
     let providerStatusWorks =
-      self.statusItem.length == NSStatusItem.variableLength
+      self.statusItem.length == self.stableStatusItemLength()
       && self.statusItem.button?.image?.accessibilityDescription == ProviderID.openAI.displayName
       && self.statusItem.button?.title.contains("%") == true
       && self.statusItem.button?.accessibilityLabel()?.contains("Pinned provider: OpenAI") == true
@@ -258,6 +322,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       } ?? false
     let logosPresent = ProviderID.allCases.allSatisfy {
       identifiers.contains("provider-logo-\($0.rawValue)")
+    }
+    let bundledProviderArtworkPresent = ProviderID.allCases.allSatisfy {
+      ProviderArtwork.hasBundledMark(for: $0)
     }
     let dashboardButtons = descendants.compactMap { $0 as? NSButton }
     let footerButtons = dashboardButtons.filter {
@@ -358,6 +425,33 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && busySpinner?.isSpinning == !ReserveMotion.isReduced
       && ReserveMotion.duration(0.22) == (ReserveMotion.isReduced ? 0 : 0.22)
 
+    let staleCard = ProviderDashboardCard(
+      summary: withState(previewSummaries[0], .stale), now: Date(),
+      isSelectedForMenuBar: false, connectProvider: { _ in },
+      selectMenuBarProvider: { _ in })
+    staleCard.layoutSubtreeIfNeeded()
+    let staleDescendants = Self.descendants(of: staleCard)
+    let staleFreshnessIsVisible =
+      staleDescendants.contains {
+        $0.identifier?.rawValue == "freshness-\(previewSummaries[0].provider.rawValue)"
+      }
+      && staleDescendants.compactMap { ($0 as? NSTextField)?.stringValue }.contains {
+        $0.contains("Cached") && $0.contains("updated")
+      }
+    let unknownCard = ProviderDashboardCard(
+      summary: withState(previewSummaries[0], .unknown), now: Date(),
+      isSelectedForMenuBar: false, connectProvider: { _ in },
+      selectMenuBarProvider: { _ in })
+    unknownCard.layoutSubtreeIfNeeded()
+    let unknownDescendants = Self.descendants(of: unknownCard)
+    let freshWithoutForecastDoesNotLookStale =
+      !unknownDescendants.contains {
+        ($0.identifier?.rawValue ?? "").hasPrefix("freshness-")
+      }
+      && !unknownDescendants.compactMap { ($0 as? NSTextField)?.stringValue }.contains {
+        $0.contains("Cached")
+      }
+
     // Keyboard: rows take focus and answer Space and Return.
     let keyboardReachable =
       descendants.compactMap { $0 as? ProviderDashboardCard }.allSatisfy {
@@ -407,12 +501,30 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // it is, so no image may carry its own label.
     let decorationIsSilent = liveDescendants.compactMap { $0 as? NSImageView }
       .allSatisfy { ($0.accessibilityLabel() ?? "").isEmpty }
-    let metersAreSpoken = liveDescendants.compactMap { $0 as? ReserveMeter }
-      .allSatisfy {
+    let renderedMeters = liveDescendants.compactMap { $0 as? ReserveMeter }
+    let metersAreSpoken = renderedMeters.allSatisfy {
         $0.accessibilityRole() == .progressIndicator
           && ($0.accessibilityLabel() ?? "").isEmpty == false
           && ($0.accessibilityValue() as? String ?? "").contains("percent left")
       }
+    let primaryAllowances = previewSummaries.compactMap(\.primary)
+    let meterSemanticsWork =
+      renderedMeters.count == primaryAllowances.count
+      && zip(renderedMeters, primaryAllowances).allSatisfy { meter, allowance in
+        let expectedPace = allowance.expectedPercent.map { 100 - $0 }
+        let paceMatches: Bool =
+          switch (meter.paceRemainingPercentForTesting, expectedPace) {
+          case (nil, nil): true
+          case (.some(let rendered), .some(let expected)): abs(rendered - expected) < 0.001
+          default: false
+          }
+        return abs(meter.remainingPercentForTesting - allowance.remainingPercent) < 0.001
+          && paceMatches
+      }
+    let chartScaleWorks =
+      ReserveSparkline.heightFraction(tokens: 0, peak: 10_000) == 0
+      && ReserveSparkline.heightFraction(tokens: 10_000, peak: 10_000) == 1
+      && abs(ReserveSparkline.heightFraction(tokens: 400, peak: 10_000) - 0.2) < 0.001
 
     // Progressive disclosure: one provider opens at a time and exposes limits,
     // usage and provenance.
@@ -429,7 +541,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let detailLayersPresent =
       // Layer 1: every remaining window as a full component.
       expanded.filter { ($0.identifier?.rawValue ?? "").hasPrefix("allowance-detail-") }.count == 2
-      && expandedLabels.contains { $0.hasSuffix("% used") }
+      && expandedLabels.contains { $0.hasSuffix("% left") }
+      && !expandedLabels.contains { $0.hasSuffix("% used") }
       // Layer 2: activity and estimated value.
       && expandedIDs.contains("usage-detail-anthropic")
       && expandedLabels.contains("Estimated API value")
@@ -437,6 +550,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && expandedIDs.contains("sources-anthropic")
       // The history chart lives with the activity numbers.
       && expandedIDs.contains("usage-chart-anthropic")
+      && expandedLabels.contains { $0.contains("compressed scale") }
       && expandedLabels.contains { $0.hasPrefix("Provider reported") }
       && expandedLabels.contains { $0.hasPrefix("From local logs") }
       && expandedLabels.contains { $0.hasPrefix("Estimated from") }
@@ -539,22 +653,27 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       settingsWindow.map { !self.shouldDismissDashboard(forClickedWindow: $0) } == true
       && self.shouldDismissDashboard(forClickedWindow: unrelatedWindow)
     guard providerCards == ProviderID.allCases.count, actionsPresent, quitRemainsReachable,
-      logosPresent, scrollingMatchesAvailableSpace, contentFits, dashboardFits, headlinePresent,
+      logosPresent, bundledProviderArtworkPresent, scrollingMatchesAvailableSpace, contentFits,
+      dashboardFits, headlinePresent,
       activityMetricsAreGone, percentagesAreLabelled, forecastsPresent, disclosuresPresent,
       detailLayersPresent, keyboardReachable, spaceSelectsProvider, returnOpensDetail,
-      rowsAreSpoken, decorationIsSilent, metersAreSpoken, motionIsPurposeful,
+      rowsAreSpoken, decorationIsSilent, metersAreSpoken, meterSemanticsWork, motionIsPurposeful,
+      chartScaleWorks,
       serviceStatusIsExceptionOnly, secondaryWindowsPresent, selectionIsQuiet,
       providerStatusWorks, directProviderSelectionWorks, fullCardSelectionHitTargetWorks,
       firstClickSelectionWorks, footerButtonsArePadded, providerButtonsArePadded,
       refreshButtonIsPadded, dashboardTypographyIsReadable, oauthURLParsingIsSafe,
       outsideClickDismissalWorks, updateURLsAreRestricted, adaptiveSchedulingWorks,
+      staleFreshnessIsVisible, freshWithoutForecastDoesNotLookStale,
       automaticSourceWorks,
-      pinnedModelWorks, aggregateCopyWorks,
+      pinnedModelWorks, aggregateCopyWorks, deficitForecastUsesRenewalGap,
+      primaryWindowIgnoresComponentShares, compactMoneyKeepsCurrency,
+      localizedTimeUsesRegionalClock,
       semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), motion=\(motionIsPurposeful), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (
@@ -672,17 +791,19 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
   }
 
-  /// Rebuilds the dashboard and lets the popover grow into its new height, so a
-  /// row visibly opens rather than the panel jumping to a new size.
+  /// Rebuilds the dashboard at the same screen anchor. NSPopover's resize
+  /// animation expands around its own frame and visibly slides a menu-bar
+  /// popover sideways, so disclosure changes height without that animation.
   private func expandDashboard() {
     guard let controller = self.dashboardController else { return }
     self.dashboardIsDirty = true
+    let wasShown = self.popover.isShown
+    if wasShown { self.popover.animates = false }
     self.updateDashboardIfNeeded(force: true)
-    guard self.popover.isShown else { return }
-    // NSPopover is not an animatable property container, so the resize is
-    // animated by the popover itself and simply switched off for Reduce Motion.
-    let reduced = ReserveMotion.isReduced
-    self.popover.animates = self.animatesPopover && !reduced
+    guard self.popover.isShown else {
+      self.popover.animates = self.animatesPopover
+      return
+    }
     self.popover.contentSize = controller.preferredContentSize
     self.popover.animates = self.animatesPopover
   }
@@ -694,6 +815,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // applied before the content is built rather than after it is on screen.
     self.applyAppearance()
     self.updateDashboardIfNeeded()
+    // The closed state already uses the stable width. Lock that exact width so
+    // opening the popover cannot grow the item leftward under the pointer.
+    self.lockedStatusItemLength = self.statusItem.length
+    self.updateStatusIcon()
     self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     self.applyAppearance()
     self.popover.contentViewController?.view.window?.level = .normal
@@ -711,6 +836,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
   func popoverDidClose(_ notification: Notification) {
     self.stopMouseMonitors()
+    self.lockedStatusItemLength = nil
+    self.updateStatusIcon()
     self.updateMinuteTimer()
   }
 
@@ -756,6 +883,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     guard let button = self.statusItem.button else { return }
     let selection = self.menuBarSelection(now: now)
     let summary = selection.summary
+    self.renderedStatusProvider = summary?.provider
     let remaining = summary?.primary?.remainingPercent
     let image: NSImage
     if selection.isPinned, let provider = summary?.provider {
@@ -764,7 +892,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     } else {
       image = ReserveStatusIcon.image(remainingPercent: remaining)
     }
-    image.isTemplate = true
     button.image = image
     button.imagePosition = .imageLeading
     button.imageHugsTitle = true
@@ -801,7 +928,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           ]))
     }
     button.attributedTitle = title
-    self.statusItem.length = title.length == 0 ? NSStatusItem.squareLength : NSStatusItem.variableLength
+    self.statusItem.length = self.lockedStatusItemLength ?? self.stableStatusItemLength()
 
     let providerName = summary?.provider.displayName ?? "No enabled provider"
     let source = selection.isPinned ? "Pinned provider" : "Automatic source"
@@ -820,6 +947,34 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     if days > 0 { return "\(days)d \(hours)h" }
     if hours > 0 { return "\(hours)h \(minutes % 60)m" }
     return "\(minutes)m"
+  }
+
+  /// A deterministic width for the enabled menu-bar fields. Keeping it in both
+  /// the closed and open states prevents the item from growing left when the
+  /// popover opens; the open-state lock also survives Settings changes.
+  private func stableStatusItemLength() -> CGFloat {
+    guard self.store.menuBarShowsRemaining || self.store.menuBarShowsReset else {
+      return NSStatusItem.squareLength
+    }
+    let sample = NSMutableAttributedString(string: "  ")
+    if self.store.menuBarShowsRemaining {
+      sample.append(
+        NSAttributedString(
+          string: "100%",
+          attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .semibold)
+          ]))
+    }
+    if self.store.menuBarShowsReset {
+      if self.store.menuBarShowsRemaining { sample.append(NSAttributedString(string: "  ")) }
+      sample.append(
+        NSAttributedString(
+          string: "32d 23h",
+          attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)
+          ]))
+    }
+    return max(NSStatusItem.squareLength, ceil(sample.size().width) + 28)
   }
 
   /// The menu-bar model, computed once per update rather than rebuilt by each

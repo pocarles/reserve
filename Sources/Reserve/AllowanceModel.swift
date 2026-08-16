@@ -105,8 +105,10 @@ struct ProviderSummary {
 enum AllowanceBuilder {
   static func summary(for state: ProviderViewState, now: Date = Date()) -> ProviderSummary {
     let windows = state.snapshot?.windows ?? []
+    let planWindows = windows.filter { !$0.isComponentShare }
     let primaryWindow =
-      windows.first { $0.label.localizedCaseInsensitiveCompare("Weekly") == .orderedSame }
+      planWindows.first { $0.label.localizedCaseInsensitiveCompare("Weekly") == .orderedSame }
+      ?? planWindows.max(by: { $0.usedPercent < $1.usedPercent })
       ?? windows.max(by: { $0.usedPercent < $1.usedPercent })
 
     let allowances = windows
@@ -217,7 +219,8 @@ enum AllowanceBuilder {
     guard !summaries.isEmpty else {
       return ("No providers are being tracked", "Choose providers in Settings", .unknown)
     }
-    let stale = summaries.filter { $0.paceState == .stale || $0.paceState == .unknown }
+    let stale = summaries.filter { $0.paceState == .stale }
+    let unknown = summaries.filter { $0.paceState == .unknown }
     let exhausted = summaries.filter { $0.paceState == .exhausted }
     let deficits = summaries.filter {
       if case .deficit = $0.paceState { return true }
@@ -253,10 +256,22 @@ enum AllowanceBuilder {
     if !stale.isEmpty {
       let knownSummary = Self.healthySummary(
         reserve: reserve.count, onPace: onPace.count, other: true)
-        ?? "Current pace is unavailable"
+      let context = [
+        knownSummary,
+        unknown.isEmpty ? nil : Self.paceUnavailable(unknown.count, other: true),
+        nextReset,
+      ].compactMap { $0 }
       return (
         Self.plans(stale.count, singular: "needs an update", plural: "need an update"),
-        knownSummary + " · " + nextReset, .stale)
+        context.joined(separator: " · "), .stale)
+    }
+    if !unknown.isEmpty {
+      let knownSummary = Self.healthySummary(
+        reserve: reserve.count, onPace: onPace.count, other: true)
+      let context = [knownSummary, nextReset].compactMap { $0 }
+      return (
+        Self.paceUnavailable(unknown.count),
+        context.joined(separator: " · "), .unknown)
     }
     if !onPace.isEmpty {
       let primary = reserve.isEmpty
@@ -269,8 +284,8 @@ enum AllowanceBuilder {
       return ("All plans have reserve", nextReset, .reserve(percent: 0))
     }
     return (
-      Self.plans(stale.count, singular: "needs an update", plural: "need an update"),
-      "Current pace is unavailable", .stale)
+      Self.paceUnavailable(summaries.count),
+      "Current pace is unavailable", .unknown)
   }
 
   /// "1 plan has reserve" / "2 other plans remain on pace".
@@ -290,6 +305,11 @@ enum AllowanceBuilder {
     }
     return Self.plans(reserve, singular: "has reserve", plural: "have reserve", other: other)
       + " · \(onPace) \(onPace == 1 ? "is" : "are") on pace"
+  }
+
+  private static func paceUnavailable(_ count: Int, other: Bool = false) -> String {
+    Self.plans(
+      count, singular: "has no pace forecast", plural: "have no pace forecast", other: other)
   }
 
   private static func nextReset(in summaries: [ProviderSummary], now: Date) -> (

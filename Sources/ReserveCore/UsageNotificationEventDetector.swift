@@ -21,6 +21,7 @@ public enum UsageNotificationEventDetector {
   ) -> [UsageThresholdCrossing] {
     guard let previous else { return [] }
     return current.windows.flatMap { window -> [UsageThresholdCrossing] in
+      guard !window.isComponentShare else { return [] }
       guard let old = previous.windows.first(where: { $0.id == window.id }),
         old.resetsAt == window.resetsAt || old.resetsAt == nil || window.resetsAt == nil
       else { return [] }

@@ -19,6 +19,8 @@ P8, key ID, and issuer ID. Record the 10-character Developer Team ID.
 2. Add Pierre-Olivier as a required reviewer. If he is the only release
    approver, leave **Prevent self-review** off so he can approve the tag run he
    triggered; enable it only after adding a second trusted release reviewer.
+   Disable administrator bypass so Apple credentials are not exposed to a job
+   until that explicit environment approval occurs.
 3. Restrict the environment to protected tags matching `v*` plus the default
    branch for manual rehearsals.
 4. Add these environment secrets exactly:

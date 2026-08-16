@@ -6,11 +6,27 @@ import ReserveCore
 @main
 enum ReserveApp {
   static func main() {
+    _ = signal(SIGPIPE, SIG_IGN)
     let application = NSApplication.shared
     let delegate = AppDelegate()
     application.delegate = delegate
     withExtendedLifetime(delegate) {
       application.run()
+    }
+  }
+
+  /// `FileHandle.write` cannot translate a broken pipe into `EPIPE` unless the
+  /// process ignores SIGPIPE first. Provider subprocess failures then stay in
+  /// the existing Swift error paths instead of terminating Reserve.
+  static func brokenPipeWriteFailsSafely() -> Bool {
+    let pipe = Pipe()
+    try? pipe.fileHandleForReading.close()
+    defer { try? pipe.fileHandleForWriting.close() }
+    do {
+      try pipe.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
+      return false
+    } catch {
+      return true
     }
   }
 }
@@ -443,6 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       // The status item needs a run-loop turn before its button has a window,
       // and a popover cannot be shown from a view that is not in one yet.
       try? await Task.sleep(for: .milliseconds(600))
+      let statusItemFrameBeforeOpen = statusController.statusItemScreenFrameForTesting
       statusController.showMenu()
       try? await Task.sleep(for: .milliseconds(400))
       guard statusController.isDashboardShownForTesting else {
@@ -557,10 +574,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
 
       var failures: [String] = []
+      if let before = statusItemFrameBeforeOpen,
+        let after = statusController.statusItemScreenFrameForTesting
+      {
+        let movement = abs(after.minX - before.minX)
+        if movement >= 0.5 {
+          failures.append("opening the popover moved the status item left by \(movement)pt")
+        }
+      } else {
+        failures.append("the status-item frame was unavailable for the opening anchor check")
+      }
       let observation = LifecycleSelfTest.checkObservation(store: store)
       failures.append(contentsOf: observation.failures)
       failures.append(contentsOf: LifecycleSelfTest.checkGeometry().failures)
       failures.append(contentsOf: LifecycleSelfTest.checkSpinnerGeometry().failures)
+
+      let providerAnchor = LifecycleSelfTest.checkProviderSelectionAnchor(
+        store: store, controller: statusController)
+      failures.append(contentsOf: providerAnchor.failures)
+
+      statusController.setStressTestAnimationsEnabled(true)
+      let animatedDisclosureAnchor = LifecycleSelfTest.checkAnimatedDisclosureAnchor(
+        store: store, controller: statusController,
+        toggle: { statusController.toggleProviderDetailForTesting($0) })
+      failures.append(contentsOf: animatedDisclosureAnchor.failures)
+      statusController.setStressTestAnimationsEnabled(false)
 
       let disclosure = LifecycleSelfTest.checkDisclosure(
         store: store, controller: statusController,
@@ -581,14 +619,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       if statusController.mouseMonitorCountForTesting != 0 {
         failures.append("mouse monitors survived the popover closing")
       }
+      if statusController.statusItemLengthIsLockedForTesting {
+        failures.append("the status-item width remained locked after the popover closed")
+      }
 
       Self.finishUISelfTest(
         success: failures.isEmpty,
         details: failures.isEmpty
           ? "appearance reaches every open surface across \(AppearanceMode.allCases.count) modes "
-            + "and \(AppearanceTheme.allCases.count) themes, provider disclosure never costs a "
-            + "card, enabling a provider moves only that provider, and the store notifies every "
-            + "observer"
+            + "and \(AppearanceTheme.allCases.count) themes, provider selection keeps the popover "
+            + "anchored, opening keeps the status item fixed, provider disclosure stays anchored "
+            + "and never costs a card, enabling a provider moves only that provider, and the "
+            + "store notifies every observer"
           : "\(failures.count) lifecycle failures: " + failures.prefix(12).joined(separator: " | "))
     }
   }
@@ -660,7 +702,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func runUISelfTest() {
-    guard let statusController = self.statusController,
+    guard let store = self.store,
+      let statusController = self.statusController,
       let settingsController = self.settingsControllerForUse()
     else {
       Self.finishUISelfTest(success: false, details: "controllers were not created")
@@ -669,8 +712,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let statusResult = statusController.validateForSelfTest(settingsWindow: settingsController.window)
     let settingsResult = settingsController.validateForSelfTest()
-    let success = statusResult.success && settingsResult.success
-    let details = [statusResult.details, settingsResult.details].joined(separator: "; ")
+    let brokenPipeIsSafe = ReserveApp.brokenPipeWriteFailsSafely()
+    let loginCompletionQueuesRefresh = store.exerciseLoginCompletionDuringRefreshForSelfTest()
+    let success = statusResult.success && settingsResult.success && brokenPipeIsSafe
+      && loginCompletionQueuesRefresh
+    let details = [
+      statusResult.details,
+      settingsResult.details,
+      "broken pipe handling=\(brokenPipeIsSafe)",
+      "post-login refresh queue=\(loginCompletionQueuesRefresh)",
+    ].joined(separator: "; ")
     Self.finishUISelfTest(success: success, details: details)
   }
 

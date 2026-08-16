@@ -194,11 +194,12 @@ final class ReserveNotifications {
       let title: String
       let body: String
       if threshold == 100 {
-        title = "\(current.provider.displayName) allowance exhausted"
-        body = "You have used all of your \(window.label.lowercased()) allowance."
+        title = "No \(current.provider.displayName) allowance left"
+        body = "Your \(window.label.lowercased()) allowance has no capacity left."
       } else {
-        title = "\(current.provider.displayName) usage reached \(threshold)%"
-        body = "Your \(window.label.lowercased()) allowance is \(threshold)% used."
+        let remaining = 100 - threshold
+        title = "\(current.provider.displayName) allowance: \(remaining)% left"
+        body = "Your \(window.label.lowercased()) allowance has \(remaining)% left."
       }
       self.deliver(identifier: identifier, title: title, body: body)
     }
@@ -235,8 +236,8 @@ final class ReserveNotifications {
   }
 
   private func isNotifiableWindow(_ window: UsageWindow) -> Bool {
+    guard !window.isComponentShare else { return false }
     let label = window.label.lowercased()
-    guard !label.contains("share") else { return false }
     let weekly = label.contains("weekly") || window.windowMinutes == 10_080
     let fiveHour = label.contains("5 hour") || window.windowMinutes == 300
     return (weekly && self.preference("weeklyRenewal"))
@@ -249,13 +250,13 @@ final class ReserveNotifications {
 
   /// "Tuesday at 11:04 PM", or a time alone when it is close.
   private static func moment(_ date: Date, now: Date) -> String {
-    let formatter = DateFormatter()
     let interval = date.timeIntervalSince(now)
     if interval < 12 * 3_600 {
-      formatter.dateFormat = "h:mm a"
+      let formatter = DashboardFormat.localizedDateFormatter(template: "jm")
       return "at \(formatter.string(from: date))"
     }
-    formatter.dateFormat = interval < 6 * 86_400 ? "EEEE 'at' h:mm a" : "MMM d 'at' h:mm a"
+    let formatter = DashboardFormat.localizedDateFormatter(
+      template: interval < 6 * 86_400 ? "EEEEjm" : "MMMdjm")
     return formatter.string(from: date)
   }
 

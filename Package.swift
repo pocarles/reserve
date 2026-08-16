@@ -14,7 +14,8 @@ let package = Package(
         .target(name: "ReserveCore"),
         .executableTarget(
             name: "Reserve",
-            dependencies: ["ReserveCore"]),
+            dependencies: ["ReserveCore"],
+            resources: [.copy("Resources/ProviderLogos")]),
         .executableTarget(
             name: "ReserveProbe",
             dependencies: ["ReserveCore"]),

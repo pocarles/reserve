@@ -91,6 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           set +x
+          umask 077
           [[ -n "$CERTIFICATE_P12" && -n "$CERTIFICATE_PASSWORD" && -n "$API_KEY_P8" && -n "$API_KEY_ID" ]]
 
           keychain="$RUNNER_TEMP/reserve-signing.keychain-db"

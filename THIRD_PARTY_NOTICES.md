@@ -39,14 +39,25 @@ OpenAI, Codex, Anthropic, Claude, xAI, Grok, and their associated marks belong
 to their respective owners. Their appearance is descriptive and does not imply
 affiliation, sponsorship, or endorsement.
 
+Reserve bundles unmodified provider marks obtained from first-party sources on
+August 16, 2026:
+
+- the transparent OpenAI Blossom Black SVG from the official
+  [OpenAI logo download](https://cdn.openai.com/brand/openai-logos.zip), used
+  according to the [OpenAI design guidelines](https://openai.com/brand/). Its
+  transparent canvas is cropped to the mark's content bounds for legibility at
+  macOS status-item sizes; the first-party path geometry is unchanged;
+- Claude Spark - Clay from the press kit linked by the
+  [Anthropic newsroom](https://www.anthropic.com/news); and
+- the Grok mark published on the
+  [xAI brand guidelines](https://x.ai/legal/brand-guidelines) page. Its
+  first-party SVG uses `currentColor`, which Reserve resolves to the surrounding
+  macOS label or menu-bar colour.
+
 An open-source software license covering code or artwork from another project
-does not grant permission to use a provider's trademarks. Adapted provider SVGs
-from another project are therefore not approved Reserve release assets merely
-because that project uses the MIT License. A public Reserve build must include
-only official, unmodified provider assets whose published terms permit the
-specific use, or replace those assets with plain provider names or neutral
-initials. Provider assets must not be recolored or modified unless the owner
-explicitly permits it.
+does not grant permission to use a provider's trademarks. The previously
+adapted provider SVGs remain excluded. Provider marks are used only to identify
+their corresponding services and must not imply affiliation or endorsement.
 
 Reserve is an independent open-source project and is not affiliated with,
 endorsed by, sponsored by, or an official product of OpenAI, Anthropic, or xAI.

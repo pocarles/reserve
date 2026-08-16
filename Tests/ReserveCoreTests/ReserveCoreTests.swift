@@ -26,6 +26,48 @@ private func XCTFail(_ message: String) { Issue.record(TestFailure(description: 
 @Suite
 struct ReserveCoreTests {
   @Test
+  func testGrokUnifiedWeeklyResetIgnoresMonthlyIncludedSpend() throws {
+    let data = Data(
+      #"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-15T22:03:41Z","end":"2026-08-22T22:03:41Z"},"monthlyLimit":{"val":99900},"used":{"val":12345},"isUnifiedBillingUser":true}}"#.utf8)
+    let billing = try JSONDecoder().decode(GrokBillingEnvelope.self, from: data)
+
+    XCTAssertEqual(billing.config?.usedPercent, 0)
+    XCTAssertEqual(billing.config?.includedSpend?.usedMinorUnits, 12_345)
+    XCTAssertEqual(billing.config?.includedSpend?.limitMinorUnits, 99_900)
+  }
+
+  @Test
+  func testDeficitAlertRequiresAPreviousSnapshot() {
+    let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    let current = UsageSnapshot(
+      provider: .openAI,
+      windows: [
+        UsageWindow(
+          id: "weekly", label: "Weekly", usedPercent: 80,
+          windowMinutes: 7 * 24 * 60, resetsAt: now.addingTimeInterval(2 * 24 * 60 * 60))
+      ],
+      source: "test")
+
+    XCTAssertTrue(
+      SmartAlertDetector.deficitAlerts(previous: nil, current: current, now: now).isEmpty)
+  }
+
+  @Test
+  func testGrokCredentialSelectionBreaksPreferenceTiesByAccountKey() {
+    let future = "2033-05-18T03:33:20Z"
+    let credentials = GrokCredentialLoader.select(
+      entries: [
+        "zeta": GrokCredentialEntry(key: "zeta-key", userID: "zeta-user", expiresAt: future),
+        "alpha": GrokCredentialEntry(
+          key: "alpha-key", userID: "alpha-user", expiresAt: future),
+      ],
+      now: Date(timeIntervalSince1970: 1_800_000_000))
+
+    XCTAssertEqual(credentials?.key, "alpha-key")
+    XCTAssertEqual(credentials?.userID, "alpha-user")
+  }
+
+  @Test
   func testLegacyMigrationCleanInstallStartsWithEmptyReserveState() throws {
     let root = try TemporaryRoot()
     defer { root.remove() }
@@ -119,6 +161,19 @@ struct ReserveCoreTests {
   }
 
   @Test
+  func testBoundedLineBufferSkipsOversizedRecordAndResumesAtNextLine() {
+    let buffer = BoundedLineBuffer(maximumBytes: 8)
+    let oversized = buffer.append(Data("123456789".utf8))
+    let recovered = buffer.append(Data("tail\nok\n".utf8))
+
+    XCTAssertTrue(oversized.exceeded)
+    XCTAssertEqual(oversized.consumedBytes, 9)
+    XCTAssertTrue(recovered.exceeded)
+    XCTAssertEqual(recovered.lines.map { String(decoding: $0, as: UTF8.self) }, ["ok"])
+    XCTAssertEqual(recovered.consumedBytes, 8)
+  }
+
+  @Test
   func testNotificationComponentsAreFixedLengthAndDeterministic() {
     let value = String(repeating: "provider-controlled/", count: 100_000)
     let first = StableIdentifier.notificationComponent(value)
@@ -162,7 +217,7 @@ struct ReserveCoreTests {
   }
 
   @Test
-  func testOversizedUnterminatedSessionLineIsRejectedWithinBudget() async throws {
+  func testOversizedSessionLineIsSkippedWithoutLosingProviderUsage() async throws {
     let root = try TemporaryRoot()
     defer { root.remove() }
     let codex = root.url.appendingPathComponent("codex")
@@ -171,19 +226,61 @@ struct ReserveCoreTests {
     for directory in [codex, claude, grok] {
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
-    let oversized = claude.appendingPathComponent("session.jsonl")
-    try Data(repeating: 0x41, count: 1_048_577).write(to: oversized)
+    let now = Date()
+    let timestamp = ISO8601DateFormatter().string(from: now)
+    let codexLines =
+      [
+        #"{"timestamp":"\#(timestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+        #"{"timestamp":"\#(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":0,"output_tokens":20,"total_tokens":1020}}}}"#,
+      ].joined(separator: "\n") + "\n"
+    try Data(codexLines.utf8).write(to: codex.appendingPathComponent("session.jsonl"))
+    let claudeLine =
+      #"{"timestamp":"\#(timestamp)","type":"assistant","requestId":"r1","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":5}}}"#
+    var claudeData = Data(repeating: 0x41, count: 1_048_577)
+    claudeData.append(Data(("\n" + claudeLine + "\n").utf8))
+    try claudeData.write(to: claude.appendingPathComponent("session.jsonl"))
     let scanner = LocalUsageScanner(
       roots: .init(codex: codex, claude: claude, grok: grok),
       cacheURL: root.url.appendingPathComponent("index.json"))
-    do {
-      _ = try await scanner.scan()
-      XCTFail("oversized line should be rejected")
-    } catch let error as UsageProviderError {
-      guard case .invalidResponse = error else {
-        return XCTFail("unexpected error: \(error)")
-      }
+    let usage = try await scanner.scan(now: now)
+    let repeatedUsage = try await scanner.scan(now: now)
+
+    XCTAssertEqual(usage[.openAI]?.totalTokens, 1_020)
+    XCTAssertEqual(usage[.anthropic]?.totalTokens, 135)
+    XCTAssertEqual(repeatedUsage, usage)
+  }
+
+  @Test
+  func testOversizedUnterminatedSessionLineIsSkippedWithinBudget() async throws {
+    let root = try TemporaryRoot()
+    defer { root.remove() }
+    let codex = root.url.appendingPathComponent("codex")
+    let claude = root.url.appendingPathComponent("claude")
+    let grok = root.url.appendingPathComponent("grok")
+    for directory in [codex, claude, grok] {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
+    let session = claude.appendingPathComponent("session.jsonl")
+    try Data(repeating: 0x41, count: 1_048_577).write(to: session)
+    let scanner = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok),
+      cacheURL: root.url.appendingPathComponent("index.json"))
+
+    let now = Date()
+    let first = try await scanner.scan(now: now)
+    let timestamp = ISO8601DateFormatter().string(from: now)
+    let continuedOversizedRecord =
+      #"{"timestamp":"\#(timestamp)","type":"assistant","requestId":"discard-r","message":{"id":"discard-m","model":"claude-opus-5","usage":{"input_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1000}}}"#
+    let healthyRecord =
+      #"{"timestamp":"\#(timestamp)","type":"assistant","requestId":"keep-r","message":{"id":"keep-m","model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":5}}}"#
+    let handle = try FileHandle(forWritingTo: session)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((continuedOversizedRecord + "\n" + healthyRecord + "\n").utf8))
+    try handle.close()
+    let second = try await scanner.scan(now: now)
+
+    XCTAssertEqual(first[.anthropic]?.totalTokens, 0)
+    XCTAssertEqual(second[.anthropic]?.totalTokens, 135)
   }
 
   @Test

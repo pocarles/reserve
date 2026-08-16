@@ -418,6 +418,7 @@ final class ProviderDashboardCard: NSView {
   private let selectMenuBarProvider: (ProviderID) -> Void
   private let toggleDetail: (ProviderID) -> Void
   private let isSelectedForMenuBar: Bool
+  private let hasUnavailableLiveData: Bool
   private var isHovered = false
   private var hoverTrackingArea: NSTrackingArea?
 
@@ -434,6 +435,7 @@ final class ProviderDashboardCard: NSView {
     self.selectMenuBarProvider = selectMenuBarProvider
     self.toggleDetail = toggleDetail
     self.isSelectedForMenuBar = isSelectedForMenuBar
+    self.hasUnavailableLiveData = summary.paceState == .stale
     super.init(frame: .zero)
     self.wantsLayer = true
     self.toolTip =
@@ -453,6 +455,9 @@ final class ProviderDashboardCard: NSView {
         summary: summary, isSelectedForMenuBar: isSelectedForMenuBar,
         isExpanded: isExpanded, connectProvider: connectProvider, toggleDetail: toggleDetail)
     ]
+    if self.hasUnavailableLiveData {
+      rows.append(ProviderFreshnessBanner(summary: summary, now: now))
+    }
     if let primary = summary.primary {
       rows.append(
         AllowanceView(
@@ -510,12 +515,14 @@ final class ProviderDashboardCard: NSView {
     super.draw(dirtyRect)
     let path = NSBezierPath(
       roundedRect: self.bounds, xRadius: ReserveRadius.section, yRadius: ReserveRadius.section)
-    (self.isSelectedForMenuBar
-      ? ReserveColor.selected
-      : self.isHovered ? ReserveColor.hover : ReserveColor.section
+    (self.hasUnavailableLiveData
+      ? ReserveColor.staleSurface
+      : self.isSelectedForMenuBar
+        ? ReserveColor.selected
+        : self.isHovered ? ReserveColor.hover : ReserveColor.section
     ).setFill()
     path.fill()
-    ReserveColor.hairline.setStroke()
+    (self.hasUnavailableLiveData ? ReserveColor.staleBorder : ReserveColor.hairline).setStroke()
     path.lineWidth = 1
     path.stroke()
   }
@@ -695,6 +702,70 @@ final class ProviderDashboardCard: NSView {
   }
 }
 
+/// Makes cached or missing provider data impossible to mistake for a live
+/// reading. The detailed error remains available as a tooltip.
+@MainActor
+private final class ProviderFreshnessBanner: NSView {
+  init(summary: ProviderSummary, now: Date) {
+    super.init(frame: .zero)
+    self.identifier = NSUserInterfaceItemIdentifier("freshness-\(summary.provider.rawValue)")
+    let state: String
+    let fullState: String
+    if summary.needsConnection {
+      state = "Disconnected"
+      fullState = state
+    } else if summary.error != nil {
+      state = "Unavailable"
+      fullState = "Live data unavailable"
+    } else {
+      state = "Cached"
+      fullState = "Cached data"
+    }
+    let age = summary.lastUpdated.map { Self.compactAge(since: $0, now: now) } ?? "never updated"
+    let fullAge = summary.lastUpdated.map {
+      DashboardFormat.updated($0, now: now).replacingOccurrences(
+        of: "Updated", with: "last updated")
+    } ?? "never updated"
+    let message = "\(state) · \(age)"
+    let fullMessage = "\(fullState) · \(fullAge)"
+
+    let icon = NSImageView(
+      image: NSImage(
+        systemSymbolName: "clock.badge.exclamationmark", accessibilityDescription: nil)
+        ?? NSImage())
+    icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+    icon.contentTintColor = ReserveColor.muted
+    icon.setAccessibilityElement(false)
+    let label = ReserveLabel(
+      message, font: ReserveFont.sans(ReserveType.metadata, .medium), color: ReserveColor.muted
+    ).flexible()
+    label.identifier = NSUserInterfaceItemIdentifier(
+      "freshness-label-\(summary.provider.rawValue)")
+    self.toolTip = summary.error ?? fullMessage
+    self.setAccessibilityLabel(fullMessage)
+
+    let row = NSStackView.row([icon, label], spacing: 6)
+    row.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(row)
+    NSLayoutConstraint.activate([
+      row.leadingAnchor.constraint(equalTo: self.leadingAnchor),
+      row.trailingAnchor.constraint(equalTo: self.trailingAnchor),
+      row.topAnchor.constraint(equalTo: self.topAnchor),
+      row.bottomAnchor.constraint(equalTo: self.bottomAnchor),
+      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth),
+    ])
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  private static func compactAge(since date: Date, now: Date) -> String {
+    let seconds = max(0, now.timeIntervalSince(date))
+    if seconds < 60 { return "updated just now" }
+    if seconds < 3_600 { return "updated \(Int(seconds / 60))m ago" }
+    return "updated \(Int(seconds / 3_600))h ago"
+  }
+}
+
 /// "80% left" — every percentage states what it measures.
 @MainActor
 private final class RemainingValueView: NSView {
@@ -703,7 +774,7 @@ private final class RemainingValueView: NSView {
     let value = ReserveLabel(
       String(format: "%.0f%%", allowance.remainingPercent),
       font: ReserveFont.digits(ReserveType.remaining, .semibold),
-      color: ReserveColor.text
+      color: paceState == .stale ? ReserveColor.muted : ReserveColor.text
     ).fitted()
     let unit = ReserveLabel(
       "left", font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
@@ -818,7 +889,8 @@ private final class AllowanceView: NSView {
 
     var header: [NSView] = []
     if isDetail {
-      // In detail every window states both halves of the same fact.
+      // Quota surfaces always speak in remaining capacity. Providers may
+      // report usage internally, but Reserve presents what is left.
       let title = ReserveLabel(
         allowance.title, font: ReserveFont.sans(ReserveType.body, .medium),
         color: ReserveColor.text
@@ -827,11 +899,7 @@ private final class AllowanceView: NSView {
         "\(Int(allowance.remainingPercent.rounded()))% left",
         font: ReserveFont.digits(ReserveType.body, .semibold), color: ReserveColor.text
       ).fitted()
-      let used = ReserveLabel(
-        "\(Int(allowance.usedPercent.rounded()))% used",
-        font: ReserveFont.digits(ReserveType.metadata), color: ReserveColor.muted
-      ).fitted()
-      header = [NSStackView.row([title, NSStackView.spacer(), left, used], spacing: 8)]
+      header = [NSStackView.row([title, NSStackView.spacer(), left], spacing: 8)]
     }
 
     let captionText =
@@ -846,9 +914,8 @@ private final class AllowanceView: NSView {
     caption.toolTip = captionText
 
     let meter = ReserveMeter(
-      value: allowance.usedPercent,
-      pacePercent: allowance.expectedPercent,
-      projectedPercent: allowance.projectedUsedAtResetPercent,
+      remainingPercent: allowance.remainingPercent,
+      paceRemainingPercent: allowance.expectedPercent.map { 100 - $0 },
       label: allowance.title,
       color: paceState.color)
     meter.heightAnchor.constraint(equalToConstant: DashboardMetrics.meterHeight).isActive = true
@@ -901,8 +968,10 @@ private final class SecondaryAllowanceRow: NSView {
         color: ReserveColor.subtle
       ).fitted()
       title.flexible()
+      let information = NSStackView.row([title, value, detail], spacing: 7)
+      information.setContentHuggingPriority(.required, for: .horizontal)
       let row = NSStackView.row(
-        [title, value, NSStackView.spacer(), detail], spacing: 7)
+        [information, NSStackView.spacer()], spacing: 0)
       row.identifier = NSUserInterfaceItemIdentifier("secondary-\(allowance.id)")
       row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
       return row
@@ -992,9 +1061,10 @@ private final class UsageDetailGrid: NSView {
       chart.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive =
         true
       let caption = ReserveLabel(
-        "Daily tokens · last \(series.count) days",
+        "Daily tokens · last \(series.count) days · compressed scale",
         font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.subtle
       ).flexible()
+      caption.toolTip = ReserveSparkline.scaleExplanation
       rows.append(contentsOf: [chart, caption])
     }
     let stack = NSStackView.column(rows, spacing: 8)
@@ -1094,8 +1164,7 @@ private final class ProviderLogo: ReserveSurface {
     // The mark repeats the row's own label, so it stays silent.
     image.setAccessibilityElement(false)
     image.setAccessibilityLabel("")
-    // The logo is where provider brand colour belongs.
-    image.contentTintColor = ReserveColor.providerAccent(provider)
+    image.contentTintColor = provider != .anthropic ? ReserveColor.text : nil
     image.imageScaling = .scaleProportionallyUpOrDown
     image.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(image)
@@ -1213,30 +1282,30 @@ enum DashboardMetrics {
 
 @MainActor
 enum DashboardFormat {
-  private static let clockFormatter: DateFormatter = {
+  static func localizedDateFormatter(
+    template: String,
+    locale: Locale = .autoupdatingCurrent
+  ) -> DateFormatter {
     let formatter = DateFormatter()
-    formatter.dateFormat = "h:mm a"
+    formatter.locale = locale
+    formatter.setLocalizedDateFormatFromTemplate(template)
     return formatter
+  }
+
+  private static let clockFormatter: DateFormatter = {
+    Self.localizedDateFormatter(template: "jm")
   }()
   private static let weekdayFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "EEE 'at' h:mm a"
-    return formatter
+    Self.localizedDateFormatter(template: "EEEjm")
   }()
   private static let fullMomentFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM d 'at' h:mm a"
-    return formatter
+    Self.localizedDateFormatter(template: "MMMdjm")
   }()
   private static let shortDateFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM d, h:mm a"
-    return formatter
+    Self.localizedDateFormatter(template: "MMMdjm")
   }()
   private static let renewalFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM d"
-    return formatter
+    Self.localizedDateFormatter(template: "MMMd")
   }()
   private static let currencyDetailedFormatter: NumberFormatter = {
     let formatter = NumberFormatter()
@@ -1286,9 +1355,7 @@ enum DashboardFormat {
       guard let reset = allowance.resetsAt, reset > now else { return "Limit exhausted" }
       return "Limit exhausted · resets \(self.countdown(to: reset, now: now))"
     case .stale:
-      guard let lastUpdated else { return "Stale data · forecast may be outdated" }
-      return self.updated(lastUpdated, now: now).replacingOccurrences(
-        of: "Updated", with: "Last updated") + " · forecast may be outdated"
+      return "Forecast unavailable while live data is unavailable"
     case .unknown:
       return "Forecast unavailable"
     case .reserve(let percent):
@@ -1297,11 +1364,13 @@ enum DashboardFormat {
     case .onPace:
       return projected.map { "On pace · \($0)" } ?? "On pace"
     case .deficit(let percent):
-      let pace = "\(Int(percent.rounded()))% in deficit"
+      let pace = "\(Int(percent.rounded()))% deficit"
       if let runsOut = allowance.runsOutAt,
-        allowance.resetsAt.map({ runsOut < $0 }) == true
+        let renewal = allowance.resetsAt,
+        runsOut < renewal
       {
-        return "\(pace) · projected to run out \(self.countdown(to: runsOut, now: now))"
+        let timeBeforeRenewal = self.gap(from: runsOut, to: renewal)
+        return "\(pace) · runs out \(timeBeforeRenewal) early"
       }
       return projected.map { "\(pace) · \($0)" } ?? pace
     }
@@ -1315,7 +1384,7 @@ enum DashboardFormat {
     return "resets \(self.moment(reset, now: now))"
   }
 
-  /// "Wed at 1:02 AM" inside a week, "Aug 18 at 1:02 AM" beyond it.
+  /// A localized weekday and time inside a week, or date and time beyond it.
   static func moment(_ date: Date, now: Date) -> String {
     let interval = date.timeIntervalSince(now)
     if interval < 12 * 3600 {
@@ -1388,6 +1457,6 @@ enum DashboardFormat {
     suffix: String
   ) -> String {
     let digits = value >= 100 ? 0 : value >= 10 ? 1 : 2
-    return String(format: "%.*f", digits, value) + suffix
+    return prefix + String(format: "%.*f", digits, value) + suffix
   }
 }
