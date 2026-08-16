@@ -181,8 +181,9 @@ target.
 complete its official login. Then use Refresh in Reserve.
 
 **Claude is connected in the CLI but not Reserve.** If Claude Code stores its
-credential in Keychain, enable the explicit Keychain access option under
-Settings > Providers and approve the macOS prompt.
+credential in Keychain, choose **Allow Access** on the Claude card and approve
+the read-only macOS prompt. You can disable that access later under Settings >
+Providers.
 
 **Data is stale or rate limited.** Reserve keeps the last valid snapshot and
 retries after a bounded backoff. Check the provider's linked official status

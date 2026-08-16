@@ -72,7 +72,7 @@ for command_name in swift plutil codesign ditto; do
 done
 
 if [[ "$mode" != local ]]; then
-  for command_name in xcodebuild xcrun lipo hdiutil shasum; do
+  for command_name in xcodebuild xcrun lipo hdiutil shasum osascript; do
     command -v "$command_name" >/dev/null || {
       echo "error: Universal 2 packaging requires full Xcode and $command_name" >&2
       exit 69
@@ -129,6 +129,7 @@ contents_dir="$stage_app/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
 staged_dmg="$temp_root/Reserve.dmg"
+layout_dmg="$temp_root/Reserve-layout.dmg"
 staged_checksum="$temp_root/Reserve.dmg.sha256"
 completed=0
 created_app=0
@@ -279,7 +280,46 @@ mkdir -p "$dmg_root"
 ditto "$stage_app" "$dmg_root/Reserve.app"
 ln -s /Applications "$dmg_root/Applications"
 hdiutil create -quiet -volname Reserve -srcfolder "$dmg_root" \
-  -format UDZO "$staged_dmg"
+  -format UDRW "$layout_dmg"
+mkdir -p "$mount_dir"
+hdiutil attach -quiet -nobrowse -readwrite -mountpoint "$mount_dir" "$layout_dmg"
+mounted_dmg=1
+
+# The install gesture should read naturally from left to right: drag Reserve
+# onto Applications. Finder stores icon positions in the volume's .DS_Store,
+# so arrange a writable image first and only then compress the finished image.
+/usr/bin/osascript - "$mount_dir" <<'APPLESCRIPT'
+on run argv
+  set targetFolder to POSIX file (item 1 of argv) as alias
+  tell application "Finder"
+    activate
+    open targetFolder
+    delay 1
+    set current view of front Finder window to icon view
+    set toolbar visible of front Finder window to false
+    set statusbar visible of front Finder window to false
+    set bounds of front Finder window to {100, 100, 660, 430}
+    tell icon view options of front Finder window
+      set arrangement to not arranged
+      set icon size to 96
+      set text size to 13
+    end tell
+    set position of item "Reserve.app" of targetFolder to {150, 150}
+    set position of item "Applications" of targetFolder to {410, 150}
+    update targetFolder without registering applications
+    delay 2
+    close front Finder window
+    delay 1
+  end tell
+end run
+APPLESCRIPT
+[[ -f "$mount_dir/.DS_Store" ]] || {
+  echo "error: Finder did not save the DMG layout" >&2
+  exit 65
+}
+hdiutil detach -quiet "$mount_dir"
+mounted_dmg=0
+hdiutil convert -quiet "$layout_dmg" -format UDZO -o "$staged_dmg"
 
 if [[ "$mode" == release ]]; then
   codesign --force --timestamp --sign "$sign_identity" "$staged_dmg"
@@ -317,15 +357,36 @@ if [[ "$mode" == release ]]; then
   xcrun stapler validate "$final_dmg"
   spctl --assess --type open --context context:primary-signature \
     --verbose=2 "$final_dmg"
-  mkdir -p "$mount_dir"
-  hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mount_dir" "$final_dmg"
-  mounted_dmg=1
+fi
+
+mkdir -p "$mount_dir"
+hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mount_dir" "$final_dmg"
+mounted_dmg=1
+[[ -d "$mount_dir/Reserve.app" && -L "$mount_dir/Applications" \
+  && "$(readlink "$mount_dir/Applications")" == /Applications ]] || {
+  echo "error: DMG is missing Reserve or its Applications shortcut" >&2
+  exit 65
+}
+layout_positions=$(/usr/bin/osascript - "$mount_dir" <<'APPLESCRIPT'
+on run argv
+  set targetFolder to POSIX file (item 1 of argv) as alias
+  tell application "Finder"
+    return ((position of item "Reserve.app" of targetFolder as text) & "|" & (position of item "Applications" of targetFolder as text))
+  end tell
+end run
+APPLESCRIPT
+)
+[[ "$layout_positions" == "150150|410150" ]] || {
+  echo "error: DMG icons are not arranged as Reserve then Applications" >&2
+  exit 65
+}
+if [[ "$mode" == release ]]; then
   "$project_dir/Scripts/verify_package.sh" --mode release \
     --version "$version" --build "$build_number" "$mount_dir/Reserve.app"
   spctl --assess --type execute --verbose=2 "$mount_dir/Reserve.app"
-  hdiutil detach -quiet "$mount_dir"
-  mounted_dmg=0
 fi
+hdiutil detach -quiet "$mount_dir"
+mounted_dmg=0
 
 completed=1
 printf '%s\n%s\n' "$final_dmg" "$final_checksum"

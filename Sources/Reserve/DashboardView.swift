@@ -61,6 +61,7 @@ final class DashboardViewController: NSViewController {
       parts.append(summary.planName)
       parts.append(summary.error ?? "-")
       parts.append(summary.needsConnection ? "connect" : "-")
+      parts.append(summary.requiresClaudeKeychainAccess ? "keychain" : "-")
       parts.append(summary.isConnecting ? "connecting" : "-")
       parts.append(summary.isRefreshing ? "refreshing" : "-")
       parts.append(summary.serviceStatus?.health.rawValue ?? "-")
@@ -663,12 +664,16 @@ final class ProviderDashboardCard: NSView {
 
     let trailing: NSView
     if summary.needsConnection, !summary.isConnecting, !summary.isRefreshing {
+      let actionTitle = summary.requiresClaudeKeychainAccess ? "Allow access" : "Sign in"
       let connect = ReserveTextButton(
-        title: "Connect", size: ReserveType.metadata, color: ReserveColor.warning, filled: true,
+        title: actionTitle, size: ReserveType.metadata, color: ReserveColor.warning, filled: true,
         minimumWidth: 64, height: 24,
         action: { connectProvider(summary.provider) })
       connect.identifier = NSUserInterfaceItemIdentifier("connect-\(summary.provider.rawValue)")
-      connect.toolTip = "Sign in with the official \(summary.provider.displayName) tool"
+      connect.toolTip =
+        summary.requiresClaudeKeychainAccess
+        ? "Allow Reserve read-only access to your Claude sign-in in macOS Keychain"
+        : "Sign in with the official \(summary.provider.displayName) tool to read plan limits"
       trailing = connect
     } else if let primary = summary.primary {
       trailing = RemainingValueView(allowance: primary, paceState: summary.paceState)
@@ -688,14 +693,20 @@ final class ProviderDashboardCard: NSView {
 
   private static func unavailableRow(summary: ProviderSummary) -> NSView {
     let message =
-      summary.isConnecting
+      summary.isConnecting && summary.requiresClaudeKeychainAccess
+      ? "Approve read-only access in the macOS prompt"
+      : summary.isConnecting
       ? "Complete the sign-in in your browser"
-      : summary.error ?? "Connect this provider to read its limits"
+      : summary.requiresClaudeKeychainAccess
+        ? "Claude sign-in found · allow access for plan limits"
+      : summary.needsConnection && summary.localUsage != nil
+        ? "Plan limits unavailable · local activity available"
+        : summary.error ?? "Sign in to read plan limits"
     let label = ReserveLabel(
       message, font: ReserveFont.sans(ReserveType.metadata),
-      color: summary.error == nil ? ReserveColor.muted : ReserveColor.warning
+      color: summary.needsConnection ? ReserveColor.warning : ReserveColor.muted
     ).flexible()
-    label.toolTip = message
+    label.toolTip = summary.error ?? message
     let row = NSStackView.row([label], spacing: 0)
     row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
     return row
@@ -1038,9 +1049,9 @@ private final class UsageDetailGrid: NSView {
     let usage = summary.localUsage
     let cells: [NSView] = [
       Self.cell(
-        "Tokens today", usage.map { DashboardFormat.tokens($0.todayTokens) } ?? "—"),
+        "Local tokens today", usage.map { DashboardFormat.tokens($0.todayTokens) } ?? "—"),
       Self.cell(
-        "Last 30 days", usage.map { DashboardFormat.tokens($0.totalTokens) } ?? "—"),
+        "Local · last 30 days", usage.map { DashboardFormat.tokens($0.totalTokens) } ?? "—"),
       Self.cell(
         "Estimated API value",
         usage.map { DashboardFormat.money($0.apiEquivalentCostUSD) } ?? "—"),

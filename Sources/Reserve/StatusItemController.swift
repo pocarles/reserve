@@ -163,7 +163,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         provider: summary.provider, planName: summary.planName, allowances: summary.allowances,
         paceState: state, serviceStatus: summary.serviceStatus,
         isConnecting: summary.isConnecting, isRefreshing: summary.isRefreshing,
-        needsConnection: summary.needsConnection, error: summary.error,
+        needsConnection: summary.needsConnection,
+        requiresClaudeKeychainAccess: summary.requiresClaudeKeychainAccess,
+        error: summary.error,
         lastUpdated: summary.lastUpdated, localUsage: summary.localUsage,
         subscriptionCostUSD: summary.subscriptionCostUSD, quotaSource: summary.quotaSource)
     }
