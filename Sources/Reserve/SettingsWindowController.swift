@@ -1128,16 +1128,30 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func providerStatus(_ provider: ProviderID) -> (text: String, color: NSColor) {
-    if let state = self.store.states[provider], state.snapshot != nil, state.error == nil {
-      return ("Connected", .secondaryLabelColor)
-    }
     let executable: String =
       switch provider {
       case .openAI: "codex"
       case .anthropic: "claude"
       case .grok: "grok"
       }
-    if BinaryLocator.find(executable) != nil {
+    let state = self.store.states[provider]
+    return Self.providerStatus(
+      hasSnapshot: state?.snapshot != nil,
+      hasError: state?.error != nil,
+      toolDetected: BinaryLocator.find(executable) != nil)
+  }
+
+  private static func providerStatus(
+    hasSnapshot: Bool,
+    hasError: Bool,
+    toolDetected: Bool
+  ) -> (text: String, color: NSColor) {
+    if hasSnapshot {
+      return hasError
+        ? ("Last update failed", .systemOrange)
+        : ("Connected", .secondaryLabelColor)
+    }
+    if toolDetected {
       return ("Detected, not signed in", .systemOrange)
     }
     return ("Tool not found", .systemRed)
@@ -1233,6 +1247,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       providerIDs.contains("settings-provider-\($0.rawValue)")
         && providerIDs.contains("provider-disclose-\($0.rawValue)")
     }
+    let providerStatusesAreTruthful =
+      Self.providerStatus(hasSnapshot: true, hasError: true, toolDetected: true).text
+      == "Last update failed"
+      && Self.providerStatus(hasSnapshot: true, hasError: false, toolDetected: true).text
+        == "Connected"
+      && Self.providerStatus(hasSnapshot: false, hasError: false, toolDetected: true).text
+        == "Detected, not signed in"
     let claudeIsHiddenUntilExpanded = !providerIDs.contains("settings-automatic-claude")
     self.expandedProviders = [.anthropic]
     self.applyPane(animated: false)
@@ -1262,6 +1283,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && expandedIDs.contains("subscription.anthropic")
       && expandedIDs.contains("renewal.anthropic")
       && expandedIDs.contains("provider-detail-anthropic")
+      && providerStatusesAreTruthful
       && renewalInputWorks
     self.expandedProviders = []
 

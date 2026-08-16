@@ -168,6 +168,8 @@ public enum ReserveSelfTests {
     let riskySnapshot = weekly(80)
     let entering = SmartAlertDetector.deficitAlerts(
       previous: safeSnapshot, current: riskySnapshot, now: paceNow)
+    let initialFetch = SmartAlertDetector.deficitAlerts(
+      previous: nil, current: riskySnapshot, now: paceNow)
     let staying = SmartAlertDetector.deficitAlerts(
       previous: riskySnapshot, current: riskySnapshot, now: paceNow)
     let neverInDeficit = SmartAlertDetector.deficitAlerts(
@@ -180,6 +182,7 @@ public enum ReserveSelfTests {
       alertWindow == "weekly",
       deficit > 0,
       alertReset == riskReset,
+      initialFetch.isEmpty,
       staying.isEmpty,
       neverInDeficit.isEmpty,
       entering[0].preferenceKey == "deficit",
@@ -398,10 +401,12 @@ public enum ReserveSelfTests {
     record("Grok incomplete unified billing")
 
     let resetUnifiedGrokData = Data(
-      #"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-15T22:03:41Z","end":"2026-08-22T22:03:41Z"},"onDemandCap":{},"onDemandUsed":{},"productUsage":[{"product":"GrokBuild"},{"product":"GrokChat","usagePercent":0}],"isUnifiedBillingUser":true}}"#.utf8)
+      #"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-15T22:03:41Z","end":"2026-08-22T22:03:41Z"},"monthlyLimit":{"val":99900},"used":{"val":12345},"onDemandCap":{},"onDemandUsed":{},"productUsage":[{"product":"GrokBuild"},{"product":"GrokChat","usagePercent":0}],"isUnifiedBillingUser":true}}"#.utf8)
     let resetUnifiedGrok = try JSONDecoder().decode(
       GrokBillingEnvelope.self, from: resetUnifiedGrokData)
     guard resetUnifiedGrok.config?.usedPercent == 0,
+      resetUnifiedGrok.config?.includedSpend?.usedMinorUnits == 12345,
+      resetUnifiedGrok.config?.includedSpend?.limitMinorUnits == 99900,
       resetUnifiedGrok.config?.productUsage?.allSatisfy({ $0.usagePercent == 0 }) == true
     else {
       throw Failure("Grok reset-period zero normalization")

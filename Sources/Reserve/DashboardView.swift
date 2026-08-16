@@ -1457,6 +1457,6 @@ enum DashboardFormat {
     suffix: String
   ) -> String {
     let digits = value >= 100 ? 0 : value >= 10 ? 1 : 2
-    return String(format: "%.*f", digits, value) + suffix
+    return prefix + String(format: "%.*f", digits, value) + suffix
   }
 }

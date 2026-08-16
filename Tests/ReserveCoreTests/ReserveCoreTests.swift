@@ -26,6 +26,33 @@ private func XCTFail(_ message: String) { Issue.record(TestFailure(description: 
 @Suite
 struct ReserveCoreTests {
   @Test
+  func testGrokUnifiedWeeklyResetIgnoresMonthlyIncludedSpend() throws {
+    let data = Data(
+      #"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-15T22:03:41Z","end":"2026-08-22T22:03:41Z"},"monthlyLimit":{"val":99900},"used":{"val":12345},"isUnifiedBillingUser":true}}"#.utf8)
+    let billing = try JSONDecoder().decode(GrokBillingEnvelope.self, from: data)
+
+    XCTAssertEqual(billing.config?.usedPercent, 0)
+    XCTAssertEqual(billing.config?.includedSpend?.usedMinorUnits, 12_345)
+    XCTAssertEqual(billing.config?.includedSpend?.limitMinorUnits, 99_900)
+  }
+
+  @Test
+  func testDeficitAlertRequiresAPreviousSnapshot() {
+    let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    let current = UsageSnapshot(
+      provider: .openAI,
+      windows: [
+        UsageWindow(
+          id: "weekly", label: "Weekly", usedPercent: 80,
+          windowMinutes: 7 * 24 * 60, resetsAt: now.addingTimeInterval(2 * 24 * 60 * 60))
+      ],
+      source: "test")
+
+    XCTAssertTrue(
+      SmartAlertDetector.deficitAlerts(previous: nil, current: current, now: now).isEmpty)
+  }
+
+  @Test
   func testLegacyMigrationCleanInstallStartsWithEmptyReserveState() throws {
     let root = try TemporaryRoot()
     defer { root.remove() }

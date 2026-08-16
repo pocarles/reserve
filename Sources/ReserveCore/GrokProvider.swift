@@ -363,9 +363,6 @@ struct GrokBillingConfig: Decodable, Sendable {
 
   var usedPercent: Double? {
     if let creditUsagePercent { return creditUsagePercent }
-    if let limit = self.monthlyLimit?.val, limit > 0, let used = self.used?.val {
-      return Double(used) / Double(limit) * 100
-    }
     // The unified credits backend uses proto3 JSON, which omits a zero-valued
     // percentage immediately after a weekly reset. Grok's own pager maps that
     // valid-period shape to 0%; require real period bounds so an arbitrary

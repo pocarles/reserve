@@ -105,8 +105,10 @@ struct ProviderSummary {
 enum AllowanceBuilder {
   static func summary(for state: ProviderViewState, now: Date = Date()) -> ProviderSummary {
     let windows = state.snapshot?.windows ?? []
+    let planWindows = windows.filter { !$0.isComponentShare }
     let primaryWindow =
-      windows.first { $0.label.localizedCaseInsensitiveCompare("Weekly") == .orderedSame }
+      planWindows.first { $0.label.localizedCaseInsensitiveCompare("Weekly") == .orderedSame }
+      ?? planWindows.max(by: { $0.usedPercent < $1.usedPercent })
       ?? windows.max(by: { $0.usedPercent < $1.usedPercent })
 
     let allowances = windows
