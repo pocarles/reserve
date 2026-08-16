@@ -236,8 +236,8 @@ final class ReserveNotifications {
   }
 
   private func isNotifiableWindow(_ window: UsageWindow) -> Bool {
+    guard !window.isComponentShare else { return false }
     let label = window.label.lowercased()
-    guard !label.contains("share") else { return false }
     let weekly = label.contains("weekly") || window.windowMinutes == 10_080
     let fiveHour = label.contains("5 hour") || window.windowMinutes == 300
     return (weekly && self.preference("weeklyRenewal"))

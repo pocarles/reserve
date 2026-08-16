@@ -435,7 +435,7 @@ final class ProviderDashboardCard: NSView {
     self.selectMenuBarProvider = selectMenuBarProvider
     self.toggleDetail = toggleDetail
     self.isSelectedForMenuBar = isSelectedForMenuBar
-    self.hasUnavailableLiveData = summary.paceState == .stale || summary.paceState == .unknown
+    self.hasUnavailableLiveData = summary.paceState == .stale
     super.init(frame: .zero)
     self.wantsLayer = true
     self.toolTip =
@@ -774,7 +774,7 @@ private final class RemainingValueView: NSView {
     let value = ReserveLabel(
       String(format: "%.0f%%", allowance.remainingPercent),
       font: ReserveFont.digits(ReserveType.remaining, .semibold),
-      color: paceState == .stale || paceState == .unknown ? ReserveColor.muted : ReserveColor.text
+      color: paceState == .stale ? ReserveColor.muted : ReserveColor.text
     ).fitted()
     let unit = ReserveLabel(
       "left", font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted

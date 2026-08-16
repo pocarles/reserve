@@ -202,6 +202,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         withState(previewSummaries[1], .onPace),
         withState(previewSummaries[2], .onPace),
       ])
+    let freshWithoutForecast = AllowanceBuilder.headline(
+      for: [
+        withState(previewSummaries[0], .unknown),
+        withState(previewSummaries[1], .reserve(percent: 12)),
+        withState(previewSummaries[2], .reserve(percent: 18)),
+      ])
     let aggregateCopyWorks =
       singleSummary.primary == "1 plan in deficit"
       && pluralSummary.primary == "2 plans in deficit"
@@ -214,6 +220,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && mixedStale.secondary.contains("1 is on pace")
       && !mixedStale.secondary.contains("remain on pace")
       && mixedHealthy.primary == "1 plan has reserve · 2 are on pace"
+      && freshWithoutForecast.primary == "1 plan has no pace forecast"
+      && freshWithoutForecast.secondary.contains("2 other plans have reserve")
+      && !freshWithoutForecast.primary.contains("update")
       && !staleSummary.primary.contains("All plans")
     let forecastNow = Date(timeIntervalSinceReferenceDate: 800_000_000)
     let forecastReset = forecastNow.addingTimeInterval(4 * 86_400 + 2 * 3_600)
@@ -403,6 +412,19 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       }
       && staleDescendants.compactMap { ($0 as? NSTextField)?.stringValue }.contains {
         $0.contains("Cached") && $0.contains("updated")
+      }
+    let unknownCard = ProviderDashboardCard(
+      summary: withState(previewSummaries[0], .unknown), now: Date(),
+      isSelectedForMenuBar: false, connectProvider: { _ in },
+      selectMenuBarProvider: { _ in })
+    unknownCard.layoutSubtreeIfNeeded()
+    let unknownDescendants = Self.descendants(of: unknownCard)
+    let freshWithoutForecastDoesNotLookStale =
+      !unknownDescendants.contains {
+        ($0.identifier?.rawValue ?? "").hasPrefix("freshness-")
+      }
+      && !unknownDescendants.compactMap { ($0 as? NSTextField)?.stringValue }.contains {
+        $0.contains("Cached")
       }
 
     // Keyboard: rows take focus and answer Space and Return.
@@ -617,14 +639,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       firstClickSelectionWorks, footerButtonsArePadded, providerButtonsArePadded,
       refreshButtonIsPadded, dashboardTypographyIsReadable, oauthURLParsingIsSafe,
       outsideClickDismissalWorks, updateURLsAreRestricted, adaptiveSchedulingWorks,
-      staleFreshnessIsVisible,
+      staleFreshnessIsVisible, freshWithoutForecastDoesNotLookStale,
       automaticSourceWorks,
       pinnedModelWorks, aggregateCopyWorks, deficitForecastUsesRenewalGap,
       semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (

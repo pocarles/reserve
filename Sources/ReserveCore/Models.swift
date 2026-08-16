@@ -28,6 +28,12 @@ public struct UsageWindow: Codable, Equatable, Sendable, Identifiable {
   public let windowMinutes: Int?
   public let resetsAt: Date?
 
+  /// Component shares describe part of a larger allowance rather than an
+  /// independently renewable quota, so they must not raise their own alerts.
+  public var isComponentShare: Bool {
+    self.label.localizedCaseInsensitiveContains("share")
+  }
+
   public init(
     id: String,
     label: String,
@@ -160,10 +166,10 @@ public enum UsagePaceState: Equatable, Sendable {
     stalenessLimit: TimeInterval = UsagePaceState.stalenessLimit
   ) -> UsagePaceState {
     guard let window else { return .unknown }
-    if window.usedPercent >= 99.5 { return .exhausted }
     if hasError || fetchedAt.map({ now.timeIntervalSince($0) > stalenessLimit }) == true {
       return .stale
     }
+    if window.usedPercent >= 99.5 { return .exhausted }
     guard let projection = UsagePaceProjection.calculate(for: window, now: now) else {
       return .unknown
     }

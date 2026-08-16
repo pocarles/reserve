@@ -109,6 +109,7 @@ public enum ReserveSelfTests {
       for: UsageWindow(
         id: "weekly", label: "Weekly", usedPercent: elapsedPercent - 2.1,
         windowMinutes: 7 * 24 * 60, resetsAt: paceReset), now: paceNow)
+    let earlyReset = paceNow.addingTimeInterval((7 * 24 * 60 - 30) * 60)
     guard deficitPace?.position == .deficit,
       abs((deficitPace?.variancePercent ?? 0) - 5.714) < 0.01,
       deficitPace?.projectedExhaustionAt == paceNow.addingTimeInterval(4 * 24 * 60 * 60),
@@ -128,8 +129,19 @@ public enum ReserveSelfTests {
         for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 100),
         fetchedAt: paceNow, now: paceNow) == .exhausted,
       UsagePaceState.calculate(
+        for: UsageWindow(
+          id: "weekly", label: "Weekly", usedPercent: 1,
+          windowMinutes: 7 * 24 * 60, resetsAt: earlyReset),
+        fetchedAt: paceNow, now: paceNow) == .unknown,
+      UsagePaceState.calculate(
         for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 20),
         fetchedAt: paceNow.addingTimeInterval(-31 * 60), now: paceNow) == .stale,
+      UsagePaceState.calculate(
+        for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 100),
+        fetchedAt: paceNow.addingTimeInterval(-31 * 60), now: paceNow) == .stale,
+      UsagePaceState.calculate(
+        for: UsageWindow(id: "weekly", label: "Weekly", usedPercent: 100),
+        fetchedAt: paceNow, hasError: true, now: paceNow) == .stale,
       UsagePaceProjection.calculate(
         for: UsageWindow(
           id: "expired", label: "Weekly", usedPercent: 20,
@@ -240,17 +252,25 @@ public enum ReserveSelfTests {
       provider: .openAI,
       windows: [
         UsageWindow(
-          id: "weekly", label: "Weekly", usedPercent: 49, resetsAt: notificationReset)
+          id: "weekly", label: "Weekly", usedPercent: 49, resetsAt: notificationReset),
+        UsageWindow(
+          id: "build-share", label: "Build share", usedPercent: 49,
+          resetsAt: notificationReset),
       ], source: "test")
     let newNotificationSnapshot = UsageSnapshot(
       provider: .openAI,
       windows: [
         UsageWindow(
-          id: "weekly", label: "Weekly", usedPercent: 91, resetsAt: notificationReset)
+          id: "weekly", label: "Weekly", usedPercent: 91, resetsAt: notificationReset),
+        UsageWindow(
+          id: "build-share", label: "Build share", usedPercent: 91,
+          resetsAt: notificationReset),
       ], source: "test")
     let crossings = UsageNotificationEventDetector.thresholdCrossings(
       previous: oldNotificationSnapshot, current: newNotificationSnapshot)
-    guard crossings.map(\.threshold) == [50, 90] else {
+    guard crossings.map(\.threshold) == [50, 90],
+      crossings.allSatisfy({ $0.windowID == "weekly" })
+    else {
       throw Failure("usage notification thresholds")
     }
     record("usage notification thresholds")

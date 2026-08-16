@@ -82,6 +82,6 @@ public enum SmartAlertDetector {
   /// Component shares of a larger allowance are not separate quotas, so they
   /// never raise their own alert.
   private static func isNotifiable(_ window: UsageWindow) -> Bool {
-    !window.label.lowercased().contains("share")
+    !window.isComponentShare
   }
 }
