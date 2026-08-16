@@ -8,6 +8,60 @@ It is deliberately small: no Reserve account, browser automation, WebView,
 cookie extraction, telemetry, crash reporting, cloud service, third-party
 status aggregator, automatic updater, or third-party Swift package dependency.
 
+<img src="docs/images/menu-bar.png" alt="The Reserve menu bar item: a gauge, 76%, and 4d 4h" width="121">
+
+*Most days, this is the whole app.*
+
+## Why this exists
+
+I needed a simple way to keep an eye on my OpenAI, Anthropic, and Grok
+subscription allowances. Mostly so I don't run out at the worst possible moment,
+or pay for capacity I quietly leave unused.
+
+I was using [CodexBar](https://github.com/steipete/CodexBar), built by
+[@steipete](https://github.com/steipete), and I genuinely liked it. It supports
+an impressive number of AI labs and offers far more options than I need. On my
+Mac, though, it had become a little unreliable and heavier than I wanted.
+
+So I built Reserve: a tiny native menu bar app for fairly normal people with one
+or more AI subscriptions who just want to know what they have left, without
+bringing their Mac to its knees.
+
+Reserve is free, open source, and released under the MIT license.
+
+A very small project, solving a very small annoyance. But I am strangely
+emotional about putting it out there. I think the last time I launched an app
+was probably 15 years ago, so I am definitely a little rusty :-)
+
+## What it looks like
+
+The whole dashboard fits in one panel, with nothing to scroll. It follows your
+Mac's light or dark setting. Every screenshot here is drawn by the app itself
+from sample data.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
+  <img src="docs/images/dashboard-light.png" width="440"
+       alt="The Reserve dashboard: all plans have reserve, above cards for OpenAI Pro at 76% left, Anthropic Max 20x at 68% left, and Grok SuperGrok Heavy at 57% left, each with its weekly limit, reset time and projection.">
+</picture>
+
+Open a provider and it shows the shorter window, tokens today, the last thirty
+days, an API-equivalent estimate, and where each of those figures came from.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/provider-expanded-dark.png">
+  <img src="docs/images/provider-expanded-light.png" width="440"
+       alt="An expanded provider card showing the weekly limit, the 5-hour window, tokens today, the last 30 days, estimated API value, a daily token chart, and the source of each figure.">
+</picture>
+
+When an allowance is spent, the card says so, and says when it comes back.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/exhausted-dark.png">
+  <img src="docs/images/exhausted-light.png" width="440"
+       alt="The dashboard with one plan exhausted: OpenAI Pro at 0% left, reading limit exhausted, resets in 4d 4h.">
+</picture>
+
 ## Install
 
 Reserve requires macOS 14 or newer and is distributed as a signed, notarized
