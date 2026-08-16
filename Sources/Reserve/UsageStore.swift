@@ -14,6 +14,7 @@ struct ProviderViewState: Identifiable {
   var renewalStart: Date?
   var nextRenewal: Date?
   var serviceStatus: ProviderServiceStatus?
+  var requiresClaudeKeychainAccess = false
 }
 
 enum PreviewScenario: String, CaseIterable {
@@ -24,6 +25,7 @@ enum PreviewScenario: String, CaseIterable {
   case exhausted
   case stale
   case unknown
+  case keychainAccess = "keychain-access"
 }
 
 @MainActor
@@ -82,6 +84,7 @@ final class UsageStore {
   /// discarded rather than applied.
   private var refreshTokens: [ProviderID: Int] = [:]
   private var pendingRefreshes: Set<ProviderID> = []
+  private var pendingClaudeKeychainInteraction = false
   private var lastRefreshCompletedAt: Date?
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
@@ -137,9 +140,23 @@ final class UsageStore {
     get { self.defaults.bool(forKey: "anthropic.keychainReadAllowed") }
     set {
       self.defaults.set(newValue, forKey: "anthropic.keychainReadAllowed")
+      if !newValue { self.pendingClaudeKeychainInteraction = false }
       self.changed()
       if newValue { self.refresh(.anthropic) }
     }
+  }
+
+  var claudeKeychainCredentialAvailable: Bool {
+    AnthropicProvider.keychainCredentialIsAvailableWithoutPrompt()
+  }
+
+  /// Called only from an explicit button or checkbox. This one refresh may ask
+  /// macOS for Keychain approval; scheduled refreshes always stay silent.
+  func allowClaudeKeychainAccess() {
+    self.defaults.set(true, forKey: "anthropic.keychainReadAllowed")
+    self.states[.anthropic]?.requiresClaudeKeychainAccess = true
+    self.pendingClaudeKeychainInteraction = true
+    if !self.refresh(.anthropic, allowKeychainInteraction: true) { self.changed() }
   }
 
   var refreshIntervalMinutes: Int {
@@ -419,19 +436,35 @@ final class UsageStore {
   }
 
   @discardableResult
-  func refresh(_ provider: ProviderID, queueIfBusy: Bool = false) -> Bool {
+  func refresh(
+    _ provider: ProviderID,
+    queueIfBusy: Bool = false,
+    allowKeychainInteraction: Bool = false
+  ) -> Bool {
     guard self.beginRefresh(provider) else {
       if queueIfBusy { self.pendingRefreshes.insert(provider) }
       return false
     }
+    if allowKeychainInteraction {
+      self.pendingClaudeKeychainInteraction = false
+      self.states[provider]?.isConnecting = true
+      self.changed()
+    }
     Task {
       if provider == .anthropic { await AnthropicProvider.clearPersistedRateLimitBlock() }
-      await self.performRefresh(provider)
+      await self.performRefresh(
+        provider, allowKeychainInteraction: allowKeychainInteraction)
     }
     return true
   }
 
   func connect(_ provider: ProviderID) {
+    if provider == .anthropic,
+      self.states[provider]?.requiresClaudeKeychainAccess == true
+    {
+      self.allowClaudeKeychainAccess()
+      return
+    }
     guard self.loginProcesses[provider]?.isRunning != true else { return }
     let configuration = Self.loginConfiguration(for: provider)
     let generation = (self.loginGenerations[provider] ?? 0) + 1
@@ -494,7 +527,7 @@ final class UsageStore {
           Task { @MainActor [weak self] in
             guard self?.loginGenerations[provider] == generation else { return }
             self?.states[provider]?.error =
-              "\(configuration.displayName) sign-in output exceeded 64 KB. Click Connect to retry."
+              "\(configuration.displayName) sign-in output exceeded 64 KB. Use Sign in to retry."
             self?.states[provider]?.isConnecting = false
             self?.changed()
           }
@@ -518,7 +551,7 @@ final class UsageStore {
         await MainActor.run {
           guard self?.loginGenerations[provider] == generation else { return }
           self?.states[provider]?.error =
-            "\(configuration.displayName) sign-in timed out. Click Connect to try again."
+            "\(configuration.displayName) sign-in timed out. Use Sign in to try again."
           self?.states[provider]?.isConnecting = false
           self?.changed()
         }
@@ -665,7 +698,7 @@ final class UsageStore {
   func installPreviewSnapshots(now: Date = Date(), scenario: PreviewScenario = .deficit) {
     let usage: (openAI: Double, anthropic: Double, grok: Double) =
       switch scenario {
-      case .allReserve, .stale, .unknown: (24, 32, 43)
+      case .allReserve, .stale, .unknown, .keychainAccess: (24, 32, 43)
       case .mixed: (24, 48, 43)
       case .deficit: (61, 32, 43)
       case .multipleDeficit: (61, 60, 70)
@@ -733,6 +766,11 @@ final class UsageStore {
     self.states[.anthropic]?.serviceStatus = ProviderServiceStatus(
       provider: .anthropic, health: .operational, detail: "All systems operational",
       pageURL: URL(string: "https://status.claude.com")!)
+    if scenario == .keychainAccess {
+      self.states[.anthropic]?.snapshot = nil
+      self.states[.anthropic]?.error = UsageProviderError.keychainConsentRequired.localizedDescription
+      self.states[.anthropic]?.requiresClaudeKeychainAccess = true
+    }
     self.states[.grok] = ProviderViewState(
       provider: .grok,
       snapshot: UsageSnapshot(
@@ -839,7 +877,7 @@ final class UsageStore {
     } else {
       if self.states[provider]?.error == nil {
         self.states[provider]?.error =
-          "\(provider.displayName) sign-in was not completed. Click Connect to retry."
+          "\(provider.displayName) sign-in was not completed. Use Sign in to retry."
       }
       self.changed()
     }
@@ -1016,7 +1054,8 @@ final class UsageStore {
   private func performRefresh(
     _ provider: ProviderID,
     persist: Bool = true,
-    notify: Bool = true
+    notify: Bool = true,
+    allowKeychainInteraction: Bool = false
   ) async {
     // A manual refresh and the scheduled sweep can be in flight for the same
     // provider at once. Without a token the slower request wins simply by
@@ -1028,22 +1067,33 @@ final class UsageStore {
     defer {
       if isCurrent() {
         self.states[provider]?.isRefreshing = false
+        if allowKeychainInteraction { self.states[provider]?.isConnecting = false }
         if notify { self.changed() }
-        if self.pendingRefreshes.remove(provider) != nil { self.refresh(provider) }
+        if provider == .anthropic, self.pendingClaudeKeychainInteraction {
+          self.refresh(.anthropic, allowKeychainInteraction: true)
+        } else if self.pendingRefreshes.remove(provider) != nil {
+          self.refresh(provider)
+        }
       }
     }
 
     let fetcher: any UsageProvider =
       switch provider {
       case .openAI: OpenAIProvider()
-      case .anthropic: AnthropicProvider(allowKeychainRead: self.claudeKeychainReadAllowed)
+      case .anthropic:
+        AnthropicProvider(
+          allowKeychainRead: self.claudeKeychainReadAllowed,
+          allowKeychainInteraction: allowKeychainInteraction)
       case .grok: GrokProvider()
       }
     let previousHealth = self.states[provider]?.serviceStatus?.health
-    let status = await self.serviceStatusClient.fetch(provider)
-    guard isCurrent() else { return }
-    self.states[provider]?.serviceStatus = status
-    self.reportServiceHealth(provider, previous: previousHealth)
+    if !allowKeychainInteraction {
+      let status = await self.serviceStatusClient.fetch(provider)
+      guard isCurrent() else { return }
+      self.states[provider]?.serviceStatus = status
+      self.reportServiceHealth(provider, previous: previousHealth)
+    }
+    var providerFetchSucceeded = false
     do {
       let previous = self.states[provider]?.snapshot
       let fetched = try await fetcher.fetch()
@@ -1051,6 +1101,8 @@ final class UsageStore {
       let snapshot = fetched.withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
       self.states[provider]?.error = nil
+      self.states[provider]?.requiresClaudeKeychainAccess = false
+      providerFetchSucceeded = true
       self.notifications.update(
         previous: previous,
         current: snapshot,
@@ -1061,6 +1113,19 @@ final class UsageStore {
       // The cached snapshot is deliberately kept: a failed refresh should leave
       // the last known numbers on screen with an error beside them.
       self.states[provider]?.error = String(error.localizedDescription.prefix(500))
+      let requiresClaudeKeychainAccess =
+        provider == .anthropic
+        && (error as? UsageProviderError) == .keychainConsentRequired
+      self.states[provider]?.requiresClaudeKeychainAccess = requiresClaudeKeychainAccess
+      if requiresClaudeKeychainAccess {
+        self.defaults.set(false, forKey: "anthropic.keychainReadAllowed")
+      }
+    }
+    if allowKeychainInteraction, providerFetchSucceeded {
+      let status = await self.serviceStatusClient.fetch(provider)
+      guard isCurrent() else { return }
+      self.states[provider]?.serviceStatus = status
+      self.reportServiceHealth(provider, previous: previousHealth)
     }
     guard isCurrent() else { return }
     self.reportStaleness(provider)

@@ -431,8 +431,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Launching at login is persistence, so it waits for the checkbox in
     // Settings rather than being arranged on the user's behalf.
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-      self?.statusController?.showMenu()
+      guard let self, let store = self.store else { return }
+      if Self.shouldOfferClaudeKeychainSetup(
+        hasCredential: store.claudeKeychainCredentialAvailable,
+        accessAllowed: store.claudeKeychainReadAllowed)
+      {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Connect Claude to Reserve?"
+        alert.informativeText =
+          "Reserve found your Claude sign-in securely stored on this Mac. Allow read-only "
+          + "access to show your remaining plan limits. Reserve never copies or stores the "
+          + "sign-in. If macOS asks, choose Always Allow so future refreshes stay automatic."
+        alert.addButton(withTitle: "Allow Access")
+        alert.addButton(withTitle: "Not Now")
+        if alert.runModal() == .alertFirstButtonReturn {
+          store.allowClaudeKeychainAccess()
+        }
+      }
+      self.statusController?.showMenu()
     }
+  }
+
+  static func shouldOfferClaudeKeychainSetup(
+    hasCredential: Bool,
+    accessAllowed: Bool
+  ) -> Bool {
+    hasCredential && !accessAllowed
   }
 
   @objc private func applicationBecameActive() {
@@ -588,6 +614,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       failures.append(contentsOf: observation.failures)
       failures.append(contentsOf: LifecycleSelfTest.checkGeometry().failures)
       failures.append(contentsOf: LifecycleSelfTest.checkSpinnerGeometry().failures)
+      failures.append(contentsOf: LifecycleSelfTest.checkLocalActivityWithoutPlanLimits().failures)
 
       let providerAnchor = LifecycleSelfTest.checkProviderSelectionAnchor(
         store: store, controller: statusController)
@@ -630,7 +657,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             + "and \(AppearanceTheme.allCases.count) themes, provider selection keeps the popover "
             + "anchored, opening keeps the status item fixed, provider disclosure stays anchored "
             + "and never costs a card, enabling a provider moves only that provider, and the "
-            + "store notifies every observer"
+            + "store notifies every observer; local activity stays distinct from plan limits"
           : "\(failures.count) lifecycle failures: " + failures.prefix(12).joined(separator: " | "))
     }
   }

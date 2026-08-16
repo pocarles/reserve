@@ -571,6 +571,67 @@ enum LifecycleSelfTest {
     return result
   }
 
+  /// Local session activity and provider-reported plan limits are independent.
+  /// A signed-out card must say so before someone opens its detail layer, or
+  /// the locally reconstructed token totals look like contradictory live data.
+  static func checkLocalActivityWithoutPlanLimits() -> Result {
+    var result = Result()
+    let now = Date()
+    var missingCLI = ProviderViewState(provider: .grok)
+    missingCLI.error = "Grok Build CLI is not installed."
+    result.expect(
+      !AllowanceBuilder.needsConnection(missingCLI),
+      "a missing provider CLI is still presented as an authentication problem")
+    var unavailable = ProviderViewState(provider: .anthropic)
+    unavailable.error = "Anthropic usage request failed: The Internet connection appears offline."
+    result.expect(
+      !AllowanceBuilder.needsConnection(unavailable),
+      "a provider availability failure is still presented as an authentication problem")
+    var signedOut = ProviderViewState(provider: .anthropic)
+    signedOut.error = "Claude OAuth credentials were not found. Use Sign in to authenticate."
+    result.expect(
+      AllowanceBuilder.needsConnection(signedOut),
+      "missing provider credentials do not offer the sign-in recovery action")
+    result.expect(
+      AppDelegate.shouldOfferClaudeKeychainSetup(hasCredential: true, accessAllowed: false),
+      "first launch does not offer access when a Claude Keychain sign-in is available")
+    result.expect(
+      !AppDelegate.shouldOfferClaudeKeychainSetup(hasCredential: true, accessAllowed: true),
+      "first launch asks again after Claude Keychain access was already enabled")
+    let summary = ProviderSummary(
+      provider: .anthropic,
+      planName: "Plan",
+      allowances: [],
+      paceState: .unknown,
+      serviceStatus: nil,
+      isConnecting: false,
+      isRefreshing: false,
+      needsConnection: true,
+      requiresClaudeKeychainAccess: true,
+      error: "Anthropic sign-in was not completed.",
+      lastUpdated: nil,
+      localUsage: LocalUsageSummary(
+        provider: .anthropic, periodDays: 30, inputTokens: 100, outputTokens: 20,
+        apiEquivalentCostUSD: 1, todayTokens: 12),
+      subscriptionCostUSD: 20,
+      quotaSource: nil)
+    let card = ProviderDashboardCard(
+      summary: summary, now: now, isSelectedForMenuBar: false,
+      connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+    card.layoutSubtreeIfNeeded()
+    let descendants = self.descendants(of: card)
+    let signIn = descendants.compactMap { $0 as? NSButton }
+      .first { $0.identifier?.rawValue == "connect-anthropic" }
+    result.expect(
+      signIn?.title == "Allow access",
+      "the Claude Keychain recovery action does not say what it will do")
+    let copy = descendants.compactMap { $0 as? NSTextField }.map(\.stringValue)
+    result.expect(
+      copy.contains("Claude sign-in found · allow access for plan limits"),
+      "a Claude Keychain sign-in does not explain the access required for plan limits")
+    return result
+  }
+
   // MARK: - Observation
 
   /// Every surface has to see the same store. A single-callback store silently

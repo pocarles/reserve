@@ -239,7 +239,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         self.section(
           title: nil,
           footer: "Reserve detects the provider tools installed on this Mac and reuses their "
-            + "existing sign-ins. Claude Keychain reuse stays off until you enable it. "
+            + "existing sign-ins. If Claude uses Keychain, Reserve asks before reading it. "
             + "Open a provider for its plan, sources and permissions.",
           rows: rows)
       ])
@@ -668,7 +668,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     ]
     if provider == .anthropic {
       let checkbox = NSButton(
-        checkboxWithTitle: "Read my Claude Code sign-in from the Keychain",
+        checkboxWithTitle: "Allow Reserve to read my Claude sign-in",
         target: self, action: #selector(self.keychainChanged(_:)))
       checkbox.identifier = NSUserInterfaceItemIdentifier("settings-automatic-claude")
       checkbox.state = self.store.claudeKeychainReadAllowed ? .on : .off
@@ -952,7 +952,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func keychainChanged(_ sender: NSButton) {
-    self.store.claudeKeychainReadAllowed = sender.state == .on
+    if sender.state == .on {
+      self.store.allowClaudeKeychainAccess()
+    } else {
+      self.store.claudeKeychainReadAllowed = false
+    }
   }
 
   @objc private func intervalChanged(_ sender: NSPopUpButton) {

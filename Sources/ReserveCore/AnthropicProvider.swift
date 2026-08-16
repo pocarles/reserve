@@ -10,17 +10,20 @@ public struct AnthropicProvider: UsageProvider {
   public let id: ProviderID = .anthropic
   private let environment: [String: String]
   private let allowKeychainRead: Bool
+  private let allowKeychainInteraction: Bool
   private let requestHandler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
   private let rateLimitGate: ClaudeRateLimitGate
 
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     allowKeychainRead: Bool = false,
+    allowKeychainInteraction: Bool = false,
     session: URLSession? = nil
   ) {
     let session = session ?? ProviderHTTPSession.shared
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
+    self.allowKeychainInteraction = allowKeychainInteraction
     self.requestHandler = {
       try await ProviderHTTPSession.boundedData(
         for: $0, using: session, maximumBytes: 1_048_576)
@@ -31,11 +34,13 @@ public struct AnthropicProvider: UsageProvider {
   init(
     environment: [String: String],
     allowKeychainRead: Bool,
+    allowKeychainInteraction: Bool = false,
     requestHandler: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse),
     rateLimitGate: ClaudeRateLimitGate
   ) {
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
+    self.allowKeychainInteraction = allowKeychainInteraction
     self.requestHandler = requestHandler
     self.rateLimitGate = rateLimitGate
   }
@@ -45,8 +50,8 @@ public struct AnthropicProvider: UsageProvider {
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     }
     let credentials = try await ClaudeCredentialLoader.load(
-      environment: self.environment,
-      allowKeychainRead: self.allowKeychainRead)
+      environment: self.environment, allowKeychainRead: self.allowKeychainRead,
+      allowKeychainInteraction: self.allowKeychainInteraction)
     let response: ClaudeUsageResponse
     do {
       response = try await self.fetchUsage(accessToken: credentials.accessToken)
@@ -57,7 +62,7 @@ public struct AnthropicProvider: UsageProvider {
         }
       #endif
       throw UsageProviderError.unauthorized(
-        "Claude authentication expired. Click Connect to sign in again.")
+        "Claude authentication expired. Use Sign in to authenticate again.")
     }
 
     var windows: [UsageWindow] = []
@@ -112,6 +117,15 @@ public struct AnthropicProvider: UsageProvider {
     await ClaudeRateLimitGate.shared.clear()
   }
 
+  /// Detects the item without reading its secret or presenting a prompt.
+  public static func keychainCredentialIsAvailableWithoutPrompt() -> Bool {
+    #if canImport(Security)
+      ClaudeCredentialLoader.keychainItemExistsWithoutPrompt()
+    #else
+      false
+    #endif
+  }
+
   private func fetchUsage(accessToken: String) async throws -> ClaudeUsageResponse {
     guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
       throw UsageProviderError.invalidResponse("invalid Anthropic endpoint")
@@ -143,7 +157,7 @@ public struct AnthropicProvider: UsageProvider {
       await self.rateLimitGate.clear()
     case 401:
       throw UsageProviderError.unauthorized(
-        "Claude authentication expired. Click Connect to sign in again.")
+        "Claude authentication expired. Use Sign in to authenticate again.")
     case 429:
       let retryAt = Self.conservativeRetryDate(
         retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
@@ -224,17 +238,11 @@ struct ClaudeCredentials: Sendable {
 }
 
 enum ClaudeCredentialLoader {
-  static func load(environment: [String: String], allowKeychainRead: Bool) async throws
-    -> ClaudeCredentials
-  {
-    #if canImport(Security)
-      if allowKeychainRead,
-        let credentials = try await self.keychainCredentialsWithoutPrompt()
-      {
-        return credentials
-      }
-    #endif
-
+  static func load(
+    environment: [String: String],
+    allowKeychainRead: Bool,
+    allowKeychainInteraction: Bool = false
+  ) async throws -> ClaudeCredentials {
     for url in self.credentialURLs(environment: environment) {
       if let data = BoundedFileReader.read(url, maximumBytes: 1_048_576),
         let credentials = try? self.decode(data: data, source: "Claude OAuth file")
@@ -244,14 +252,18 @@ enum ClaudeCredentialLoader {
     }
 
     #if canImport(Security)
+      if allowKeychainRead,
+        let credentials = try await self.keychainCredentials(
+          allowInteraction: allowKeychainInteraction)
+      {
+        return credentials
+      }
       if self.keychainItemExistsWithoutPrompt() {
-        if !allowKeychainRead { throw UsageProviderError.keychainConsentRequired }
-        throw UsageProviderError.credentialsNotFound(
-          "Claude Keychain credentials are unusable. Click Connect to sign in again.")
+        throw UsageProviderError.keychainConsentRequired
       }
     #endif
     throw UsageProviderError.credentialsNotFound(
-      "Claude OAuth credentials were not found. Click Connect to sign in.")
+      "Claude OAuth credentials were not found. Use Sign in to authenticate.")
   }
 
   static func decode(data: Data, source: String) throws -> ClaudeCredentials {
@@ -302,9 +314,15 @@ enum ClaudeCredentialLoader {
     /// OAuth token on its stdout on every refresh, and attributed the access to
     /// `security` rather than to Reserve. `SecItemCopyMatching` keeps the secret
     /// in this process's memory and lets macOS attribute the access honestly.
-    private static func keychainCredentialsWithoutPrompt() async throws -> ClaudeCredentials? {
+    private static func keychainCredentials(allowInteraction: Bool) async throws
+      -> ClaudeCredentials?
+    {
       let context = LAContext()
-      context.interactionNotAllowed = true
+      context.interactionNotAllowed = !allowInteraction
+      if allowInteraction {
+        context.localizedReason =
+          "Reserve needs read-only access to show your Claude plan limits."
+      }
       let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: "Claude Code-credentials",
@@ -314,10 +332,26 @@ enum ClaudeCredentialLoader {
       ]
       var result: CFTypeRef?
       let status = SecItemCopyMatching(query as CFDictionary, &result)
-      guard status == errSecSuccess, let data = result as? Data, data.count <= 1_048_576 else {
-        return nil
+      if status == errSecItemNotFound { return nil }
+      if status == errSecInteractionNotAllowed || status == errSecUserCanceled
+        || status == errSecAuthFailed
+      {
+        throw UsageProviderError.keychainConsentRequired
       }
-      return try? self.decode(data: data, source: "Claude Keychain")
+      guard status == errSecSuccess, let data = result as? Data else {
+        throw UsageProviderError.credentialsNotFound(
+          "Reserve could not read the Claude sign-in from Keychain.")
+      }
+      guard data.count <= 1_048_576 else {
+        throw UsageProviderError.credentialsNotFound(
+          "The Claude Keychain item is larger than Reserve can safely read.")
+      }
+      do {
+        return try self.decode(data: data, source: "Claude Keychain")
+      } catch {
+        throw UsageProviderError.credentialsNotFound(
+          "The Claude Keychain item does not contain a usable subscription sign-in.")
+      }
     }
   #endif
 }

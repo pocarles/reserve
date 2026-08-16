@@ -84,6 +84,7 @@ struct ProviderSummary {
   let isConnecting: Bool
   let isRefreshing: Bool
   let needsConnection: Bool
+  let requiresClaudeKeychainAccess: Bool
   let error: String?
   let lastUpdated: Date?
   /// Detail-layer material, kept out of the glance view.
@@ -148,6 +149,7 @@ enum AllowanceBuilder {
       isConnecting: state.isConnecting,
       isRefreshing: state.isRefreshing,
       needsConnection: Self.needsConnection(state),
+      requiresClaudeKeychainAccess: state.requiresClaudeKeychainAccess,
       error: state.error,
       lastUpdated: state.snapshot?.fetchedAt,
       localUsage: state.localUsage,
@@ -178,8 +180,7 @@ enum AllowanceBuilder {
 
   static func needsConnection(_ state: ProviderViewState) -> Bool {
     guard let error = state.error?.lowercased() else { return state.snapshot == nil }
-    return state.snapshot == nil
-      || ["auth", "credential", "keychain", "sign in"].contains { error.contains($0) }
+    return ["auth", "credential", "keychain", "sign in"].contains { error.contains($0) }
   }
 
   /// Automatic menu-bar mode keeps the Reserve identity while choosing the
