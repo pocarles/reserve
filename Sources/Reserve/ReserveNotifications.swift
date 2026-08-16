@@ -48,8 +48,10 @@ final class ReserveNotifications {
   }
 
   func requestAuthorizationIfNeeded() {
-    guard self.active, self.isEnabled else { return }
-    self.center?.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    guard self.active, self.isEnabled, let center = self.center else { return }
+    Task {
+      _ = try? await center.requestAuthorization(options: [.alert, .sound])
+    }
   }
 
   var isEnabled: Bool {
