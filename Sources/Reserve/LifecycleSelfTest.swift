@@ -184,12 +184,24 @@ enum LifecycleSelfTest {
 
     audit("collapsed")
     for provider in enabled {
+      let xBeforeExpansion = window.frame.minX
       toggle(provider)
+      self.settle()
+      result.expect(
+        abs(window.frame.minX - xBeforeExpansion) < 0.5,
+        "expanding \(provider.rawValue) moved the popover horizontally by "
+          + "\(abs(window.frame.minX - xBeforeExpansion))pt")
       result.expect(
         store.expandedProvider == provider,
         "expanding \(provider.rawValue) did not record the expansion")
       audit("expanded \(provider.rawValue)")
+      let xBeforeCollapse = window.frame.minX
       toggle(provider)
+      self.settle()
+      result.expect(
+        abs(window.frame.minX - xBeforeCollapse) < 0.5,
+        "collapsing \(provider.rawValue) moved the popover horizontally by "
+          + "\(abs(window.frame.minX - xBeforeCollapse))pt")
       result.expect(
         store.expandedProvider == nil,
         "collapsing \(provider.rawValue) did not clear the expansion")
@@ -199,7 +211,13 @@ enum LifecycleSelfTest {
     if enabled.count >= 2 {
       toggle(enabled[0])
       audit("open \(enabled[0].rawValue)")
+      let xBeforeSwitch = window.frame.minX
       toggle(enabled[1])
+      self.settle()
+      result.expect(
+        abs(window.frame.minX - xBeforeSwitch) < 0.5,
+        "switching expanded providers moved the popover horizontally by "
+          + "\(abs(window.frame.minX - xBeforeSwitch))pt")
       audit("switched to \(enabled[1].rawValue)")
       result.expect(
         store.expandedProvider == enabled[1],
@@ -207,6 +225,95 @@ enum LifecycleSelfTest {
       toggle(enabled[1])
       audit("collapsed after switch")
     }
+    return result
+  }
+
+  /// Selecting a provider changes both the status-item image and its text. The
+  /// open popover must keep the same anchor until it closes, otherwise the whole
+  /// dashboard visibly jumps sideways under the pointer.
+  static func checkProviderSelectionAnchor(
+    store: UsageStore,
+    controller: StatusItemController
+  ) -> Result {
+    var result = Result()
+    guard let window = controller.dashboardWindowForTesting else {
+      result.failures.append("popover window was not created for the provider anchor check")
+      return result
+    }
+    let originalProvider = store.menuBarProvider
+    let originalRemaining = store.menuBarShowsRemaining
+    defer {
+      store.menuBarProvider = originalProvider
+      store.menuBarShowsRemaining = originalRemaining
+    }
+    guard
+      let target = ProviderID.allCases.first(where: {
+        store.isEnabled($0) && $0 != originalProvider
+      }),
+      let card = self.visibleCards(in: window).first(where: {
+        self.providerIdentifier($0) == "provider-card-\(target.rawValue)"
+      })
+    else {
+      result.failures.append("no alternate provider card was available for the anchor check")
+      return result
+    }
+
+    let origin = window.frame.origin
+    let statusItemLength = controller.statusItemLengthForTesting
+    card.selectForMenuBar()
+    self.settle(0.15)
+    let moved = hypot(window.frame.origin.x - origin.x, window.frame.origin.y - origin.y)
+    result.expect(moved < 0.5, "selecting \(target.rawValue) moved the popover by \(moved)pt")
+    result.expect(
+      controller.statusItemLengthForTesting == statusItemLength,
+      "selecting \(target.rawValue) changed the status-item width under the open popover")
+    result.expect(
+      controller.statusItemProviderForTesting == target,
+      "selecting \(target.rawValue) did not update the menu-bar provider immediately")
+    result.expect(
+      controller.statusItemLengthIsLockedForTesting,
+      "the status-item width was not locked under the open popover")
+    return result
+  }
+
+  /// AppKit can move an anchored popover during its resize animation even when
+  /// the final frame returns to the original position. Sample the whole
+  /// transition so a visible sideways jump cannot hide behind a stable endpoint.
+  static func checkAnimatedDisclosureAnchor(
+    store: UsageStore,
+    controller: StatusItemController,
+    toggle: (ProviderID) -> Void
+  ) -> Result {
+    var result = Result()
+    guard let window = controller.dashboardWindowForTesting,
+      let provider = ProviderID.allCases.first(where: { store.isEnabled($0) })
+    else {
+      result.failures.append("no provider was available for the animated disclosure anchor check")
+      return result
+    }
+
+    func maximumHorizontalMovement(from origin: CGFloat) -> CGFloat {
+      var maximum: CGFloat = 0
+      for _ in 0..<30 {
+        self.settle(0.01)
+        maximum = max(maximum, abs(window.frame.minX - origin))
+      }
+      return maximum
+    }
+
+    let expansionOrigin = window.frame.minX
+    toggle(provider)
+    let expansionMovement = maximumHorizontalMovement(from: expansionOrigin)
+    result.expect(
+      expansionMovement < 0.5,
+      "animated expansion moved the popover horizontally by \(expansionMovement)pt")
+
+    let collapseOrigin = window.frame.minX
+    toggle(provider)
+    let collapseMovement = maximumHorizontalMovement(from: collapseOrigin)
+    result.expect(
+      collapseMovement < 0.5,
+      "animated collapse moved the popover horizontally by \(collapseMovement)pt")
     return result
   }
 

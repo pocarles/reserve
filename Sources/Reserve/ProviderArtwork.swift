@@ -1,9 +1,9 @@
 import AppKit
 import ReserveCore
 
-/// Neutral provider identity used when Reserve cannot ship an exact, licensed
-/// provider mark. These glyphs are generated locally and contain no third-party
-/// artwork.
+/// First-party provider marks bundled without geometric or colour changes.
+/// A neutral initial remains as a packaging-failure fallback so a missing
+/// resource cannot leave an invisible control behind.
 @MainActor
 enum ProviderArtwork {
   private static var cache: [ProviderID: NSImage] = [:]
@@ -12,6 +12,31 @@ enum ProviderArtwork {
     if let cached = Self.cache[provider] {
       return cached.copy() as? NSImage ?? cached
     }
+    let image = self.bundledImage(for: provider) ?? self.fallbackImage(for: provider)
+    image.accessibilityDescription = provider.displayName
+    Self.cache[provider] = image
+    return image.copy() as? NSImage ?? image
+  }
+
+  static func hasBundledMark(for provider: ProviderID) -> Bool {
+    self.bundledImage(for: provider) != nil
+  }
+
+  private static func bundledImage(for provider: ProviderID) -> NSImage? {
+    guard
+      let url = Bundle.module.url(
+        forResource: provider.rawValue,
+        withExtension: "svg",
+        subdirectory: "ProviderLogos"),
+      let image = NSImage(contentsOf: url), image.isValid
+    else { return nil }
+    // OpenAI and xAI publish monochrome marks. Template rendering supplies the
+    // surrounding label colour without changing their first-party geometry.
+    image.isTemplate = provider != .anthropic
+    return image
+  }
+
+  private static func fallbackImage(for provider: ProviderID) -> NSImage {
     let letter: String =
       switch provider {
       case .openAI: "O"
@@ -33,8 +58,6 @@ enum ProviderArtwork {
       return true
     }
     image.isTemplate = true
-    image.accessibilityDescription = provider.displayName
-    Self.cache[provider] = image
-    return image.copy() as? NSImage ?? image
+    return image
   }
 }

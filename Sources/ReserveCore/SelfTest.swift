@@ -19,6 +19,17 @@ public enum ReserveSelfTests {
     else { throw Failure("usage percentage clamping") }
     record("usage percentage clamping")
 
+    let unnamedSnapshot = UsageSnapshot(
+      provider: .grok,
+      windows: [UsageWindow(id: "weekly", label: "Weekly", usedPercent: 1)],
+      source: "metadata fallback check")
+    guard unnamedSnapshot.withFallbackPlanName("X Premium+").planName == "X Premium+",
+      UsageSnapshot(
+        provider: .grok, planName: "SuperGrok", windows: [], source: "named"
+      ).withFallbackPlanName("X Premium+").planName == "SuperGrok"
+    else { throw Failure("snapshot plan-name fallback") }
+    record("snapshot plan-name fallback")
+
     let saturated = LocalUsageSummary(
       provider: .anthropic, periodDays: 30,
       inputTokens: .max, cachedInputTokens: .max,
@@ -346,8 +357,48 @@ public enum ReserveSelfTests {
     else { throw Failure("Grok billing decoding") }
     record("Grok billing decoding")
 
+    let unifiedGrokData = Data(
+      #"{"config":{"creditUsagePercent":25,"onDemandCap":{"val":4000},"onDemandUsed":{"val":1000},"isUnifiedBillingUser":true}}"#.utf8)
+    let unifiedGrok = try JSONDecoder().decode(GrokBillingEnvelope.self, from: unifiedGrokData)
+    guard unifiedGrok.config?.usedPercent == 25,
+      unifiedGrok.config?.includedSpend?.label == "On-demand cap",
+      unifiedGrok.config?.includedSpend?.usedMinorUnits == 1000,
+      unifiedGrok.config?.includedSpend?.limitMinorUnits == 4000,
+      unifiedGrok.config?.isUnifiedBillingUser == true
+    else { throw Failure("Grok unified billing decoding") }
+    record("Grok unified billing decoding")
+
+    let incompleteUnifiedGrokData = Data(
+      #"{"config":{"onDemandCap":{"val":4000},"onDemandUsed":{"val":1000},"isUnifiedBillingUser":true}}"#.utf8)
+    let incompleteUnifiedGrok = try JSONDecoder().decode(
+      GrokBillingEnvelope.self, from: incompleteUnifiedGrokData)
+    guard incompleteUnifiedGrok.config?.usedPercent == nil else {
+      throw Failure("Grok on-demand spend treated as included allowance")
+    }
+    record("Grok incomplete unified billing")
+
+    let resetUnifiedGrokData = Data(
+      #"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-15T22:03:41Z","end":"2026-08-22T22:03:41Z"},"onDemandCap":{},"onDemandUsed":{},"productUsage":[{"product":"GrokBuild"},{"product":"GrokChat","usagePercent":0}],"isUnifiedBillingUser":true}}"#.utf8)
+    let resetUnifiedGrok = try JSONDecoder().decode(
+      GrokBillingEnvelope.self, from: resetUnifiedGrokData)
+    guard resetUnifiedGrok.config?.usedPercent == 0,
+      resetUnifiedGrok.config?.productUsage?.allSatisfy({ $0.usagePercent == 0 }) == true
+    else {
+      throw Failure("Grok reset-period zero normalization")
+    }
+    record("Grok reset-period zero normalization")
+
+    let grokSettings = try JSONDecoder().decode(
+      GrokRemoteSettings.self,
+      from: Data(#"{"subscription_tier_display":"X Premium+"}"#.utf8))
+    guard grokSettings.subscriptionTierDisplay == "X Premium+" else {
+      throw Failure("Grok remote tier decoding")
+    }
+    record("Grok remote tier decoding")
+
     guard SemanticVersion.first(in: "grok 1.0.3") == SemanticVersion(1, 0, 3),
-      SemanticVersion(1, 0, 3) > SemanticVersion(0, 1, 210)
+      SemanticVersion(1, 0, 3) > SemanticVersion(0, 1, 210),
+      SemanticVersion(1, 0, 3).headerValue == "1.0.3"
     else { throw Failure("semantic version parsing") }
     record("semantic version parsing")
 

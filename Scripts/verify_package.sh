@@ -31,7 +31,11 @@ app=$1
 plist="$app/Contents/Info.plist"
 binary="$app/Contents/MacOS/Reserve"
 privacy="$app/Contents/Resources/PrivacyInfo.xcprivacy"
-[[ -f "$plist" && -x "$binary" && -f "$privacy" ]] || {
+provider_logos="$app/Contents/Resources/Reserve_Reserve.bundle/ProviderLogos"
+[[ -f "$plist" && -x "$binary" && -f "$privacy" \
+  && -f "$provider_logos/openAI.svg" \
+  && -f "$provider_logos/anthropic.svg" \
+  && -f "$provider_logos/grok.svg" ]] || {
   echo "error: package is missing required app files" >&2
   exit 65
 }

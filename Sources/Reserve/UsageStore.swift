@@ -1006,8 +1006,9 @@ final class UsageStore {
     self.reportServiceHealth(provider, previous: previousHealth)
     do {
       let previous = self.states[provider]?.snapshot
-      let snapshot = try await fetcher.fetch()
+      let fetched = try await fetcher.fetch()
       guard isCurrent() else { return }
+      let snapshot = fetched.withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
       self.states[provider]?.error = nil
       self.notifications.update(

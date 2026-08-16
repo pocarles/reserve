@@ -255,8 +255,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     ].map { self.notificationCheckbox(title: $0.0, key: $0.1) }
 
     let advanced = [
-      self.notificationCheckbox(title: "Notify at 50% used", key: "threshold50"),
-      self.notificationCheckbox(title: "Notify at 90% used", key: "threshold90"),
+      self.notificationCheckbox(title: "Notify at 50% left", key: "threshold50"),
+      self.notificationCheckbox(title: "Notify at 10% left", key: "threshold90"),
       self.notificationCheckbox(title: "Notify before a plan renewal", key: "planRenewal"),
       self.notificationCheckbox(
         title: "Notify when a 5-hour window resets", key: "fiveHourRenewal"),
@@ -332,8 +332,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           title: "Daily tokens",
           footer: charts.isEmpty
             ? "No local activity has been recorded yet."
-            : "One bar per day, newest on the right. Bars are scaled to each provider's own "
-              + "busiest day, so the shapes show rhythm rather than relative volume.",
+            : "One bar per day, newest on the right. A compressed square-root scale keeps "
+              + "ordinary days visible beside outliers. Each provider uses its own peak.",
           rows: charts.isEmpty ? [SettingsLabel("—", size: 12, color: .tertiaryLabelColor)] : charts),
         self.section(
           title: "Estimated plan value",
@@ -1269,6 +1269,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.pane = .notifications
     self.applyPane(animated: false)
     let notificationIDs = identifiers()
+    let notificationLabels = descendants().compactMap { ($0 as? NSButton)?.title }
     let smartKeys = ["deficit", "exhausted", "weeklyRenewal", "stale", "incident"]
     let advancedKeys = ["threshold50", "threshold90", "planRenewal", "fiveHourRenewal", "sound"]
     let notificationsSuccess =
@@ -1276,6 +1277,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && (smartKeys + advancedKeys).allSatisfy {
         notificationIDs.contains("notification.option.\($0)")
       }
+      && notificationLabels.contains("Notify at 50% left")
+      && notificationLabels.contains("Notify at 10% left")
+      && !notificationLabels.contains { $0.hasSuffix("% used") }
 
     // Appearance keeps the four identities as accents, and light/dark is the
     // system's business.
@@ -1320,9 +1324,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.pane = .insights
     self.applyPane(animated: false)
     let insightIDs = identifiers()
+    let insightLabels = descendants().compactMap { ($0 as? NSTextField)?.stringValue }
     let insightsSuccess =
       ProviderID.allCases.allSatisfy { insightIDs.contains("insight-\($0.rawValue)") }
       && insightIDs.contains("insights-total")
+      && insightLabels.contains { $0.contains("compressed square-root scale") }
 
     self.pane = .privacy
     self.applyPane(animated: false)
@@ -1491,10 +1497,9 @@ private final class MenuBarPreview: NSView {
       : NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: "Reserve")
     var views: [NSView] = []
     if let image {
-      image.isTemplate = true
       image.size = NSSize(width: 14, height: 14)
       let logo = NSImageView(image: image)
-      logo.contentTintColor = .labelColor
+      logo.contentTintColor = image.isTemplate ? .labelColor : nil
       logo.translatesAutoresizingMaskIntoConstraints = false
       logo.widthAnchor.constraint(equalToConstant: 14).isActive = true
       views.append(logo)
@@ -1704,7 +1709,7 @@ private final class SettingsProviderLogo: NSView {
     self.setAccessibilityElement(false)
     let image = NSImageView(image: ProviderArtwork.image(for: provider))
     image.setAccessibilityElement(false)
-    image.contentTintColor = .labelColor
+    image.contentTintColor = provider != .anthropic ? .labelColor : nil
     image.imageScaling = .scaleProportionallyUpOrDown
     image.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(image)

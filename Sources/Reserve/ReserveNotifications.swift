@@ -194,11 +194,12 @@ final class ReserveNotifications {
       let title: String
       let body: String
       if threshold == 100 {
-        title = "\(current.provider.displayName) allowance exhausted"
-        body = "You have used all of your \(window.label.lowercased()) allowance."
+        title = "No \(current.provider.displayName) allowance left"
+        body = "Your \(window.label.lowercased()) allowance has no capacity left."
       } else {
-        title = "\(current.provider.displayName) usage reached \(threshold)%"
-        body = "Your \(window.label.lowercased()) allowance is \(threshold)% used."
+        let remaining = 100 - threshold
+        title = "\(current.provider.displayName) allowance: \(remaining)% left"
+        body = "Your \(window.label.lowercased()) allowance has \(remaining)% left."
       }
       self.deliver(identifier: identifier, title: title, body: body)
     }

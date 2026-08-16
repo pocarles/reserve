@@ -236,6 +236,21 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public var highestUsedPercent: Double? {
     self.windows.map(\.usedPercent).max()
   }
+
+  /// Some provider refresh endpoints omit stable account metadata even when
+  /// their quota data is current. Keep the last reported plan label until the
+  /// provider supplies a replacement; usage, resets and spend remain live.
+  public func withFallbackPlanName(_ fallback: String?) -> UsageSnapshot {
+    guard self.planName == nil, let fallback, !fallback.isEmpty else { return self }
+    return UsageSnapshot(
+      provider: self.provider,
+      planName: fallback,
+      windows: self.windows,
+      fetchedAt: self.fetchedAt,
+      source: self.source,
+      includedSpend: self.includedSpend,
+      billingRenewsAt: self.billingRenewsAt)
+  }
 }
 
 public struct IncludedSpend: Codable, Equatable, Sendable {

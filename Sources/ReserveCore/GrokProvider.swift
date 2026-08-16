@@ -33,12 +33,22 @@ public struct GrokProvider: UsageProvider {
     // that method first starts a large, short-lived agent only to receive
     // "method not found". Use the authenticated billing request implemented by
     // the official CLI directly instead.
-    let response = try await self.fetchThroughOfficialCLIProxy(version: versionOutput)
+    let credentials = try GrokCredentialLoader.load(environment: self.environment)
+    async let remoteTier = self.fetchSubscriptionTier(
+      version: version.headerValue, credentials: credentials)
+    let response = try await self.fetchThroughOfficialCLIProxy(
+      version: version.headerValue, credentials: credentials)
+    let fetchedTier = await remoteTier
 
     guard let config = response.config ?? response.legacyConfig else {
       throw UsageProviderError.unavailable("Grok did not return personal subscription usage.")
     }
     guard let percent = config.usedPercent else {
+      if config.isUnifiedBillingUser == true {
+        throw UsageProviderError.unavailable(
+          "Grok's billing service omitted the weekly usage percentage for this unified billing account."
+        )
+      }
       throw UsageProviderError.unavailable("Grok billing did not include a usage percentage.")
     }
 
@@ -79,7 +89,7 @@ public struct GrokProvider: UsageProvider {
 
     return UsageSnapshot(
       provider: .grok,
-      planName: response.subscriptionTier,
+      planName: response.subscriptionTier ?? fetchedTier,
       windows: windows,
       source: "Grok Build billing API",
       includedSpend: config.includedSpend,
@@ -92,8 +102,10 @@ public struct GrokProvider: UsageProvider {
     return (27 * 24 * 60)...(32 * 24 * 60) ~= minutes
   }
 
-  private func fetchThroughOfficialCLIProxy(version: String) async throws -> GrokBillingEnvelope {
-    let credentials = try GrokCredentialLoader.load(environment: self.environment)
+  private func fetchThroughOfficialCLIProxy(
+    version: String,
+    credentials: GrokCredentials
+  ) async throws -> GrokBillingEnvelope {
     guard let url = URL(string: "https://cli-chat-proxy.grok.com/v1/billing?format=credits") else {
       throw UsageProviderError.invalidResponse("invalid Grok CLI proxy endpoint")
     }
@@ -105,7 +117,6 @@ public struct GrokProvider: UsageProvider {
     request.setValue("xai-grok-cli", forHTTPHeaderField: "X-XAI-Token-Auth")
     request.setValue(credentials.userID, forHTTPHeaderField: "x-userid")
     request.setValue(version, forHTTPHeaderField: "x-grok-client-version")
-    request.setValue("grok-shell", forHTTPHeaderField: "x-grok-client-identifier")
     request.setValue("headless", forHTTPHeaderField: "x-grok-client-mode")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
 
@@ -138,6 +149,39 @@ public struct GrokProvider: UsageProvider {
       return try JSONDecoder().decode(GrokBillingEnvelope.self, from: data)
     } catch {
       throw UsageProviderError.invalidResponse(error.localizedDescription)
+    }
+  }
+
+  /// The credits response does not carry the account tier. Grok's own billing
+  /// extension enriches it from the authenticated `/settings` response, so the
+  /// direct lightweight path performs the same optional lookup in parallel.
+  private func fetchSubscriptionTier(
+    version: String,
+    credentials: GrokCredentials
+  ) async -> String? {
+    guard let url = URL(string: "https://cli-chat-proxy.grok.com/v1/settings") else { return nil }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 15
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    request.httpShouldHandleCookies = false
+    request.setValue("Bearer \(credentials.key)", forHTTPHeaderField: "Authorization")
+    request.setValue("xai-grok-cli", forHTTPHeaderField: "X-XAI-Token-Auth")
+    request.setValue(credentials.userID, forHTTPHeaderField: "x-userid")
+    request.setValue(version, forHTTPHeaderField: "x-grok-client-version")
+    request.setValue("grok-shell", forHTTPHeaderField: "x-grok-client-identifier")
+    request.setValue("headless", forHTTPHeaderField: "x-grok-client-mode")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    do {
+      let (data, response) = try await ProviderHTTPSession.boundedData(
+        for: request, using: self.session, maximumBytes: 1_048_576)
+      guard (response as? HTTPURLResponse)?.statusCode == 200,
+        let settings = try? JSONDecoder().decode(GrokRemoteSettings.self, from: data)
+      else { return nil }
+      let tier = (settings.subscriptionTierDisplay ?? settings.subscriptionTier)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      return tier?.isEmpty == false ? tier : nil
+    } catch {
+      return nil
     }
   }
 
@@ -223,6 +267,8 @@ struct SemanticVersion: Comparable, Sendable {
     self.patch = patch
   }
 
+  var headerValue: String { "\(self.major).\(self.minor).\(self.patch)" }
+
   static func first(in text: String) -> SemanticVersion? {
     guard let expression = try? NSRegularExpression(pattern: #"(\d+)\.(\d+)\.(\d+)"#),
       let match = expression.firstMatch(
@@ -283,10 +329,23 @@ struct GrokBillingEnvelope: Decodable, Sendable {
           ?? cycle?.billingPeriodStart,
         billingPeriodEnd: try container.decodeIfPresent(String.self, forKey: .billingPeriodEnd)
           ?? cycle?.billingPeriodEnd,
-        productUsage: nil)
+        productUsage: nil,
+        onDemandCap: nil,
+        onDemandUsed: nil,
+        isUnifiedBillingUser: nil)
     } else {
       self.legacyConfig = nil
     }
+  }
+}
+
+struct GrokRemoteSettings: Decodable, Sendable {
+  let subscriptionTierDisplay: String?
+  let subscriptionTier: String?
+
+  enum CodingKeys: String, CodingKey {
+    case subscriptionTierDisplay = "subscription_tier_display"
+    case subscriptionTier = "subscription_tier"
   }
 }
 
@@ -298,26 +357,51 @@ struct GrokBillingConfig: Decodable, Sendable {
   let billingPeriodStart: String?
   let billingPeriodEnd: String?
   let productUsage: [GrokProductUsage]?
+  let onDemandCap: GrokCent?
+  let onDemandUsed: GrokCent?
+  let isUnifiedBillingUser: Bool?
 
   var usedPercent: Double? {
     if let creditUsagePercent { return creditUsagePercent }
-    guard let limit = self.monthlyLimit?.val, limit > 0, let used = self.used?.val else {
-      return nil
+    if let limit = self.monthlyLimit?.val, limit > 0, let used = self.used?.val {
+      return Double(used) / Double(limit) * 100
     }
-    return Double(used) / Double(limit) * 100
+    // The unified credits backend uses proto3 JSON, which omits a zero-valued
+    // percentage immediately after a weekly reset. Grok's own pager maps that
+    // valid-period shape to 0%; require real period bounds so an arbitrary
+    // incomplete response does not become a fabricated allowance.
+    if self.isUnifiedBillingUser == true,
+      let start = UsageDateParser.iso8601(self.currentPeriod?.start),
+      let end = UsageDateParser.iso8601(self.currentPeriod?.end),
+      end > start
+    {
+      return 0
+    }
+    return nil
   }
 
   var includedSpend: IncludedSpend? {
-    guard let limit = self.monthlyLimit?.val, limit > 0, let used = self.used?.val else {
+    if let limit = self.monthlyLimit?.val, limit > 0, let used = self.used?.val {
+      return IncludedSpend(label: "Included credits", usedMinorUnits: used, limitMinorUnits: limit)
+    }
+    guard let limit = self.onDemandCap?.val, limit > 0, let used = self.onDemandUsed?.val else {
       return nil
     }
-    return IncludedSpend(label: "Included credits", usedMinorUnits: used, limitMinorUnits: limit)
+    return IncludedSpend(label: "On-demand cap", usedMinorUnits: used, limitMinorUnits: limit)
   }
 }
 
 struct GrokProductUsage: Decodable, Sendable {
   let product: String
   let usagePercent: Double
+
+  enum CodingKeys: String, CodingKey { case product, usagePercent }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.product = try container.decode(String.self, forKey: .product)
+    self.usagePercent = try container.decodeIfPresent(Double.self, forKey: .usagePercent) ?? 0
+  }
 }
 
 struct GrokUsagePeriod: Decodable, Sendable {
@@ -328,6 +412,13 @@ struct GrokUsagePeriod: Decodable, Sendable {
 
 struct GrokCent: Decodable, Sendable {
   let val: Int
+
+  enum CodingKeys: String, CodingKey { case val }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.val = try container.decodeIfPresent(Int.self, forKey: .val) ?? 0
+  }
 }
 
 struct GrokLegacyUsage: Decodable, Sendable {

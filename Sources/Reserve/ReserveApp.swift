@@ -443,6 +443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       // The status item needs a run-loop turn before its button has a window,
       // and a popover cannot be shown from a view that is not in one yet.
       try? await Task.sleep(for: .milliseconds(600))
+      let statusItemFrameBeforeOpen = statusController.statusItemScreenFrameForTesting
       statusController.showMenu()
       try? await Task.sleep(for: .milliseconds(400))
       guard statusController.isDashboardShownForTesting else {
@@ -557,10 +558,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
 
       var failures: [String] = []
+      if let before = statusItemFrameBeforeOpen,
+        let after = statusController.statusItemScreenFrameForTesting
+      {
+        let movement = abs(after.minX - before.minX)
+        if movement >= 0.5 {
+          failures.append("opening the popover moved the status item left by \(movement)pt")
+        }
+      } else {
+        failures.append("the status-item frame was unavailable for the opening anchor check")
+      }
       let observation = LifecycleSelfTest.checkObservation(store: store)
       failures.append(contentsOf: observation.failures)
       failures.append(contentsOf: LifecycleSelfTest.checkGeometry().failures)
       failures.append(contentsOf: LifecycleSelfTest.checkSpinnerGeometry().failures)
+
+      let providerAnchor = LifecycleSelfTest.checkProviderSelectionAnchor(
+        store: store, controller: statusController)
+      failures.append(contentsOf: providerAnchor.failures)
+
+      statusController.setStressTestAnimationsEnabled(true)
+      let animatedDisclosureAnchor = LifecycleSelfTest.checkAnimatedDisclosureAnchor(
+        store: store, controller: statusController,
+        toggle: { statusController.toggleProviderDetailForTesting($0) })
+      failures.append(contentsOf: animatedDisclosureAnchor.failures)
+      statusController.setStressTestAnimationsEnabled(false)
 
       let disclosure = LifecycleSelfTest.checkDisclosure(
         store: store, controller: statusController,
@@ -581,14 +603,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       if statusController.mouseMonitorCountForTesting != 0 {
         failures.append("mouse monitors survived the popover closing")
       }
+      if statusController.statusItemLengthIsLockedForTesting {
+        failures.append("the status-item width remained locked after the popover closed")
+      }
 
       Self.finishUISelfTest(
         success: failures.isEmpty,
         details: failures.isEmpty
           ? "appearance reaches every open surface across \(AppearanceMode.allCases.count) modes "
-            + "and \(AppearanceTheme.allCases.count) themes, provider disclosure never costs a "
-            + "card, enabling a provider moves only that provider, and the store notifies every "
-            + "observer"
+            + "and \(AppearanceTheme.allCases.count) themes, provider selection keeps the popover "
+            + "anchored, opening keeps the status item fixed, provider disclosure stays anchored "
+            + "and never costs a card, enabling a provider moves only that provider, and the "
+            + "store notifies every observer"
           : "\(failures.count) lifecycle failures: " + failures.prefix(12).joined(separator: " | "))
     }
   }
