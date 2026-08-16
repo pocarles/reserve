@@ -162,6 +162,27 @@ copy_resource_bundle() {
   fi
 }
 
+smoke_test_packaged_app() {
+  local app=$1
+  local stdout_log="$temp_root/package-smoke.stdout"
+  local stderr_log="$temp_root/package-smoke.stderr"
+  local app_pid
+
+  "$app/Contents/MacOS/Reserve" >"$stdout_log" 2>"$stderr_log" &
+  app_pid=$!
+  for _ in {1..20}; do
+    sleep 0.25
+    if ! kill -0 "$app_pid" 2>/dev/null; then
+      wait "$app_pid" || true
+      echo "error: packaged app exited during launch smoke test" >&2
+      sed -n '1,120p' "$stderr_log" >&2
+      exit 65
+    fi
+  done
+  kill -TERM "$app_pid"
+  wait "$app_pid" 2>/dev/null || true
+}
+
 cd "$project_dir"
 mkdir -p "$macos_dir" "$resources_dir"
 
@@ -187,6 +208,10 @@ else
   lipo -create "$arm_bin_dir/$product" "$intel_bin_dir/$product" \
     -output "$macos_dir/$product"
   copy_resource_bundle "$arm_bin_dir"
+  # Keep the compiled-in SwiftPM development fallback paths unavailable for
+  # the launch check so it proves the staged app is self-contained.
+  mv "$arm_bin_dir/Reserve_Reserve.bundle" "$temp_root/arm64-build-resource-bundle"
+  mv "$intel_bin_dir/Reserve_Reserve.bundle" "$temp_root/x86_64-build-resource-bundle"
 fi
 
 cp "$project_dir/Support/Info.plist" "$contents_dir/Info.plist"
@@ -232,6 +257,10 @@ fi
 
 "$project_dir/Scripts/verify_package.sh" --mode "$mode" \
   --version "$version" --build "$build_number" "$stage_app"
+
+if [[ "$mode" != local ]]; then
+  smoke_test_packaged_app "$stage_app"
+fi
 
 if [[ "$mode" == local ]]; then
   final_app="$output_dir/Reserve.app"
