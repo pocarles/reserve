@@ -6,11 +6,27 @@ import ReserveCore
 @main
 enum ReserveApp {
   static func main() {
+    _ = signal(SIGPIPE, SIG_IGN)
     let application = NSApplication.shared
     let delegate = AppDelegate()
     application.delegate = delegate
     withExtendedLifetime(delegate) {
       application.run()
+    }
+  }
+
+  /// `FileHandle.write` cannot translate a broken pipe into `EPIPE` unless the
+  /// process ignores SIGPIPE first. Provider subprocess failures then stay in
+  /// the existing Swift error paths instead of terminating Reserve.
+  static func brokenPipeWriteFailsSafely() -> Bool {
+    let pipe = Pipe()
+    try? pipe.fileHandleForReading.close()
+    defer { try? pipe.fileHandleForWriting.close() }
+    do {
+      try pipe.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
+      return false
+    } catch {
+      return true
     }
   }
 }
@@ -686,7 +702,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func runUISelfTest() {
-    guard let statusController = self.statusController,
+    guard let store = self.store,
+      let statusController = self.statusController,
       let settingsController = self.settingsControllerForUse()
     else {
       Self.finishUISelfTest(success: false, details: "controllers were not created")
@@ -695,8 +712,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let statusResult = statusController.validateForSelfTest(settingsWindow: settingsController.window)
     let settingsResult = settingsController.validateForSelfTest()
-    let success = statusResult.success && settingsResult.success
-    let details = [statusResult.details, settingsResult.details].joined(separator: "; ")
+    let brokenPipeIsSafe = ReserveApp.brokenPipeWriteFailsSafely()
+    let loginCompletionQueuesRefresh = store.exerciseLoginCompletionDuringRefreshForSelfTest()
+    let success = statusResult.success && settingsResult.success && brokenPipeIsSafe
+      && loginCompletionQueuesRefresh
+    let details = [
+      statusResult.details,
+      settingsResult.details,
+      "broken pipe handling=\(brokenPipeIsSafe)",
+      "post-login refresh queue=\(loginCompletionQueuesRefresh)",
+    ].joined(separator: "; ")
     Self.finishUISelfTest(success: success, details: details)
   }
 

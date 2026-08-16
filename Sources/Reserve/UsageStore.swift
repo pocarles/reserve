@@ -81,6 +81,7 @@ final class UsageStore {
   /// The newest refresh request per provider. Results from any older request are
   /// discarded rather than applied.
   private var refreshTokens: [ProviderID: Int] = [:]
+  private var pendingRefreshes: Set<ProviderID> = []
   private var lastRefreshCompletedAt: Date?
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
@@ -216,6 +217,37 @@ final class UsageStore {
       "reserve.stale.\(staleProvider.rawValue)",
       "reserve.incident.\(incidentProvider.rawValue)"
     )
+  }
+
+  /// Exercises the exact successful-login branch while a provider refresh is
+  /// already active. No subprocess or network request is started.
+  func exerciseLoginCompletionDuringRefreshForSelfTest(
+    _ provider: ProviderID = .grok
+  ) -> Bool {
+    guard let originalState = self.states[provider] else { return false }
+    let originalGeneration = self.loginGenerations[provider]
+    let originallyPending = self.pendingRefreshes.contains(provider)
+    var notificationCount = 0
+    let observer = self.observe { notificationCount += 1 }
+    defer {
+      self.removeObserver(observer)
+      self.states[provider] = originalState
+      self.loginGenerations[provider] = originalGeneration
+      if originallyPending {
+        self.pendingRefreshes.insert(provider)
+      } else {
+        self.pendingRefreshes.remove(provider)
+      }
+    }
+
+    self.states[provider]?.isConnecting = true
+    self.states[provider]?.isRefreshing = true
+    let generation = (originalGeneration ?? 0) + 1
+    self.loginGenerations[provider] = generation
+    self.finishLogin(provider, status: 0, generation: generation)
+    return self.states[provider]?.isConnecting == false
+      && self.pendingRefreshes.contains(provider)
+      && notificationCount > 0
   }
 
   /// Whether either standing condition is currently being tracked.
@@ -386,12 +418,17 @@ final class UsageStore {
     if self.shouldRefreshAfterResume(now: now) { self.refreshAll(manual: false) }
   }
 
-  func refresh(_ provider: ProviderID) {
-    guard self.beginRefresh(provider) else { return }
+  @discardableResult
+  func refresh(_ provider: ProviderID, queueIfBusy: Bool = false) -> Bool {
+    guard self.beginRefresh(provider) else {
+      if queueIfBusy { self.pendingRefreshes.insert(provider) }
+      return false
+    }
     Task {
       if provider == .anthropic { await AnthropicProvider.clearPersistedRateLimitBlock() }
       await self.performRefresh(provider)
     }
+    return true
   }
 
   func connect(_ provider: ProviderID) {
@@ -798,10 +835,12 @@ final class UsageStore {
     self.states[provider]?.isConnecting = false
     if status == 0 {
       self.states[provider]?.error = nil
-      self.refresh(provider)
-    } else if self.states[provider]?.error == nil {
-      self.states[provider]?.error =
-        "\(provider.displayName) sign-in was not completed. Click Connect to retry."
+      if !self.refresh(provider, queueIfBusy: true) { self.changed() }
+    } else {
+      if self.states[provider]?.error == nil {
+        self.states[provider]?.error =
+          "\(provider.displayName) sign-in was not completed. Click Connect to retry."
+      }
       self.changed()
     }
   }
@@ -990,6 +1029,7 @@ final class UsageStore {
       if isCurrent() {
         self.states[provider]?.isRefreshing = false
         if notify { self.changed() }
+        if self.pendingRefreshes.remove(provider) != nil { self.refresh(provider) }
       }
     }
 

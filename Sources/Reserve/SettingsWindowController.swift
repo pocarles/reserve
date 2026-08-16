@@ -1695,8 +1695,7 @@ private final class AboutHeaderView: NSView {
       let attributes = try? FileManager.default.attributesOfItem(atPath: executable.path),
       let date = attributes[.modificationDate] as? Date
     else { return "" }
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM d, yyyy 'at' h:mm a"
+    let formatter = DashboardFormat.localizedDateFormatter(template: "yMMMdjm")
     return "Built \(formatter.string(from: date))"
   }
 }

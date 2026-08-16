@@ -250,13 +250,13 @@ final class ReserveNotifications {
 
   /// "Tuesday at 11:04 PM", or a time alone when it is close.
   private static func moment(_ date: Date, now: Date) -> String {
-    let formatter = DateFormatter()
     let interval = date.timeIntervalSince(now)
     if interval < 12 * 3_600 {
-      formatter.dateFormat = "h:mm a"
+      let formatter = DashboardFormat.localizedDateFormatter(template: "jm")
       return "at \(formatter.string(from: date))"
     }
-    formatter.dateFormat = interval < 6 * 86_400 ? "EEEE 'at' h:mm a" : "MMM d 'at' h:mm a"
+    let formatter = DashboardFormat.localizedDateFormatter(
+      template: interval < 6 * 86_400 ? "EEEEjm" : "MMMdjm")
     return formatter.string(from: date)
   }
 

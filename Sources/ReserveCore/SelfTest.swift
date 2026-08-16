@@ -65,6 +65,11 @@ public enum ReserveSelfTests {
     guard !lineBuffer.append(Data("12345678".utf8)).exceeded,
       lineBuffer.append(Data("9".utf8)).exceeded
     else { throw Failure("bounded line allocation") }
+    let recoveredLines = lineBuffer.append(Data("tail\nok\n".utf8))
+    guard recoveredLines.exceeded,
+      recoveredLines.lines.map({ String(decoding: $0, as: UTF8.self) }) == ["ok"],
+      recoveredLines.consumedBytes == 8
+    else { throw Failure("oversized line recovery") }
     let cursorBuffer = BoundedLineBuffer(maximumBytes: 32)
     let firstCursor = cursorBuffer.append(Data("one\ntwo\nthree\n".utf8), maximumLines: 2)
     let secondCursor = cursorBuffer.append(Data(), maximumLines: 2)
@@ -439,6 +444,16 @@ public enum ReserveSelfTests {
       now: Date(timeIntervalSince1970: 1_800_000_000))
     guard selectedCredentials?.key == "valid-key", selectedCredentials?.userID == "valid-user"
     else { throw Failure("Grok credential selection") }
+    let deterministicCredentials = GrokCredentialLoader.select(
+      entries: [
+        "zeta": GrokCredentialEntry(key: "zeta-key", userID: "zeta-user", expiresAt: future),
+        "alpha": GrokCredentialEntry(
+          key: "alpha-key", userID: "alpha-user", expiresAt: future),
+      ],
+      now: Date(timeIntervalSince1970: 1_800_000_000))
+    guard deterministicCredentials?.key == "alpha-key" else {
+      throw Failure("deterministic Grok credential selection")
+    }
     record("Grok credential selection")
 
     let usageDirectory = FileManager.default.temporaryDirectory
@@ -513,17 +528,28 @@ public enum ReserveSelfTests {
     for root in [oversizedCodex, oversizedClaude, oversizedGrok] {
       try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
-    try Data(repeating: 0x41, count: 1_048_577).write(
-      to: oversizedClaude.appendingPathComponent("session.jsonl"))
+    let oversizedCodexLines =
+      [
+        #"{"timestamp":"\#(timestamp)","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+        #"{"timestamp":"\#(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":0,"output_tokens":20,"total_tokens":1020}}}}"#,
+      ].joined(separator: "\n") + "\n"
+    try Data(oversizedCodexLines.utf8).write(
+      to: oversizedCodex.appendingPathComponent("session.jsonl"))
+    let healthyClaudeLine = claudeLine(output: 5, message: "oversized-m1", request: "oversized-r1")
+    var oversizedClaudeData = Data(repeating: 0x41, count: 1_048_577)
+    oversizedClaudeData.append(Data(("\n" + healthyClaudeLine + "\n").utf8))
+    try oversizedClaudeData.write(to: oversizedClaude.appendingPathComponent("session.jsonl"))
     let boundedScanner = LocalUsageScanner(
       roots: .init(codex: oversizedCodex, claude: oversizedClaude, grok: oversizedGrok),
       cacheURL: oversizedRoot.appendingPathComponent("index.json"))
-    do {
-      _ = try await boundedScanner.scan()
-      throw Failure("oversized session line rejection")
-    } catch UsageProviderError.invalidResponse {
-      record("oversized session line rejection")
-    }
+    let boundedScanDate = Date(timeIntervalSince1970: 1_700_000_000)
+    let boundedUsage = try await boundedScanner.scan(now: boundedScanDate)
+    let repeatedBoundedUsage = try await boundedScanner.scan(now: boundedScanDate)
+    guard boundedUsage[.openAI]?.totalTokens == 1020,
+      boundedUsage[.anthropic]?.totalTokens == 135,
+      repeatedBoundedUsage == boundedUsage
+    else { throw Failure("oversized session line recovery") }
+    record("oversized session line recovery")
 
     if let helperExecutable {
       let start = ContinuousClock.now

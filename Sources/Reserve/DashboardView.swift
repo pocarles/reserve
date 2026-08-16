@@ -1282,30 +1282,30 @@ enum DashboardMetrics {
 
 @MainActor
 enum DashboardFormat {
-  private static let clockFormatter: DateFormatter = {
+  static func localizedDateFormatter(
+    template: String,
+    locale: Locale = .autoupdatingCurrent
+  ) -> DateFormatter {
     let formatter = DateFormatter()
-    formatter.dateFormat = "h:mm a"
+    formatter.locale = locale
+    formatter.setLocalizedDateFormatFromTemplate(template)
     return formatter
+  }
+
+  private static let clockFormatter: DateFormatter = {
+    Self.localizedDateFormatter(template: "jm")
   }()
   private static let weekdayFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "EEE 'at' h:mm a"
-    return formatter
+    Self.localizedDateFormatter(template: "EEEjm")
   }()
   private static let fullMomentFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM d 'at' h:mm a"
-    return formatter
+    Self.localizedDateFormatter(template: "MMMdjm")
   }()
   private static let shortDateFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM d, h:mm a"
-    return formatter
+    Self.localizedDateFormatter(template: "MMMdjm")
   }()
   private static let renewalFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM d"
-    return formatter
+    Self.localizedDateFormatter(template: "MMMd")
   }()
   private static let currencyDetailedFormatter: NumberFormatter = {
     let formatter = NumberFormatter()
@@ -1384,7 +1384,7 @@ enum DashboardFormat {
     return "resets \(self.moment(reset, now: now))"
   }
 
-  /// "Wed at 1:02 AM" inside a week, "Aug 18 at 1:02 AM" beyond it.
+  /// A localized weekday and time inside a week, or date and time beyond it.
   static func moment(_ date: Date, now: Date) -> String {
     let interval = date.timeIntervalSince(now)
     if interval < 12 * 3600 {

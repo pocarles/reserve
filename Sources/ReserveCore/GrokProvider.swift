@@ -231,7 +231,10 @@ enum GrokCredentialLoader {
 
   static func select(entries: [String: GrokCredentialEntry], now: Date) -> GrokCredentials? {
     let ordered = entries.sorted { lhs, rhs in
-      lhs.key.hasPrefix("https://auth.x.ai::") && !rhs.key.hasPrefix("https://auth.x.ai::")
+      let lhsIsPreferred = lhs.key.hasPrefix("https://auth.x.ai::")
+      let rhsIsPreferred = rhs.key.hasPrefix("https://auth.x.ai::")
+      if lhsIsPreferred != rhsIsPreferred { return lhsIsPreferred }
+      return lhs.key < rhs.key
     }
     for entry in ordered.map(\.value) {
       if let expiresAt = UsageDateParser.iso8601(entry.expiresAt), expiresAt <= now { continue }
