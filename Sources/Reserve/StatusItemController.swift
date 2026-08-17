@@ -164,6 +164,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         paceState: state, serviceStatus: summary.serviceStatus,
         isConnecting: summary.isConnecting, isRefreshing: summary.isRefreshing,
         needsConnection: summary.needsConnection,
+        connectionToolAvailable: summary.connectionToolAvailable,
         requiresClaudeKeychainAccess: summary.requiresClaudeKeychainAccess,
         error: summary.error,
         lastUpdated: summary.lastUpdated, localUsage: summary.localUsage,
@@ -267,7 +268,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && !gbClock.string(from: localeDate).contains("PM")
     let semanticColorsWork =
       UsagePaceState.reserve(percent: 10).color.isEqual(NSColor.systemGreen)
-      && UsagePaceState.onPace.color.isEqual(NSColor.systemBlue)
+      && UsagePaceState.onPace.color.isEqual(NSColor.systemGreen)
       && UsagePaceState.deficit(percent: 5).color.isEqual(NSColor.systemOrange)
       && UsagePaceState.exhausted.color.isEqual(NSColor.systemOrange)
       && !UsagePaceState.reserve(percent: 10).color.isEqual(NSColor.systemRed)
@@ -354,7 +355,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let fullCardSelectionHitTargetWorks = directCard.map {
       $0.hitTest(NSPoint(x: $0.frame.midX, y: $0.frame.midY)) === $0
     } ?? false
-    let firstClickSelectionWorks = directCard?.acceptsFirstMouse(for: nil) == true
+    let firstClickSelectionWorks =
+      directCard?.acceptsFirstMouse(for: nil) == true
+      && ReserveTextButton(title: "Test", action: {}).acceptsFirstMouse(for: nil)
     self.store.menuBarProvider = originalDirectProvider
     let hasScrollView = descendants.contains { $0 is NSScrollView }
     let size = dashboardController.preferredContentSize
@@ -528,8 +531,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && ReserveSparkline.heightFraction(tokens: 10_000, peak: 10_000) == 1
       && abs(ReserveSparkline.heightFraction(tokens: 400, peak: 10_000) - 0.2) < 0.001
 
-    // Progressive disclosure: one provider opens at a time and exposes limits,
-    // usage and provenance.
+    // Progressive disclosure: one provider opens at a time and exposes limits and usage.
     let disclosuresPresent = ProviderID.allCases.allSatisfy {
       identifiers.contains("disclose-\($0.rawValue)")
     }
@@ -545,17 +547,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       expanded.filter { ($0.identifier?.rawValue ?? "").hasPrefix("allowance-detail-") }.count == 2
       && expandedLabels.contains { $0.hasSuffix("% left") }
       && !expandedLabels.contains { $0.hasSuffix("% used") }
-      // Layer 2: activity and estimated value.
+      // Activity and estimated value.
       && expandedIDs.contains("usage-detail-anthropic")
       && expandedLabels.contains("Estimated API value")
-      // Layer 3: provenance and freshness.
-      && expandedIDs.contains("sources-anthropic")
       // The history chart lives with the activity numbers.
       && expandedIDs.contains("usage-chart-anthropic")
       && expandedLabels.contains { $0.contains("compressed scale") }
-      && expandedLabels.contains { $0.hasPrefix("Provider reported") }
-      && expandedLabels.contains { $0.hasPrefix("From local logs") }
-      && expandedLabels.contains { $0.hasPrefix("Estimated from") }
+      // The internal provenance block is intentionally absent from every provider.
+      && !expandedIDs.contains { $0.hasPrefix("sources-") }
       // Only one row opens at a time.
       && !expandedIDs.contains("usage-detail-openAI")
       && !expandedIDs.contains("usage-detail-grok")
@@ -686,7 +685,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
     return (
       true,
-      "dashboard leads with one factual conclusion, gives \(providerCards) providers the same reserve/on-pace/deficit anatomy, uses fixed semantic colors without red quota states, selects the automatic or pinned menu-bar source, opens one provider at a time onto limits, usage and provenance, shares one minute clock, refreshes stale data after resume, takes keyboard focus with Space and Return, and fits adaptively on the available screen"
+      "dashboard leads with one factual conclusion, gives \(providerCards) providers the same reserve/on-pace/deficit anatomy, uses fixed semantic colors without red quota states, selects the automatic or pinned menu-bar source, opens one provider at a time onto limits and usage, shares one minute clock, refreshes stale data after resume, takes keyboard focus with Space and Return, and fits adaptively on the available screen"
     )
   }
 

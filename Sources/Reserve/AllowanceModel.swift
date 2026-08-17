@@ -84,6 +84,7 @@ struct ProviderSummary {
   let isConnecting: Bool
   let isRefreshing: Bool
   let needsConnection: Bool
+  let connectionToolAvailable: Bool
   let requiresClaudeKeychainAccess: Bool
   let error: String?
   let lastUpdated: Date?
@@ -149,12 +150,22 @@ enum AllowanceBuilder {
       isConnecting: state.isConnecting,
       isRefreshing: state.isRefreshing,
       needsConnection: Self.needsConnection(state),
+      connectionToolAvailable: Self.connectionToolAvailable(for: state.provider),
       requiresClaudeKeychainAccess: state.requiresClaudeKeychainAccess,
       error: state.error,
       lastUpdated: state.snapshot?.fetchedAt,
       localUsage: state.localUsage,
       subscriptionCostUSD: state.subscriptionCostUSD,
       quotaSource: state.snapshot?.source)
+  }
+
+  private static func connectionToolAvailable(for provider: ProviderID) -> Bool {
+    let executable = switch provider {
+    case .openAI: "codex"
+    case .anthropic: "claude"
+    case .grok: "grok"
+    }
+    return BinaryLocator.find(executable) != nil
   }
 
   /// A limit window titled the way a person would describe it.

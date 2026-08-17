@@ -623,6 +623,7 @@ enum LifecycleSelfTest {
       isConnecting: false,
       isRefreshing: false,
       needsConnection: true,
+      connectionToolAvailable: true,
       requiresClaudeKeychainAccess: true,
       error: "Anthropic sign-in was not completed.",
       lastUpdated: nil,
@@ -649,6 +650,34 @@ enum LifecycleSelfTest {
       copy.contains("Monthly cost") && copy.contains("Not set")
         && !copy.contains("$20.00/mo") && !copy.contains("Anthropic Plan"),
       "an unknown provider plan is still presented as a detected $20 plan")
+
+    let setupSummary = ProviderSummary(
+      provider: .anthropic,
+      planName: "",
+      allowances: [],
+      paceState: .unknown,
+      serviceStatus: nil,
+      isConnecting: false,
+      isRefreshing: false,
+      needsConnection: true,
+      connectionToolAvailable: false,
+      requiresClaudeKeychainAccess: false,
+      error: "Claude OAuth credentials were not found.",
+      lastUpdated: nil,
+      localUsage: summary.localUsage,
+      subscriptionCostUSD: nil,
+      quotaSource: nil)
+    let setupCard = ProviderDashboardCard(
+      summary: setupSummary, now: now, isSelectedForMenuBar: false,
+      connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+    setupCard.layoutSubtreeIfNeeded()
+    let setupDescendants = self.descendants(of: setupCard)
+    let setupButton = setupDescendants.compactMap { $0 as? NSButton }
+      .first { $0.identifier?.rawValue == "connect-anthropic" }
+    let setupCopy = setupDescendants.compactMap { ($0 as? NSTextField)?.stringValue }
+    result.expect(
+      setupButton?.title == "Set up" && setupCopy.contains("One-time Claude setup needed"),
+      "Claude Desktop without its helper still looks broken instead of offering setup")
 
     let domain = "com.pocarles.reserve.cost-selftest"
     guard let defaults = UserDefaults(suiteName: domain) else {

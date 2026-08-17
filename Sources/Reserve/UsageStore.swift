@@ -444,7 +444,16 @@ final class UsageStore {
     let generation = (self.loginGenerations[provider] ?? 0) + 1
     self.loginGenerations[provider] = generation
     guard let executable = BinaryLocator.find(configuration.executable) else {
-      self.states[provider]?.error = "\(configuration.displayName) is not installed."
+      if provider == .anthropic {
+        let openedClaude = URL(string: "claude://code/new").map(NSWorkspace.shared.open) ?? false
+        if !openedClaude, let download = URL(string: "https://claude.com/download") {
+          NSWorkspace.shared.open(download)
+        }
+        self.states[provider]?.error =
+          "Finish the one-time setup in Claude, then return to Reserve."
+      } else {
+        self.states[provider]?.error = "\(configuration.displayName) is not installed."
+      }
       self.changed()
       return
     }
