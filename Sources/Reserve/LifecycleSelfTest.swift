@@ -646,13 +646,19 @@ enum LifecycleSelfTest {
         && !copy.contains("$20.00/mo") && !copy.contains("Anthropic Plan"),
       "an unknown provider plan is still presented as a detected $20 plan")
 
-    let domain = "com.pocarles.reserve.cost-selftest.\(UUID().uuidString)"
+    let domain = "com.pocarles.reserve.cost-selftest"
     guard let defaults = UserDefaults(suiteName: domain) else {
       result.failures.append("could not create isolated defaults for monthly-cost checks")
       return result
     }
+    let plist = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Preferences/\(domain).plist")
     defaults.removePersistentDomain(forName: domain)
-    defer { defaults.removePersistentDomain(forName: domain) }
+    try? FileManager.default.removeItem(at: plist)
+    defer {
+      defaults.removePersistentDomain(forName: domain)
+      try? FileManager.default.removeItem(at: plist)
+    }
     let store = UsageStore(defaults: defaults, startAutomatically: false, notificationsActive: false)
     result.expect(
       store.monthlySubscriptionCost(for: .openAI) == nil

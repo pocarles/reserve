@@ -22,6 +22,9 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             resources: [.copy("Resources/ProviderLogos")],
+            swiftSettings: [
+                .define("RESERVE_DEV_AUTOMATION", .when(configuration: .debug)),
+            ],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-rpath", "-Xlinker", "@loader_path/../Frameworks",

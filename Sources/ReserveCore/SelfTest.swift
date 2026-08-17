@@ -664,13 +664,13 @@ public enum ReserveSelfTests {
     else { throw Failure("normalized snapshot cache") }
     record("normalized snapshot cache")
 
-    let oldSuite = "Reserve.SelfTest.Legacy.\(UUID().uuidString)"
-    let newSuite = "Reserve.SelfTest.Current.\(UUID().uuidString)"
-    let oldDefaults = UserDefaults(suiteName: oldSuite)!
-    let newDefaults = UserDefaults(suiteName: newSuite)!
+    let oldSuite = "Reserve.SelfTest.Legacy"
+    let newSuite = "Reserve.SelfTest.Current"
+    let oldDefaults = Self.freshDefaults(suiteName: oldSuite)
+    let newDefaults = Self.freshDefaults(suiteName: newSuite)
     defer {
-      oldDefaults.removePersistentDomain(forName: oldSuite)
-      newDefaults.removePersistentDomain(forName: newSuite)
+      Self.cleanDefaults(oldDefaults, suiteName: oldSuite)
+      Self.cleanDefaults(newDefaults, suiteName: newSuite)
     }
     oldDefaults.set(false, forKey: "provider.grok.enabled")
     oldDefaults.set(15, forKey: "refresh.intervalMinutes")
@@ -793,6 +793,19 @@ public enum ReserveSelfTests {
     record("child environment strips dynamic-linker variables")
 
     return passed
+  }
+
+  private static func freshDefaults(suiteName: String) -> UserDefaults {
+    let defaults = UserDefaults(suiteName: suiteName)!
+    Self.cleanDefaults(defaults, suiteName: suiteName)
+    return defaults
+  }
+
+  private static func cleanDefaults(_ defaults: UserDefaults, suiteName: String) {
+    defaults.removePersistentDomain(forName: suiteName)
+    let plist = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Preferences/\(suiteName).plist")
+    try? FileManager.default.removeItem(at: plist)
   }
 
   private struct Failure: LocalizedError {
