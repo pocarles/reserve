@@ -36,6 +36,11 @@ private func freshTestDefaults(suiteName: String) -> UserDefaults {
   return defaults
 }
 
+private func cleanTestDefaults(suiteName: String) {
+  guard let defaults = UserDefaults(suiteName: suiteName) else { return }
+  cleanTestDefaults(defaults, suiteName: suiteName)
+}
+
 @Suite
 struct ReserveCoreTests {
   @Test
@@ -223,10 +228,10 @@ struct ReserveCoreTests {
 
     let suite = "ReserveCoreTests.RateLimit"
     let defaults = freshTestDefaults(suiteName: suite)
-    defer { cleanTestDefaults(defaults, suiteName: suite) }
     defaults.set(Date.distantFuture, forKey: "anthropic.rateLimitBlockedUntil")
     let gate = ClaudeRateLimitGate(defaults: defaults)
     XCTAssertNil(await gate.activeBlock(now: now))
+    cleanTestDefaults(suiteName: suite)
   }
 
   @Test
