@@ -86,6 +86,26 @@ struct ReserveCoreTests {
   }
 
   @Test
+  func testClaudeCredentialDecoderRejectsExpiredLegacyFile() throws {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let expired = Data(
+      #"{"claudeAiOauth":{"accessToken":"old-token","expiresAt":1799999999000}}"#.utf8)
+
+    do {
+      _ = try ClaudeCredentialLoader.decode(data: expired, source: "legacy file", now: now)
+      XCTFail("expired Claude credential was accepted")
+    } catch UsageProviderError.credentialsNotFound {
+      // Expected: Reserve can continue to Claude's current protected sign-in.
+    }
+
+    let current = Data(
+      #"{"claudeAiOauth":{"accessToken":"current-token","expiresAt":1900000000000}}"#.utf8)
+    let decoded = try ClaudeCredentialLoader.decode(
+      data: current, source: "current file", now: now)
+    XCTAssertEqual(decoded.source, "current file")
+  }
+
+  @Test
   func testLegacyMigrationCleanInstallStartsWithEmptyReserveState() throws {
     let root = try TemporaryRoot()
     defer { root.remove() }

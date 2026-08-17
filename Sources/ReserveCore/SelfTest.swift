@@ -363,6 +363,17 @@ public enum ReserveSelfTests {
     else { throw Failure("Anthropic provider request") }
     record("Anthropic provider request")
 
+    let expiredClaudeCredential = Data(
+      #"{"claudeAiOauth":{"accessToken":"old-token","expiresAt":1799999999000}}"#.utf8)
+    do {
+      _ = try ClaudeCredentialLoader.decode(
+        data: expiredClaudeCredential, source: "legacy file",
+        now: Date(timeIntervalSince1970: 1_800_000_000))
+      throw Failure("expired Claude credential file")
+    } catch UsageProviderError.credentialsNotFound {
+      record("expired Claude credential file")
+    }
+
     let rateLimitedGate = ClaudeRateLimitGate(defaults: nil)
     let rateLimitedProvider = AnthropicProvider(
       environment: ["CLAUDE_CONFIG_DIR": anthropicDirectory.path],

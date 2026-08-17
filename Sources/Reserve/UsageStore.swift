@@ -147,10 +147,6 @@ final class UsageStore {
     }
   }
 
-  var claudeKeychainCredentialAvailable: Bool {
-    AnthropicProvider.keychainCredentialIsAvailableWithoutPrompt()
-  }
-
   /// Called only from an explicit button or checkbox. This one refresh may ask
   /// macOS for Keychain approval; scheduled refreshes always stay silent.
   func allowClaudeKeychainAccess(onFinished: (() -> Void)? = nil) {

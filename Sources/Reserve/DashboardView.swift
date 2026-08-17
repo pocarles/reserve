@@ -668,7 +668,7 @@ final class ProviderDashboardCard: NSView {
 
     let trailing: NSView
     if summary.needsConnection, !summary.isConnecting, !summary.isRefreshing {
-      let actionTitle = summary.requiresClaudeKeychainAccess ? "Allow access" : "Sign in"
+      let actionTitle = summary.requiresClaudeKeychainAccess ? "Show limits" : "Sign in"
       let connect = ReserveTextButton(
         title: actionTitle, size: ReserveType.metadata, color: ReserveColor.warning, filled: true,
         minimumWidth: 64, height: 24,
@@ -676,7 +676,7 @@ final class ProviderDashboardCard: NSView {
       connect.identifier = NSUserInterfaceItemIdentifier("connect-\(summary.provider.rawValue)")
       connect.toolTip =
         summary.requiresClaudeKeychainAccess
-        ? "Reserve never stores your Claude login"
+        ? "Uses Claude's existing sign-in only to check limits. Reserve never stores it."
         : "Sign in with the official \(summary.provider.displayName) tool to read plan limits"
       trailing = connect
     } else if let primary = summary.primary {
@@ -698,11 +698,11 @@ final class ProviderDashboardCard: NSView {
   private static func unavailableRow(summary: ProviderSummary) -> NSView {
     let message =
       summary.isConnecting && summary.requiresClaudeKeychainAccess
-      ? "Choose Always Allow in the macOS prompt"
+      ? "One-time macOS approval…"
       : summary.isConnecting
       ? "Complete the sign-in in your browser"
       : summary.requiresClaudeKeychainAccess
-        ? "Allow access to show your Claude plan limits"
+        ? "Claude is ready · show your plan limits"
       : summary.needsConnection && summary.localUsage != nil
         ? "Plan limits unavailable · local activity available"
         : summary.error ?? "Sign in to read plan limits"

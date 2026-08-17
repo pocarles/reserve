@@ -599,17 +599,12 @@ enum LifecycleSelfTest {
       AllowanceBuilder.needsConnection(keychainAccess),
       "Claude access no longer offers its action after the explanation changes")
     result.expect(
-      AppDelegate.shouldOfferClaudeKeychainSetup(hasCredential: true, accessAllowed: false),
-      "first launch does not offer access when a Claude Keychain sign-in is available")
-    result.expect(
-      !AppDelegate.shouldOfferClaudeKeychainSetup(hasCredential: true, accessAllowed: true),
-      "first launch asks again after Claude Keychain access was already enabled")
-    result.expect(
       AppDelegate.claudeSetupTitle == "Show your Claude limits?"
         && AppDelegate.claudeSetupMessage
-          == "Reserve found Claude on this Mac. Allow access to show your plan limits. "
-            + "Reserve never stores your login. On the next prompt, choose Always Allow.",
-      "the first-launch Claude explanation is no longer short and reassuring")
+          == "Claude keeps your sign-in protected by macOS. Reserve uses it only to check your "
+            + "plan limits—it never sees your password or saves your sign-in.\n\n"
+            + "macOS may ask once. Choose Always Allow so future checks stay automatic.",
+      "the Claude access explanation is no longer short and reassuring")
     let summary = ProviderSummary(
       provider: .anthropic,
       planName: "",
@@ -635,11 +630,11 @@ enum LifecycleSelfTest {
     let signIn = descendants.compactMap { $0 as? NSButton }
       .first { $0.identifier?.rawValue == "connect-anthropic" }
     result.expect(
-      signIn?.title == "Allow access",
-      "the Claude Keychain recovery action does not say what it will do")
+      signIn?.title == "Show limits",
+      "the Claude recovery action does not lead with its benefit")
     let copy = descendants.compactMap { $0 as? NSTextField }.map(\.stringValue)
     result.expect(
-      copy.contains("Allow access to show your Claude plan limits"),
+      copy.contains("Claude is ready · show your plan limits"),
       "Claude access does not explain the benefit in plain language")
     result.expect(
       copy.contains("Monthly cost") && copy.contains("Not set")

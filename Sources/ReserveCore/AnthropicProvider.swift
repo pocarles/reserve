@@ -243,6 +243,25 @@ enum ClaudeCredentialLoader {
     allowKeychainRead: Bool,
     allowKeychainInteraction: Bool = false
   ) async throws -> ClaudeCredentials {
+    #if canImport(Security)
+      var keychainError: Error?
+      if allowKeychainRead {
+        do {
+          if let credentials = try await self.keychainCredentials(
+            allowInteraction: allowKeychainInteraction)
+          {
+            // Claude Code writes a completed browser sign-in to Keychain. Prefer
+            // it over legacy credential files that may remain after reauthenticating.
+            return credentials
+          }
+        } catch {
+          // A valid file remains a safe fallback when macOS cannot reveal the
+          // Keychain item without interaction during a background refresh.
+          keychainError = error
+        }
+      }
+    #endif
+
     for url in self.credentialURLs(environment: environment) {
       if let data = BoundedFileReader.read(url, maximumBytes: 1_048_576),
         let credentials = try? self.decode(data: data, source: "Claude OAuth file")
@@ -252,12 +271,7 @@ enum ClaudeCredentialLoader {
     }
 
     #if canImport(Security)
-      if allowKeychainRead,
-        let credentials = try await self.keychainCredentials(
-          allowInteraction: allowKeychainInteraction)
-      {
-        return credentials
-      }
+      if let keychainError { throw keychainError }
       if self.keychainItemExistsWithoutPrompt() {
         throw UsageProviderError.keychainConsentRequired
       }
@@ -266,7 +280,7 @@ enum ClaudeCredentialLoader {
       "Claude OAuth credentials were not found. Use Sign in to authenticate.")
   }
 
-  static func decode(data: Data, source: String) throws -> ClaudeCredentials {
+  static func decode(data: Data, source: String, now: Date = Date()) throws -> ClaudeCredentials {
     let root = try JSONDecoder().decode(ClaudeCredentialRoot.self, from: data)
     let oauth = root.claudeAiOauth ?? root.oauth
     guard let token = oauth?.accessToken?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -274,6 +288,13 @@ enum ClaudeCredentialLoader {
     else {
       throw UsageProviderError.credentialsNotFound(
         "Claude credentials do not contain a subscription OAuth token.")
+    }
+    if let expiresAt = oauth?.expiresAt {
+      let expiration = Date(timeIntervalSince1970: expiresAt / 1_000)
+      guard expiration > now else {
+        throw UsageProviderError.credentialsNotFound(
+          "Claude sign-in expired. Use Sign in to reconnect.")
+      }
     }
     return ClaudeCredentials(
       accessToken: token,
@@ -320,8 +341,7 @@ enum ClaudeCredentialLoader {
       let context = LAContext()
       context.interactionNotAllowed = !allowInteraction
       if allowInteraction {
-        context.localizedReason =
-          "Reserve needs read-only access to show your Claude plan limits."
+        context.localizedReason = "Show your Claude plan limits in Reserve."
       }
       let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
@@ -363,6 +383,7 @@ struct ClaudeCredentialRoot: Decodable {
 
 struct ClaudeOAuthCredential: Decodable {
   let accessToken: String?
+  let expiresAt: Double?
   let rateLimitTier: String?
   let subscriptionType: String?
 }
