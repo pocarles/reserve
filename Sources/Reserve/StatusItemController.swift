@@ -593,9 +593,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && UsageStore.authorizationURL(
         in: "https://example.com/oauth/authorize?code=not-trusted", for: .anthropic) == nil
     let updateMigrationWorks: Bool = {
-      let domain = "Reserve.UpdaterMigration.\(UUID().uuidString)"
+      let domain = "Reserve.UpdaterMigration.SelfTest"
       guard let defaults = UserDefaults(suiteName: domain) else { return false }
-      defer { defaults.removePersistentDomain(forName: domain) }
+      let plist = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Preferences/\(domain).plist")
+      defaults.removePersistentDomain(forName: domain)
+      try? FileManager.default.removeItem(at: plist)
+      defer {
+        defaults.removePersistentDomain(forName: domain)
+        try? FileManager.default.removeItem(at: plist)
+      }
       defaults.set(true, forKey: ReserveUpdater.legacyAutomaticChecksKey)
       let migrated = ReserveUpdater.migrateLegacyAutomaticChecks(
         defaults: defaults, domainName: domain)

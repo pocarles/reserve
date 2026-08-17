@@ -23,6 +23,24 @@ private struct TestFailure: Error, CustomStringConvertible {
 }
 private func XCTFail(_ message: String) { Issue.record(TestFailure(description: message)) }
 
+private func cleanTestDefaults(_ defaults: UserDefaults, suiteName: String) {
+  defaults.removePersistentDomain(forName: suiteName)
+  let plist = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Preferences/\(suiteName).plist")
+  try? FileManager.default.removeItem(at: plist)
+}
+
+private func freshTestDefaults(suiteName: String) -> UserDefaults {
+  let defaults = UserDefaults(suiteName: suiteName)!
+  cleanTestDefaults(defaults, suiteName: suiteName)
+  return defaults
+}
+
+private func cleanTestDefaults(suiteName: String) {
+  guard let defaults = UserDefaults(suiteName: suiteName) else { return }
+  cleanTestDefaults(defaults, suiteName: suiteName)
+}
+
 @Suite
 struct ReserveCoreTests {
   @Test
@@ -71,9 +89,9 @@ struct ReserveCoreTests {
   func testLegacyMigrationCleanInstallStartsWithEmptyReserveState() throws {
     let root = try TemporaryRoot()
     defer { root.remove() }
-    let newSuite = "ReserveCoreTests.Clean.\(UUID().uuidString)"
-    let newDefaults = UserDefaults(suiteName: newSuite)!
-    defer { newDefaults.removePersistentDomain(forName: newSuite) }
+    let newSuite = "ReserveCoreTests.Clean"
+    let newDefaults = freshTestDefaults(suiteName: newSuite)
+    defer { cleanTestDefaults(newDefaults, suiteName: newSuite) }
 
     let report = LegacyStateMigrator.migrate(
       oldDefaults: nil,
@@ -94,13 +112,13 @@ struct ReserveCoreTests {
   func testLegacyMigrationRejectsUnsupportedRefreshInterval() throws {
     let root = try TemporaryRoot()
     defer { root.remove() }
-    let oldSuite = "ReserveCoreTests.IntervalOld.\(UUID().uuidString)"
-    let newSuite = "ReserveCoreTests.IntervalNew.\(UUID().uuidString)"
-    let oldDefaults = UserDefaults(suiteName: oldSuite)!
-    let newDefaults = UserDefaults(suiteName: newSuite)!
+    let oldSuite = "ReserveCoreTests.UnsupportedInterval.Old"
+    let newSuite = "ReserveCoreTests.UnsupportedInterval.New"
+    let oldDefaults = freshTestDefaults(suiteName: oldSuite)
+    let newDefaults = freshTestDefaults(suiteName: newSuite)
     defer {
-      oldDefaults.removePersistentDomain(forName: oldSuite)
-      newDefaults.removePersistentDomain(forName: newSuite)
+      cleanTestDefaults(oldDefaults, suiteName: oldSuite)
+      cleanTestDefaults(newDefaults, suiteName: newSuite)
     }
     oldDefaults.set(45, forKey: "refresh.intervalMinutes")
 
@@ -208,12 +226,12 @@ struct ReserveCoreTests {
       AnthropicProvider.conservativeRetryDate(retryAfter: farDate, now: now),
       now.addingTimeInterval(AnthropicProvider.maximumRetryDelay))
 
-    let suite = "ReserveCoreTests.RateLimit.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suite)!
+    let suite = "ReserveCoreTests.RateLimit"
+    let defaults = freshTestDefaults(suiteName: suite)
     defaults.set(Date.distantFuture, forKey: "anthropic.rateLimitBlockedUntil")
     let gate = ClaudeRateLimitGate(defaults: defaults)
     XCTAssertNil(await gate.activeBlock(now: now))
-    UserDefaults.standard.removePersistentDomain(forName: suite)
+    cleanTestDefaults(suiteName: suite)
   }
 
   @Test
@@ -366,13 +384,13 @@ struct ReserveCoreTests {
   func testLegacyMigrationIsAllowListedValidatedAndIdempotent() throws {
     let root = try TemporaryRoot()
     defer { root.remove() }
-    let oldSuite = "ReserveCoreTests.Old.\(UUID().uuidString)"
-    let newSuite = "ReserveCoreTests.New.\(UUID().uuidString)"
-    let oldDefaults = UserDefaults(suiteName: oldSuite)!
-    let newDefaults = UserDefaults(suiteName: newSuite)!
+    let oldSuite = "ReserveCoreTests.AllowListedMigration.Old"
+    let newSuite = "ReserveCoreTests.AllowListedMigration.New"
+    let oldDefaults = freshTestDefaults(suiteName: oldSuite)
+    let newDefaults = freshTestDefaults(suiteName: newSuite)
     defer {
-      oldDefaults.removePersistentDomain(forName: oldSuite)
-      newDefaults.removePersistentDomain(forName: newSuite)
+      cleanTestDefaults(oldDefaults, suiteName: oldSuite)
+      cleanTestDefaults(newDefaults, suiteName: newSuite)
     }
     oldDefaults.set(false, forKey: "provider.grok.enabled")
     oldDefaults.set(15, forKey: "refresh.intervalMinutes")
@@ -422,13 +440,13 @@ struct ReserveCoreTests {
   func testLegacyMigrationDoesNotPartiallyPublishInvalidCachesOrOverwriteNewData() throws {
     let root = try TemporaryRoot()
     defer { root.remove() }
-    let oldSuite = "ReserveCoreTests.Old.\(UUID().uuidString)"
-    let newSuite = "ReserveCoreTests.New.\(UUID().uuidString)"
-    let oldDefaults = UserDefaults(suiteName: oldSuite)!
-    let newDefaults = UserDefaults(suiteName: newSuite)!
+    let oldSuite = "ReserveCoreTests.InvalidCacheMigration.Old"
+    let newSuite = "ReserveCoreTests.InvalidCacheMigration.New"
+    let oldDefaults = freshTestDefaults(suiteName: oldSuite)
+    let newDefaults = freshTestDefaults(suiteName: newSuite)
     defer {
-      oldDefaults.removePersistentDomain(forName: oldSuite)
-      newDefaults.removePersistentDomain(forName: newSuite)
+      cleanTestDefaults(oldDefaults, suiteName: oldSuite)
+      cleanTestDefaults(newDefaults, suiteName: newSuite)
     }
     let oldDirectory = root.url.appendingPathComponent("UsageBar")
     let newDirectory = root.url.appendingPathComponent("Reserve")

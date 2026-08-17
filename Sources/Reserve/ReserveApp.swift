@@ -43,8 +43,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var settingsController: SettingsWindowController?
   private var updater: ReserveUpdater?
 
+  private static let uiSelfTestDefaultsSuite = "Reserve.UISelfTest"
+
   func applicationDidFinishLaunching(_: Notification) {
     NSApplication.shared.setActivationPolicy(.accessory)
+#if RESERVE_DEV_AUTOMATION
     let isUISelfTest = CommandLine.arguments.contains("--self-test-ui")
     let renderIndex = CommandLine.arguments.firstIndex(of: "--render-dashboard")
     let settingsRenderIndex = CommandLine.arguments.firstIndex(of: "--render-settings")
@@ -57,32 +60,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let isUIStressTest = CommandLine.arguments.contains("--stress-ui")
     let isLifecycleSelfTest = CommandLine.arguments.contains("--self-test-lifecycle")
     let lifecycleCaptureIndex = CommandLine.arguments.firstIndex(of: "--capture-lifecycle")
+    let isNotificationVerification = CommandLine.arguments.contains("--verify-notifications")
     let isAutomatedRun = isUISelfTest || renderIndex != nil || settingsRenderIndex != nil
       || appearanceRenderIndex != nil || aboutRenderIndex != nil || alertsRenderIndex != nil
       || insightsRenderIndex != nil || providersRenderIndex != nil || menuBarRenderIndex != nil
       || isUIStressTest || isLifecycleSelfTest || lifecycleCaptureIndex != nil
-    let isDashboardRender = renderIndex != nil
-    let isSettingsRender = settingsRenderIndex != nil
-    let isAppearanceRender = appearanceRenderIndex != nil
-    let isAboutRender = aboutRenderIndex != nil
+      || isNotificationVerification
     let store: UsageStore
-    if isUISelfTest || isDashboardRender || isSettingsRender || isAppearanceRender
-      || isAboutRender || alertsRenderIndex != nil || insightsRenderIndex != nil
-      || providersRenderIndex != nil || menuBarRenderIndex != nil || isUIStressTest
-      || isLifecycleSelfTest || lifecycleCaptureIndex != nil
-    {
-      let testDefaults = UserDefaults(
-        suiteName: "Reserve.UISelfTest.\(UUID().uuidString)")!
+    if isAutomatedRun {
+      Self.clearTestPreferences(suiteName: Self.uiSelfTestDefaultsSuite)
+      let testDefaults = UserDefaults(suiteName: Self.uiSelfTestDefaultsSuite)!
       store = UsageStore(defaults: testDefaults, startAutomatically: false)
     } else {
       _ = LegacyStateMigrator.migrateLiveState()
       store = UsageStore()
     }
-    if isUISelfTest || isDashboardRender || isSettingsRender || isAppearanceRender || isAboutRender
-      || alertsRenderIndex != nil || insightsRenderIndex != nil || providersRenderIndex != nil
-      || menuBarRenderIndex != nil || isUIStressTest || isLifecycleSelfTest
-      || lifecycleCaptureIndex != nil
-    {
+    if isAutomatedRun {
       let scenario = CommandLine.arguments.firstIndex(of: "--scenario").flatMap { index in
         CommandLine.arguments.indices.contains(index + 1)
           ? PreviewScenario(rawValue: CommandLine.arguments[index + 1]) : nil
@@ -116,6 +109,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       store.menuBarShowsRemaining = true
       store.menuBarShowsReset = true
     }
+#else
+    let isAutomatedRun = false
+    _ = LegacyStateMigrator.migrateLiveState()
+    let store = UsageStore()
+#endif
     self.store = store
     if Bundle.main.bundleURL.pathExtension == "app", !isAutomatedRun {
       self.updater = ReserveUpdater()
@@ -134,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window else { return false }
         return self?.settingsController?.window === window
       })
+#if RESERVE_DEV_AUTOMATION
     if let renderIndex,
       CommandLine.arguments.indices.contains(renderIndex + 1)
     {
@@ -166,7 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       CommandLine.arguments.indices.contains(menuBarRenderIndex + 1)
     {
       self.renderMenuBar(path: CommandLine.arguments[menuBarRenderIndex + 1])
-    } else if CommandLine.arguments.contains("--verify-notifications") {
+    } else if isNotificationVerification {
       self.verifyNotifications()
     } else if isUIStressTest {
       self.runUIStressTest()
@@ -187,6 +186,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     } else {
       self.completeFirstLaunchIfNeeded()
     }
+#else
+    self.completeFirstLaunchIfNeeded()
+#endif
   }
 
   private func renderDashboard(path: String) {
@@ -308,6 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       // sync, and this process is about to exit.
       defaults.removePersistentDomain(forName: suite)
       defaults.synchronize()
+      try? FileManager.default.removeItem(at: plist)
 
       let success =
         expected.values.allSatisfy(delivered.contains) && remaining.isEmpty && standing.success
@@ -831,7 +834,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     return controller
   }
 
+  private static func clearTestPreferences(suiteName: String) {
+    let defaults = UserDefaults(suiteName: suiteName)
+    defaults?.removePersistentDomain(forName: suiteName)
+    let plist = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Preferences/\(suiteName).plist")
+    try? FileManager.default.removeItem(at: plist)
+  }
+
   private static func finishUISelfTest(success: Bool, details: String) {
+    Self.clearTestPreferences(suiteName: Self.uiSelfTestDefaultsSuite)
     let prefix = success ? "PASS" : "FAIL"
     FileHandle.standardOutput.write(Data("\(prefix) AppKit UI: \(details)\n".utf8))
     fflush(stdout)
