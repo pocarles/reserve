@@ -795,7 +795,50 @@ public enum ReserveSelfTests {
       BinaryLocator.find(
         "reserve-fake-cli", environment: ["PATH": closedDirectory.path]) == trusted.path
     else { throw Failure("a private PATH entry was rejected") }
-    record("executable lookup rejects world-writable directories")
+
+    // Claude Desktop keeps its Claude Code helper outside PATH. Reserve should
+    // use the newest installed helper rather than telling a desktop user that
+    // Claude is missing.
+    let fakeHome = sandbox.appendingPathComponent("home")
+    let olderClaude = fakeHome.appendingPathComponent(
+      "Library/Application Support/Claude/claude-code/2.9.0/claude.app/Contents/MacOS/claude")
+    let newerClaude = fakeHome.appendingPathComponent(
+      "Library/Application Support/Claude/claude-code/2.10.0/claude.app/Contents/MacOS/claude")
+    for executable in [olderClaude, newerClaude] {
+      try FileManager.default.createDirectory(
+        at: executable.deletingLastPathComponent(), withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o755])
+      FileManager.default.createFile(
+        atPath: executable.path, contents: Data("#!/bin/sh\n".utf8),
+        attributes: [.posixPermissions: 0o755])
+    }
+    let detectedClaude = BinaryLocator.bundledClaudeExecutable(home: fakeHome.path)
+    let detectedClaudeURL = detectedClaude.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath() }
+    guard detectedClaudeURL == newerClaude.resolvingSymlinksInPath() else {
+      let detectedPath = detectedClaude ?? "none"
+      throw Failure("Claude Desktop helper was not detected: \(detectedPath)")
+    }
+
+    // ChatGPT carries the same Codex app-server Reserve uses, but keeps it in
+    // the application bundle rather than adding it to PATH.
+    let fakeApplications = fakeHome.appendingPathComponent("Applications", isDirectory: true)
+    let bundledCodex = fakeApplications.appendingPathComponent(
+      "ChatGPT.app/Contents/Resources/codex")
+    try FileManager.default.createDirectory(
+      at: bundledCodex.deletingLastPathComponent(), withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o755])
+    FileManager.default.createFile(
+      atPath: bundledCodex.path, contents: Data("#!/bin/sh\n".utf8),
+      attributes: [.posixPermissions: 0o755])
+    let detectedCodex = BinaryLocator.bundledCodexExecutable(
+      home: fakeHome.path, applicationDirectories: [fakeApplications])
+    let detectedCodexURL = detectedCodex.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath() }
+    guard detectedCodexURL == bundledCodex.resolvingSymlinksInPath() else {
+      let detectedPath = detectedCodex ?? "none"
+      throw Failure("ChatGPT Codex helper was not detected: \(detectedPath)")
+    }
+    record(
+      "executable lookup rejects world-writable directories and detects desktop helpers")
 
     // The dynamic linker must not be steerable through an inherited variable.
     let sanitized = BinaryLocator.childEnvironment([

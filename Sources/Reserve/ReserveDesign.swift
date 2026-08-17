@@ -92,7 +92,7 @@ enum ReserveColor {
   static var chartSecondary: NSColor { ReserveAppearance.palette.chartSecondary }
 
   static var reserve: NSColor { .systemGreen }
-  static var onPace: NSColor { .systemBlue }
+  static var onPace: NSColor { self.reserve }
   static var deficit: NSColor { .systemOrange }
   static var success: NSColor { self.reserve }
   static var warning: NSColor { .systemOrange }
@@ -453,6 +453,8 @@ final class ReserveTextButton: NSButton {
   }
 
   required init?(coder: NSCoder) { nil }
+
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
   override func resetCursorRects() {
     self.addCursorRect(self.bounds, cursor: .pointingHand)

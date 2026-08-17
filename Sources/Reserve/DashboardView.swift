@@ -450,7 +450,7 @@ final class ProviderDashboardCard: NSView {
       accessibleName + (isSelectedForMenuBar ? ", shown in the menu bar" : ""))
     self.setAccessibilityValue(Self.spokenState(summary: summary, now: now))
     self.setAccessibilityHelp(
-      "Space shows this provider in the menu bar. Return shows its limits, usage and sources.")
+      "Space shows this provider in the menu bar. Return shows its limits and usage.")
 
     var rows: [NSView] = [
       Self.identityRow(
@@ -484,11 +484,8 @@ final class ProviderDashboardCard: NSView {
             isDetail: true))
       }
       rows.append(ReserveHairline(width: DashboardMetrics.cardContentWidth))
-      // Layer 2: activity and estimated value.
+      // Activity and estimated value.
       rows.append(UsageDetailGrid(summary: summary))
-      rows.append(ReserveHairline(width: DashboardMetrics.cardContentWidth))
-      // Layer 3: where every number came from, and how fresh it is.
-      rows.append(SourceDetailList(summary: summary, now: now))
     } else if !summary.secondary.isEmpty {
       rows.append(SecondaryAllowanceRow(allowances: summary.secondary, now: now))
     }
@@ -668,7 +665,10 @@ final class ProviderDashboardCard: NSView {
 
     let trailing: NSView
     if summary.needsConnection, !summary.isConnecting, !summary.isRefreshing {
-      let actionTitle = summary.requiresClaudeKeychainAccess ? "Show limits" : "Sign in"
+      let actionTitle =
+        summary.requiresClaudeKeychainAccess
+        ? "Show limits"
+        : !summary.connectionToolAvailable && summary.provider == .anthropic ? "Set up" : "Sign in"
       let connect = ReserveTextButton(
         title: actionTitle, size: ReserveType.metadata, color: ReserveColor.warning, filled: true,
         minimumWidth: 64, height: 24,
@@ -677,6 +677,8 @@ final class ProviderDashboardCard: NSView {
       connect.toolTip =
         summary.requiresClaudeKeychainAccess
         ? "Uses Claude's existing sign-in only to check limits. Reserve never stores it."
+        : !summary.connectionToolAvailable && summary.provider == .anthropic
+          ? "Open Claude to finish its one-time Code setup"
         : "Sign in with the official \(summary.provider.displayName) tool to read plan limits"
       trailing = connect
     } else if let primary = summary.primary {
@@ -703,6 +705,8 @@ final class ProviderDashboardCard: NSView {
       ? "Complete the sign-in in your browser"
       : summary.requiresClaudeKeychainAccess
         ? "Claude is ready · show your plan limits"
+      : !summary.connectionToolAvailable && summary.provider == .anthropic
+        ? "One-time Claude setup needed"
       : summary.needsConnection && summary.localUsage != nil
         ? "Plan limits unavailable · local activity available"
         : summary.error ?? "Sign in to read plan limits"
@@ -1006,7 +1010,7 @@ private final class SecondaryAllowanceRow: NSView {
   required init?(coder: NSCoder) { nil }
 }
 
-/// The disclosure that opens a provider's three detail layers. It is a button,
+/// The disclosure that opens a provider's additional limits and usage. It is a button,
 /// so the surrounding card keeps its own click for menu-bar selection.
 @MainActor
 final class DetailDisclosureButton: NSButton {
@@ -1024,7 +1028,7 @@ final class DetailDisclosureButton: NSButton {
     self.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
     self.contentTintColor = ReserveColor.subtle
     self.isBordered = false
-    self.toolTip = isExpanded ? "Hide details" : "Show limits, usage and sources"
+    self.toolTip = isExpanded ? "Hide details" : "Show limits and usage"
     self.setAccessibilityLabel(
       "\(isExpanded ? "Hide" : "Show") \(provider.displayName) details")
     self.identifier = NSUserInterfaceItemIdentifier("disclose-\(provider.rawValue)")
@@ -1107,67 +1111,6 @@ private final class UsageDetailGrid: NSView {
       value, font: ReserveFont.digits(ReserveType.metadata, .semibold), color: ReserveColor.text
     ).fitted()
     return NSStackView.row([caption, value], spacing: 7)
-  }
-}
-
-/// Layer 3: where each number came from, whether it is authoritative, and when
-/// it last arrived.
-@MainActor
-private final class SourceDetailList: NSView {
-  init(summary: ProviderSummary, now: Date) {
-    super.init(frame: .zero)
-    self.identifier = NSUserInterfaceItemIdentifier("sources-\(summary.provider.rawValue)")
-    var lines: [NSView] = [
-      Self.line(
-        "Limits",
-        summary.quotaSource.map { "Provider reported · \($0)" } ?? "Not connected",
-        isEstimate: false),
-      Self.line(
-        "Tokens",
-        summary.localUsage == nil
-          ? "No local logs found"
-          : "From local logs on this Mac · this device only",
-        isEstimate: false),
-    ]
-    if summary.localUsage != nil {
-      lines.append(Self.line("Value", "Estimated from published API prices", isEstimate: true))
-    }
-    let freshness =
-      summary.lastUpdated.map { DashboardFormat.updated($0, now: now) } ?? "Never updated"
-    lines.append(
-      Self.line(
-        "Updated",
-        summary.paceState == .stale ? "\(freshness) · forecast may be outdated" : freshness,
-        isEstimate: false))
-    if summary.primary?.projection == nil {
-      lines.append(Self.line("Forecast", "Insufficient data for a forecast", isEstimate: true))
-    }
-    let stack = NSStackView.column(lines, spacing: 5)
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    self.addSubview(stack)
-    NSLayoutConstraint.activate([
-      stack.leadingAnchor.constraint(equalTo: self.leadingAnchor),
-      stack.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-      stack.topAnchor.constraint(equalTo: self.topAnchor),
-      stack.bottomAnchor.constraint(equalTo: self.bottomAnchor),
-      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth),
-    ])
-  }
-
-  required init?(coder: NSCoder) { nil }
-
-  private static func line(_ label: String, _ value: String, isEstimate: Bool) -> NSView {
-    let caption = ReserveLabel(
-      label, font: ReserveFont.sans(ReserveType.metadata, .medium), color: ReserveColor.muted
-    ).width(64)
-    let text = ReserveLabel(
-      value, font: ReserveFont.sans(ReserveType.metadata),
-      color: isEstimate ? ReserveColor.subtle : ReserveColor.muted
-    ).flexible()
-    text.toolTip = value
-    let row = NSStackView.row([caption, text], spacing: 8)
-    row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
-    return row
   }
 }
 

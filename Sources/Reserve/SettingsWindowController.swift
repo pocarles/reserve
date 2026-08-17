@@ -320,8 +320,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           rows: [self.formRow("Theme:", self.appearanceModeControl())]),
         self.section(
           title: "Accent",
-          footer: "Accent themes shape Reserve's surfaces and controls. Green, blue and orange "
-            + "remain reserved for usage state.",
+          footer: "Accent themes shape Reserve's surfaces and controls. Green means healthy, "
+            + "orange means attention, and gray means data is unavailable.",
           rows: [self.accentRow()]),
         self.section(
           title: "Preview",
@@ -1170,12 +1170,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       }
     let state = self.store.states[provider]
     return Self.providerStatus(
+      provider: provider,
       hasSnapshot: state?.snapshot != nil,
       hasError: state?.error != nil,
       toolDetected: BinaryLocator.find(executable) != nil)
   }
 
   private static func providerStatus(
+    provider: ProviderID,
     hasSnapshot: Bool,
     hasError: Bool,
     toolDetected: Bool
@@ -1187,6 +1189,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
     if toolDetected {
       return ("Detected, not signed in", .systemOrange)
+    }
+    if provider == .anthropic {
+      return ("Claude setup needed", .systemOrange)
     }
     return ("Tool not found", .systemRed)
   }
@@ -1282,12 +1287,22 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         && providerIDs.contains("provider-disclose-\($0.rawValue)")
     }
     let providerStatusesAreTruthful =
-      Self.providerStatus(hasSnapshot: true, hasError: true, toolDetected: true).text
+      Self.providerStatus(
+        provider: .openAI, hasSnapshot: true, hasError: true, toolDetected: true
+      ).text
       == "Last update failed"
-      && Self.providerStatus(hasSnapshot: true, hasError: false, toolDetected: true).text
+      && Self.providerStatus(
+        provider: .openAI, hasSnapshot: true, hasError: false, toolDetected: true
+      ).text
         == "Connected"
-      && Self.providerStatus(hasSnapshot: false, hasError: false, toolDetected: true).text
+      && Self.providerStatus(
+        provider: .openAI, hasSnapshot: false, hasError: false, toolDetected: true
+      ).text
         == "Detected, not signed in"
+      && Self.providerStatus(
+        provider: .anthropic, hasSnapshot: false, hasError: false, toolDetected: false
+      ).text
+        == "Claude setup needed"
     let claudeIsHiddenUntilExpanded = !providerIDs.contains("settings-automatic-claude")
     self.expandedProviders = [.anthropic]
     self.applyPane(animated: false)
@@ -1516,7 +1531,7 @@ private final class ThemePreview: NSView {
     ).fill()
 
     let labels: [(String, NSColor)] = [
-      ("Reserve", .systemGreen), ("On pace", .systemBlue), ("Deficit", .systemOrange),
+      ("Reserve", .systemGreen), ("On pace", .systemGreen), ("Deficit", .systemOrange),
     ]
     var x = track.maxX + 20
     for (text, color) in labels {
