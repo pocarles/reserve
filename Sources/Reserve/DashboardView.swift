@@ -70,7 +70,7 @@ final class DashboardViewController: NSViewController {
       parts.append(
         summary.serviceStatus.map { String($0.fetchedAt.timeIntervalSinceReferenceDate) } ?? "-")
       parts.append(summary.quotaSource ?? "-")
-      parts.append(String(summary.subscriptionCostUSD))
+      parts.append(summary.subscriptionCostUSD.map { String($0) } ?? "-")
       parts.append(String(reflecting: summary.localUsage))
       for allowance in summary.allowances {
         parts.append(allowance.id)
@@ -444,9 +444,10 @@ final class ProviderDashboardCard: NSView {
       ? "Shown in menu bar"
       : "Click to show \(summary.provider.displayName) in the menu bar"
     self.setAccessibilityRole(.button)
+    let accessibleName = [summary.provider.displayName, summary.planName]
+      .filter { !$0.isEmpty }.joined(separator: " ")
     self.setAccessibilityLabel(
-      "\(summary.provider.displayName) \(summary.planName)"
-        + (isSelectedForMenuBar ? ", shown in the menu bar" : ""))
+      accessibleName + (isSelectedForMenuBar ? ", shown in the menu bar" : ""))
     self.setAccessibilityValue(Self.spokenState(summary: summary, now: now))
     self.setAccessibilityHelp(
       "Space shows this provider in the menu bar. Return shows its limits, usage and sources.")
@@ -636,12 +637,15 @@ final class ProviderDashboardCard: NSView {
     toggleDetail: @escaping (ProviderID) -> Void
   ) -> NSView {
     let logo = ProviderLogo(provider: summary.provider)
+    let providerName = [summary.provider.displayName, summary.planName]
+      .filter { !$0.isEmpty }.joined(separator: " ")
     let name = ReserveLabel(
-      "\(summary.provider.displayName) \(summary.planName)",
+      providerName,
       font: ReserveFont.sans(ReserveType.providerName, .semibold),
       color: ReserveColor.text
     ).flexible()
-    name.toolTip = "\(summary.provider.displayName) · \(summary.planName)"
+    name.toolTip = summary.planName.isEmpty
+      ? summary.provider.displayName : "\(summary.provider.displayName) · \(summary.planName)"
 
     var identity: [NSView] = [logo, name]
     if isSelectedForMenuBar {
@@ -672,7 +676,7 @@ final class ProviderDashboardCard: NSView {
       connect.identifier = NSUserInterfaceItemIdentifier("connect-\(summary.provider.rawValue)")
       connect.toolTip =
         summary.requiresClaudeKeychainAccess
-        ? "Allow Reserve read-only access to your Claude sign-in in macOS Keychain"
+        ? "Reserve never stores your Claude login"
         : "Sign in with the official \(summary.provider.displayName) tool to read plan limits"
       trailing = connect
     } else if let primary = summary.primary {
@@ -694,11 +698,11 @@ final class ProviderDashboardCard: NSView {
   private static func unavailableRow(summary: ProviderSummary) -> NSView {
     let message =
       summary.isConnecting && summary.requiresClaudeKeychainAccess
-      ? "Approve read-only access in the macOS prompt"
+      ? "Choose Always Allow in the macOS prompt"
       : summary.isConnecting
       ? "Complete the sign-in in your browser"
       : summary.requiresClaudeKeychainAccess
-        ? "Claude sign-in found · allow access for plan limits"
+        ? "Allow access to show your Claude plan limits"
       : summary.needsConnection && summary.localUsage != nil
         ? "Plan limits unavailable · local activity available"
         : summary.error ?? "Sign in to read plan limits"
@@ -1055,7 +1059,9 @@ private final class UsageDetailGrid: NSView {
       Self.cell(
         "Estimated API value",
         usage.map { DashboardFormat.money($0.apiEquivalentCostUSD) } ?? "—"),
-      Self.cell("Plan", "\(DashboardFormat.money(summary.subscriptionCostUSD))/mo"),
+      Self.cell(
+        "Monthly cost",
+        summary.subscriptionCostUSD.map { "\(DashboardFormat.money($0))/mo" } ?? "Not set"),
     ]
     let top = NSStackView.row([cells[0], NSStackView.spacer(), cells[1]], spacing: 8)
     let bottom = NSStackView.row([cells[2], NSStackView.spacer(), cells[3]], spacing: 8)

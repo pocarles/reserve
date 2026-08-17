@@ -89,7 +89,7 @@ public struct GrokProvider: UsageProvider {
 
     return UsageSnapshot(
       provider: .grok,
-      planName: response.subscriptionTier ?? fetchedTier,
+      planName: GrokPlanFormatter.plan(from: fetchedTier ?? response.subscriptionTier),
       windows: windows,
       source: "Grok Build billing API",
       includedSpend: config.includedSpend,
@@ -199,6 +199,25 @@ public struct GrokProvider: UsageProvider {
     case "grokchat": return "Grok Chat share"
     default: return product + " share"
     }
+  }
+}
+
+enum GrokPlanFormatter {
+  static func plan(from value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let normalized = trimmed.lowercased()
+      .replacingOccurrences(of: "_", with: "")
+      .replacingOccurrences(of: "-", with: "")
+      .replacingOccurrences(of: " ", with: "")
+    if normalized.contains("heavy") { return "SuperGrok Heavy" }
+    if normalized.contains("supergrok") { return "SuperGrok" }
+    if normalized.contains("premiumplus") || normalized.contains("premium+") {
+      return "X Premium+"
+    }
+    if normalized.contains("premium") { return "X Premium" }
+    return trimmed == trimmed.lowercased() ? trimmed.capitalized : trimmed
   }
 }
 

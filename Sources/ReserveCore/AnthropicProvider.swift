@@ -370,12 +370,19 @@ struct ClaudeOAuthCredential: Decodable {
 enum ClaudePlanFormatter {
   static func plan(from tier: String?) -> String? {
     guard let tier else { return nil }
-    if tier.localizedCaseInsensitiveContains("max_20") { return "Max 20x" }
-    if tier.localizedCaseInsensitiveContains("max_5") { return "Max 5x" }
-    if tier.localizedCaseInsensitiveContains("max") { return "Max" }
-    if tier.localizedCaseInsensitiveContains("pro") { return "Pro" }
-    if tier.localizedCaseInsensitiveContains("team") { return "Team" }
-    return tier
+    let trimmed = tier.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let normalized = trimmed.lowercased()
+      .replacingOccurrences(of: "-", with: "_")
+      .replacingOccurrences(of: " ", with: "_")
+    if normalized.contains("max_20") || normalized.contains("max20") { return "Max 20x" }
+    if normalized.contains("max_5") || normalized.contains("max5") { return "Max 5x" }
+    if normalized.contains("max") { return "Max" }
+    if normalized.contains("enterprise") { return "Enterprise" }
+    if normalized.contains("team") { return "Team" }
+    if normalized.contains("pro") { return "Pro" }
+    if normalized.contains("free") { return "Free" }
+    return trimmed == trimmed.lowercased() ? trimmed.capitalized : trimmed
   }
 }
 

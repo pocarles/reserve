@@ -592,15 +592,27 @@ enum LifecycleSelfTest {
     result.expect(
       AllowanceBuilder.needsConnection(signedOut),
       "missing provider credentials do not offer the sign-in recovery action")
+    var keychainAccess = ProviderViewState(provider: .anthropic)
+    keychainAccess.error = UsageProviderError.keychainConsentRequired.localizedDescription
+    keychainAccess.requiresClaudeKeychainAccess = true
+    result.expect(
+      AllowanceBuilder.needsConnection(keychainAccess),
+      "Claude access no longer offers its action after the explanation changes")
     result.expect(
       AppDelegate.shouldOfferClaudeKeychainSetup(hasCredential: true, accessAllowed: false),
       "first launch does not offer access when a Claude Keychain sign-in is available")
     result.expect(
       !AppDelegate.shouldOfferClaudeKeychainSetup(hasCredential: true, accessAllowed: true),
       "first launch asks again after Claude Keychain access was already enabled")
+    result.expect(
+      AppDelegate.claudeSetupTitle == "Show your Claude limits?"
+        && AppDelegate.claudeSetupMessage
+          == "Reserve found Claude on this Mac. Allow access to show your plan limits. "
+            + "Reserve never stores your login. On the next prompt, choose Always Allow.",
+      "the first-launch Claude explanation is no longer short and reassuring")
     let summary = ProviderSummary(
       provider: .anthropic,
-      planName: "Plan",
+      planName: "",
       allowances: [],
       paceState: .unknown,
       serviceStatus: nil,
@@ -613,10 +625,10 @@ enum LifecycleSelfTest {
       localUsage: LocalUsageSummary(
         provider: .anthropic, periodDays: 30, inputTokens: 100, outputTokens: 20,
         apiEquivalentCostUSD: 1, todayTokens: 12),
-      subscriptionCostUSD: 20,
+      subscriptionCostUSD: nil,
       quotaSource: nil)
     let card = ProviderDashboardCard(
-      summary: summary, now: now, isSelectedForMenuBar: false,
+      summary: summary, now: now, isSelectedForMenuBar: false, isExpanded: true,
       connectProvider: { _ in }, selectMenuBarProvider: { _ in })
     card.layoutSubtreeIfNeeded()
     let descendants = self.descendants(of: card)
@@ -627,8 +639,34 @@ enum LifecycleSelfTest {
       "the Claude Keychain recovery action does not say what it will do")
     let copy = descendants.compactMap { $0 as? NSTextField }.map(\.stringValue)
     result.expect(
-      copy.contains("Claude sign-in found · allow access for plan limits"),
-      "a Claude Keychain sign-in does not explain the access required for plan limits")
+      copy.contains("Allow access to show your Claude plan limits"),
+      "Claude access does not explain the benefit in plain language")
+    result.expect(
+      copy.contains("Monthly cost") && copy.contains("Not set")
+        && !copy.contains("$20.00/mo") && !copy.contains("Anthropic Plan"),
+      "an unknown provider plan is still presented as a detected $20 plan")
+
+    let domain = "com.pocarles.reserve.cost-selftest.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: domain) else {
+      result.failures.append("could not create isolated defaults for monthly-cost checks")
+      return result
+    }
+    defaults.removePersistentDomain(forName: domain)
+    defer { defaults.removePersistentDomain(forName: domain) }
+    let store = UsageStore(defaults: defaults, startAutomatically: false, notificationsActive: false)
+    result.expect(
+      store.monthlySubscriptionCost(for: .openAI) == nil
+        && store.monthlySubscriptionCost(for: .anthropic) == nil
+        && store.monthlySubscriptionCost(for: .grok) == nil,
+      "Reserve still invents a monthly cost before a user enters one")
+    store.setMonthlySubscriptionCost(90, for: .anthropic)
+    result.expect(
+      store.monthlySubscriptionCost(for: .anthropic) == 90,
+      "a user's actual monthly cost is not preserved")
+    store.setMonthlySubscriptionCost(nil, for: .anthropic)
+    result.expect(
+      store.monthlySubscriptionCost(for: .anthropic) == nil,
+      "clearing a monthly cost restores the honest unset state")
     return result
   }
 

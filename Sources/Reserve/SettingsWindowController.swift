@@ -47,13 +47,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private let store: UsageStore
-  private let updateChecker = UpdateChecker()
+  private let updater: ReserveUpdater?
   private(set) var pane = Pane.general
   private weak var updateStatusLabel: NSTextField?
   private weak var updateButton: NSButton?
   private var renewalStatusLabels: [ProviderID: NSTextField] = [:]
   private var expandedProviders: Set<ProviderID> = []
-  private var availableReleaseURL: URL?
   /// Held so the registration is explicit; the observer closure itself keeps
   /// only a weak reference to this controller, which lives for the app's run.
   private var storeObserver: UsageStore.ObserverToken?
@@ -61,8 +60,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   /// of the controls it is building.
   private var isApplyingPane = false
 
-  init(store: UsageStore) {
+  init(store: UsageStore, updater: ReserveUpdater?) {
     self.store = store
+    self.updater = updater
     let window = NSWindow(
       contentRect: NSRect(origin: .zero, size: SettingsLayout.defaultSize),
       styleMask: [.titled, .closable, .resizable],
@@ -87,6 +87,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     // has to observe the same store the dashboard does. Without this it keeps
     // whatever was true when the pane was last built.
     self.storeObserver = store.observe { [weak self] in self?.storeChanged() }
+    self.updater?.onChange = { [weak self] in self?.storeChanged() }
   }
 
   /// Rebuilds the visible pane when the store changes.
@@ -304,12 +305,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       .filter { self.store.isEnabled($0.provider) }
     let measured = states.filter { $0.localUsage != nil }
     let apiValue = measured.reduce(0.0) { $0 + ($1.localUsage?.apiEquivalentCostUSD ?? 0) }
-    let plans = measured.reduce(0.0) { $0 + self.store.monthlySubscriptionCost(for: $1.provider) }
+    let plans = measured.compactMap { self.store.monthlySubscriptionCost(for: $0.provider) }
+    let planTotal = plans.reduce(0, +)
     let total = SettingsLabel(
       measured.isEmpty
         ? "No local usage has been measured yet"
-        : "\(DashboardFormat.money(apiValue)) of API-equivalent usage against "
-          + "\(DashboardFormat.money(plans)) of plans",
+        : plans.isEmpty
+          ? "\(DashboardFormat.money(apiValue)) of API-equivalent usage"
+          : "\(DashboardFormat.money(apiValue)) of API-equivalent usage against "
+            + "\(DashboardFormat.money(planTotal)) in monthly costs",
       size: 13, weight: .medium, color: .labelColor)
     total.identifier = NSUserInterfaceItemIdentifier("insights-total")
 
@@ -354,7 +358,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         self.section(title: nil, rows: [AboutHeaderView()]),
         self.section(
           title: "Updates",
-          footer: "Checks this project's official GitHub Releases. Reserve only notifies and links; it never installs an update.",
+          footer: "Checks once a day. When a signed update is ready, Reserve offers to install it and asks before restarting.",
           rows: [
             self.automaticUpdateCheckbox(),
             self.updateControls(),
@@ -383,10 +387,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   private func automaticUpdateCheckbox() -> NSView {
     let checkbox = NSButton(
-      checkboxWithTitle: "Check for updates automatically", target: self,
+      checkboxWithTitle: "Check daily and notify me about updates", target: self,
       action: #selector(self.automaticUpdatesChanged(_:)))
     checkbox.identifier = NSUserInterfaceItemIdentifier("updates-automatic")
-    checkbox.state = self.store.automaticUpdateChecks ? .on : .off
+    let enabled = self.updater?.automaticallyChecksForUpdates ?? self.store.automaticUpdateChecks
+    checkbox.state = enabled ? .on : .off
     return checkbox
   }
 
@@ -439,7 +444,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func automaticUpdatesChanged(_ sender: NSButton) {
-    self.store.automaticUpdateChecks = sender.state == .on
+    let enabled = sender.state == .on
+    if let updater {
+      updater.setAutomaticChecks(enabled)
+    } else {
+      self.store.automaticUpdateChecks = enabled
+    }
   }
 
   private func privacyPane() -> NSView {
@@ -556,30 +566,23 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func updateControls() -> NSView {
-    // A release found by an earlier check is reported straight away, rather than
-    // only while a check happens to be running.
-    let found = self.store.availableUpdate
-    if let found { self.availableReleaseURL = found.url }
     let statusText: String
-    if let found {
-      statusText = "Reserve \(found.version) is available"
-    } else if let checked = self.store.lastUpdateCheck {
+    if let checked = self.updater?.lastUpdateCheckDate {
       let ago = DashboardFormat.updated(checked, now: Date())
         .replacingOccurrences(of: "Updated ", with: "")
-      statusText = "Up to date · checked \(ago)"
+      statusText = "Checked \(ago)"
     } else {
       statusText = "Not checked yet"
     }
-    let status = SettingsLabel(
-      statusText, size: 12,
-      color: found == nil ? .secondaryLabelColor : .controlAccentColor)
+    let status = SettingsLabel(statusText, size: 12, color: .secondaryLabelColor)
     status.identifier = NSUserInterfaceItemIdentifier("about-update-status")
     self.updateStatusLabel = status
     let button = NSButton(
-      title: found == nil ? "Check for Updates…" : "Open Release",
+      title: "Check for Updates…",
       target: self, action: #selector(self.checkForUpdates(_:)))
     button.identifier = NSUserInterfaceItemIdentifier("about-check-updates")
     button.bezelStyle = .rounded
+    button.isEnabled = self.updater?.canCheckForUpdates ?? false
     self.updateButton = button
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -663,7 +666,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   /// Claude sign-in permission.
   private func providerDetail(_ provider: ProviderID) -> NSView {
     var rows: [NSView] = [
-      self.formRow("Plan:", self.planControls(provider), labelWidth: 92),
+      self.formRow("Monthly cost:", self.planControls(provider), labelWidth: 92),
       self.formRow("Sources:", self.sourceLabels(provider), labelWidth: 92),
     ]
     if provider == .anthropic {
@@ -694,7 +697,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   private func planControls(_ provider: ProviderID) -> NSView {
     let currency = SettingsLabel("$", size: 12, color: .secondaryLabelColor)
     let field = SettingsTextField(
-      value: String(format: "%.0f", self.store.monthlySubscriptionCost(for: provider)))
+      value: self.store.monthlySubscriptionCost(for: provider).map {
+        String(format: "%.0f", $0)
+      } ?? "")
+    field.placeholderString = "Optional"
     field.identifier = NSUserInterfaceItemIdentifier("subscription.\(provider.rawValue)")
     field.delegate = self
     field.target = self
@@ -964,33 +970,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func checkForUpdates(_: NSButton) {
-    if let availableReleaseURL, UpdateChecker.isReserveReleaseURL(availableReleaseURL) {
-      NSWorkspace.shared.open(availableReleaseURL)
-      return
-    }
+    guard let updater else { return }
     self.updateStatusLabel?.stringValue = "Checking GitHub Releases…"
     self.updateButton?.isEnabled = false
-    Task { [weak self] in
-      guard let self else { return }
-      let result = await self.updateChecker.check(currentVersion: Self.version)
-      self.updateButton?.isEnabled = true
-      switch result {
-      case .current(let version):
-        self.store.lastUpdateCheck = Date()
-        self.store.availableUpdate = nil
-        self.updateStatusLabel?.stringValue = "Reserve \(version) is up to date"
-      case .available(let version, let url):
-        self.store.lastUpdateCheck = Date()
-        self.store.availableUpdate = (version, url)
-        self.availableReleaseURL = url
-        self.updateStatusLabel?.stringValue = "Reserve \(version) is available"
-        self.updateButton?.title = "Open Release"
-      case .unpublished:
-        self.updateStatusLabel?.stringValue = "No public Reserve release is published yet"
-      case .failed:
-        self.updateStatusLabel?.stringValue = "Could not reach GitHub Releases"
-      }
-    }
+    updater.checkForUpdates()
   }
 
   @objc private func showDataFolder(_: NSButton) {
@@ -1047,7 +1030,20 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let raw = sender.identifier?.rawValue.split(separator: ".").last,
       let provider = ProviderID(rawValue: String(raw))
     else { return }
-    self.store.setMonthlySubscriptionCost(sender.doubleValue, for: provider)
+    let trimmed = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      self.store.setMonthlySubscriptionCost(nil, for: provider)
+      return
+    }
+    guard let value = Double(trimmed), value.isFinite, value >= 0 else {
+      sender.stringValue = self.store.monthlySubscriptionCost(for: provider).map {
+        String(format: "%.0f", $0)
+      } ?? ""
+      sender.toolTip = "Enter your monthly cost, or leave this blank"
+      return
+    }
+    sender.toolTip = "Optional · used only for Insights"
+    self.store.setMonthlySubscriptionCost(value, for: provider)
   }
 
   @objc private func renewalDayChanged(_ sender: NSTextField) {
@@ -1382,6 +1378,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && aboutIDs.contains("about-version")
       && aboutIDs.contains("about-check-updates")
       && aboutIDs.contains("updates-automatic")
+      && automaticBox?.title == "Check daily and notify me about updates"
       && aboutIDs.contains("link-\(ReserveLinks.repository.absoluteString)")
       && aboutIDs.contains("link-\(ReserveLinks.xProfile.absoluteString)")
       && automaticUpdatesToggle

@@ -128,6 +128,7 @@ stage_app="$temp_root/Reserve.app"
 contents_dir="$stage_app/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
+frameworks_dir="$contents_dir/Frameworks"
 staged_dmg="$temp_root/Reserve.dmg"
 layout_dmg="$temp_root/Reserve-layout.dmg"
 staged_checksum="$temp_root/Reserve.dmg.sha256"
@@ -163,13 +164,29 @@ copy_resource_bundle() {
   fi
 }
 
+copy_sparkle_framework() {
+  local bin_dir=$1
+  local license_path=$2
+  local source_framework="$bin_dir/Sparkle.framework"
+  [[ -d "$source_framework" && -f "$license_path" ]] || {
+    echo "error: SwiftPM did not provide the complete Sparkle distribution" >&2
+    exit 65
+  }
+  ditto "$source_framework" "$frameworks_dir/Sparkle.framework"
+  cp "$license_path" "$resources_dir/Sparkle-LICENSE.txt"
+  # Reserve is not sandboxed, so Sparkle's sandbox-only services are unused.
+  # Omitting them keeps the menu-bar app and its signing surface smaller.
+  rm -rf "$frameworks_dir/Sparkle.framework/Versions/B/XPCServices"
+}
+
 smoke_test_packaged_app() {
   local app=$1
   local stdout_log="$temp_root/package-smoke.stdout"
   local stderr_log="$temp_root/package-smoke.stderr"
   local app_pid
 
-  "$app/Contents/MacOS/Reserve" >"$stdout_log" 2>"$stderr_log" &
+  "$app/Contents/MacOS/Reserve" -SUEnableAutomaticChecks NO \
+    >"$stdout_log" 2>"$stderr_log" &
   app_pid=$!
   for _ in {1..20}; do
     sleep 0.25
@@ -185,13 +202,15 @@ smoke_test_packaged_app() {
 }
 
 cd "$project_dir"
-mkdir -p "$macos_dir" "$resources_dir"
+mkdir -p "$macos_dir" "$resources_dir" "$frameworks_dir"
 
 if [[ "$mode" == local ]]; then
   swift build -c "$configuration" --product "$product"
   bin_dir=$(swift build -c "$configuration" --show-bin-path)
   cp "$bin_dir/$product" "$macos_dir/$product"
   copy_resource_bundle "$bin_dir"
+  copy_sparkle_framework "$bin_dir" \
+    "$project_dir/.build/artifacts/sparkle/Sparkle/LICENSE"
 else
   arm_build="$temp_root/build-arm64"
   intel_build="$temp_root/build-x86_64"
@@ -209,6 +228,8 @@ else
   lipo -create "$arm_bin_dir/$product" "$intel_bin_dir/$product" \
     -output "$macos_dir/$product"
   copy_resource_bundle "$arm_bin_dir"
+  copy_sparkle_framework "$arm_bin_dir" \
+    "$arm_build/artifacts/sparkle/Sparkle/LICENSE"
   # Keep the compiled-in SwiftPM development fallback paths unavailable for
   # the launch check so it proves the staged app is self-contained.
   mv "$arm_bin_dir/Reserve_Reserve.bundle" "$temp_root/arm64-build-resource-bundle"
@@ -246,13 +267,39 @@ sign_nested_code() {
   done < <(find "$contents_dir" -type f -print0)
 }
 
+# Sparkle's executable helpers are nested bundles, so sign them from the
+# inside out before signing the framework and finally Reserve.app. `--deep`
+# signing is deliberately avoided because these components have distinct
+# signing requirements.
+sign_sparkle() {
+  local identity=$1
+  local sparkle="$frameworks_dir/Sparkle.framework"
+  local autoupdate="$sparkle/Versions/B/Autoupdate"
+  local updater_app="$sparkle/Versions/B/Updater.app"
+  [[ -f "$autoupdate" && -d "$updater_app" ]] || {
+    echo "error: Sparkle installer helpers are missing" >&2
+    exit 65
+  }
+  if [[ "$identity" == - ]]; then
+    codesign --force --sign - "$autoupdate"
+    codesign --force --sign - "$updater_app"
+    codesign --force --sign - "$sparkle"
+  else
+    codesign --force --timestamp --options runtime --sign "$identity" "$autoupdate"
+    codesign --force --timestamp --options runtime --sign "$identity" "$updater_app"
+    codesign --force --timestamp --options runtime --sign "$identity" "$sparkle"
+  fi
+}
+
 if [[ "$mode" == release ]]; then
   sign_nested_code "$sign_identity"
+  sign_sparkle "$sign_identity"
   codesign --force --timestamp --options runtime \
     --entitlements "$project_dir/Support/Reserve.entitlements" \
     --sign "$sign_identity" "$stage_app"
 else
   sign_nested_code -
+  sign_sparkle -
   codesign --force --sign - "$stage_app"
 fi
 

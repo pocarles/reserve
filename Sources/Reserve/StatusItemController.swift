@@ -592,23 +592,21 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         == "auth.x.ai"
       && UsageStore.authorizationURL(
         in: "https://example.com/oauth/authorize?code=not-trusted", for: .anthropic) == nil
-    // Only a release page of this repository is ever opened.
-    let updateURLsAreRestricted =
-      UpdateChecker.isReserveReleaseURL(
-        URL(string: "https://github.com/pocarles/reserve/releases/tag/v0.2.0")!)
-      && UpdateChecker.isReserveReleaseURL(
-        URL(string: "https://github.com/pocarles/Reserve/releases/tag/v0.2.0")!)
-      && !UpdateChecker.isReserveReleaseURL(URL(string: "https://example.com/releases/tag/v1")!)
-      && !UpdateChecker.isReserveReleaseURL(
-        URL(string: "https://github.com/attacker/reserve/releases/tag/v1")!)
-      && !UpdateChecker.isReserveReleaseURL(
-        URL(string: "http://github.com/pocarles/reserve/releases/tag/v1")!)
-      && !UpdateChecker.isReserveReleaseURL(
-        URL(string: "https://github.com/pocarles/reserve/releases/../../attacker/evil")!)
-      && !UpdateChecker.isReserveReleaseURL(
-        URL(string: "https://github.com/pocarles/reserve/releases/%2e%2e/%2e%2e/attacker/evil")!)
-      && !UpdateChecker.isReserveReleaseURL(
-        URL(string: "https://github.com/pocarles/reserve/releases/..%2f..%2fattacker%2fevil")!)
+    let updateMigrationWorks: Bool = {
+      let domain = "Reserve.UpdaterMigration.\(UUID().uuidString)"
+      guard let defaults = UserDefaults(suiteName: domain) else { return false }
+      defer { defaults.removePersistentDomain(forName: domain) }
+      defaults.set(true, forKey: ReserveUpdater.legacyAutomaticChecksKey)
+      let migrated = ReserveUpdater.migrateLegacyAutomaticChecks(
+        defaults: defaults, domainName: domain)
+      let carriedForward = defaults.bool(forKey: ReserveUpdater.automaticChecksKey)
+      defaults.set(false, forKey: ReserveUpdater.automaticChecksKey)
+      let preserved = !ReserveUpdater.migrateLegacyAutomaticChecks(
+        defaults: defaults, domainName: domain)
+        && !defaults.bool(forKey: ReserveUpdater.automaticChecksKey)
+      return migrated && carriedForward && preserved
+        && ReserveUpdater.dailyInterval == 24 * 3_600
+    }()
     // A calm plan does not earn the provider subprocess a sweep costs; anything
     // that could change the menu bar still refreshes on time.
     func state(_ used: Double, fetchedMinutesAgo: Double, resetsInHours: Double) -> ProviderViewState {
@@ -665,7 +663,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       providerStatusWorks, directProviderSelectionWorks, fullCardSelectionHitTargetWorks,
       firstClickSelectionWorks, footerButtonsArePadded, providerButtonsArePadded,
       refreshButtonIsPadded, dashboardTypographyIsReadable, oauthURLParsingIsSafe,
-      outsideClickDismissalWorks, updateURLsAreRestricted, adaptiveSchedulingWorks,
+      outsideClickDismissalWorks, updateMigrationWorks,
+      adaptiveSchedulingWorks,
       staleFreshnessIsVisible, freshWithoutForecastDoesNotLookStale,
       automaticSourceWorks,
       pinnedModelWorks, aggregateCopyWorks, deficitForecastUsesRenewalGap,
@@ -675,7 +674,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateURLs=\(updateURLsAreRestricted), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (
@@ -1039,13 +1038,27 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.openSettings()
   }
 
+  private func connectProvider(_ provider: ProviderID) {
+    if provider == .anthropic,
+      self.store.states[provider]?.requiresClaudeKeychainAccess == true
+    {
+      // The system Keychain sheet takes focus and closes menu-bar popovers.
+      // Reopen only after that sheet has finished so first-time users see the
+      // result instead of wondering whether Reserve crashed.
+      self.popover.performClose(nil)
+      self.store.allowClaudeKeychainAccess { [weak self] in self?.showMenu() }
+      return
+    }
+    self.store.connect(provider)
+  }
+
   private func dashboardControllerForUse() -> DashboardViewController {
     if let dashboardController { return dashboardController }
     let controller = DashboardViewController(
       store: self.store,
       actions: DashboardActions(
         refreshAll: { [weak self] in self?.store.refreshAll() },
-        connectProvider: { [weak self] provider in self?.store.connect(provider) },
+        connectProvider: { [weak self] provider in self?.connectProvider(provider) },
         selectMenuBarProvider: { [weak self] provider in
           self?.store.selectMenuBarProvider(provider)
         },
