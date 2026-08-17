@@ -292,6 +292,19 @@ public enum ReserveSelfTests {
     else { throw Failure("OpenAI rate-limit decoding") }
     record("OpenAI rate-limit decoding")
 
+    guard OpenAIPlanFormatter.plan(from: "pro") == "Pro",
+      OpenAIPlanFormatter.plan(from: "chatgpt_plus") == "Plus",
+      OpenAIPlanFormatter.plan(from: "business") == "Business",
+      OpenAIPlanFormatter.plan(from: "  ") == nil,
+      ClaudePlanFormatter.plan(from: "default_claude_max_5x") == "Max 5x",
+      ClaudePlanFormatter.plan(from: "default-claude-max-20x") == "Max 20x",
+      ClaudePlanFormatter.plan(from: "team") == "Team",
+      GrokPlanFormatter.plan(from: "supergrok_heavy") == "SuperGrok Heavy",
+      GrokPlanFormatter.plan(from: "x_premium_plus") == "X Premium+",
+      GrokPlanFormatter.plan(from: "premium") == "X Premium"
+    else { throw Failure("provider plan-name normalization") }
+    record("provider plan-name normalization")
+
     let anthropic = try JSONDecoder().decode(ClaudeUsageResponse.self, from: anthropicData)
     guard anthropic.fiveHour?.utilization == 14.2,
       anthropic.limits?.first?.scope?.model?.displayName == "Fable",

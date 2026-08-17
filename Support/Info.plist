@@ -28,5 +28,21 @@
     <true/>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 Pierre-Olivier Carles</string>
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/pocarles/reserve/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>u5A0oU1W4GI181ZhpdgiHp67L3accNISf8oJD9kNMbk=</string>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUSendProfileInfo</key>
+    <false/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
 </dict>
 </plist>

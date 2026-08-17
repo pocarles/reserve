@@ -32,7 +32,11 @@ plist="$app/Contents/Info.plist"
 binary="$app/Contents/MacOS/Reserve"
 privacy="$app/Contents/Resources/PrivacyInfo.xcprivacy"
 provider_logos="$app/Contents/Resources/Reserve_Reserve.bundle/ProviderLogos"
+sparkle="$app/Contents/Frameworks/Sparkle.framework"
 [[ -f "$plist" && -x "$binary" && -f "$privacy" \
+  && -d "$sparkle" && -x "$sparkle/Versions/B/Autoupdate" \
+  && -d "$sparkle/Versions/B/Updater.app" \
+  && -f "$app/Contents/Resources/Sparkle-LICENSE.txt" \
   && -f "$provider_logos/openAI.svg" \
   && -f "$provider_logos/anthropic.svg" \
   && -f "$provider_logos/grok.svg" ]] || {
@@ -51,6 +55,7 @@ expect_equal() {
 }
 
 plutil -lint "$plist" "$privacy"
+otool -L "$binary" | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle'
 expect_equal CFBundleExecutable \
   "$(plutil -extract CFBundleExecutable raw "$plist")" Reserve
 expect_equal CFBundleIdentifier \
@@ -61,6 +66,28 @@ expect_equal CFBundleVersion \
   "$(plutil -extract CFBundleVersion raw "$plist")" "$expected_build"
 expect_equal LSMinimumSystemVersion \
   "$(plutil -extract LSMinimumSystemVersion raw "$plist")" 14.0
+expect_equal SUFeedURL \
+  "$(plutil -extract SUFeedURL raw "$plist")" \
+  "https://github.com/pocarles/reserve/releases/latest/download/appcast.xml"
+expect_equal SUPublicEDKey \
+  "$(plutil -extract SUPublicEDKey raw "$plist")" \
+  "u5A0oU1W4GI181ZhpdgiHp67L3accNISf8oJD9kNMbk="
+expect_equal SUScheduledCheckInterval \
+  "$(plutil -extract SUScheduledCheckInterval raw "$plist")" 86400
+expect_equal SUAllowsAutomaticUpdates \
+  "$(plutil -extract SUAllowsAutomaticUpdates raw "$plist")" false
+expect_equal SUAutomaticallyUpdate \
+  "$(plutil -extract SUAutomaticallyUpdate raw "$plist")" false
+expect_equal SUEnableAutomaticChecks \
+  "$(plutil -extract SUEnableAutomaticChecks raw "$plist")" true
+expect_equal SUSendProfileInfo \
+  "$(plutil -extract SUSendProfileInfo raw "$plist")" false
+expect_equal SUVerifyUpdateBeforeExtraction \
+  "$(plutil -extract SUVerifyUpdateBeforeExtraction raw "$plist")" true
+[[ ! -e "$sparkle/Versions/B/XPCServices" ]] || {
+  echo "error: unused Sparkle XPC services were bundled" >&2
+  exit 65
+}
 
 codesign --verify --deep --strict --verbose=2 "$app"
 
@@ -68,6 +95,11 @@ if [[ "$mode" != local ]]; then
   archs=" $(lipo -archs "$binary") "
   [[ "$archs" == *' arm64 '* && "$archs" == *' x86_64 '* ]] || {
     echo "error: Reserve is not Universal 2 (found:${archs})" >&2
+    exit 65
+  }
+  sparkle_archs=" $(lipo -archs "$sparkle/Versions/B/Sparkle") "
+  [[ "$sparkle_archs" == *' arm64 '* && "$sparkle_archs" == *' x86_64 '* ]] || {
+    echo "error: Sparkle is not Universal 2 (found:${sparkle_archs})" >&2
     exit 65
   }
 fi
@@ -80,6 +112,12 @@ if [[ "$mode" == release ]]; then
   actual_team_id=$(awk -F= '/^TeamIdentifier=/{print $2}' <<< "$details")
   [[ -n "${RESERVE_TEAM_ID:-}" && "$actual_team_id" == "$RESERVE_TEAM_ID" ]] || {
     echo "error: signed TeamIdentifier does not match RESERVE_TEAM_ID" >&2
+    exit 65
+  }
+  sparkle_details=$(codesign -d --verbose=4 "$sparkle" 2>&1)
+  sparkle_team_id=$(awk -F= '/^TeamIdentifier=/{print $2}' <<< "$sparkle_details")
+  [[ "$sparkle_team_id" == "$RESERVE_TEAM_ID" ]] || {
+    echo "error: Sparkle TeamIdentifier does not match RESERVE_TEAM_ID" >&2
     exit 65
   }
 fi

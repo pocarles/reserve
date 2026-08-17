@@ -5,8 +5,9 @@ capacity remains in OpenAI Codex, Anthropic Claude, and Grok, when each window
 resets, and whether the current pace is likely to last.
 
 It is deliberately small: no Reserve account, browser automation, WebView,
-cookie extraction, telemetry, crash reporting, cloud service, third-party
-status aggregator, automatic updater, or third-party Swift package dependency.
+cookie extraction, telemetry, crash reporting, cloud service, or third-party
+status aggregator. Reserve uses Sparkle only for signed, user-approved macOS
+updates.
 
 ## Install
 
@@ -22,6 +23,10 @@ Universal 2 app for Apple silicon and Intel Macs.
    ```
 
 3. Open the DMG and drag Reserve to Applications.
+
+This manual step is required for the first Sparkle-enabled release. After that,
+Reserve checks once a day by default and presents an **Install Update** button
+when a newer signed release is available. It never installs silently.
 
 Release assets are produced only by the protected GitHub release workflow. A
 source build is ad-hoc signed and is intended only for the Mac that built it.
@@ -103,9 +108,10 @@ exhaustion, recovery, stale data, and incidents. Fixed thresholds, renewal
 notices, reset notices, and sounds are optional.
 
 The menu-bar item can follow the most constrained enabled provider or remain
-pinned to one provider. Automatic update checks are off by default. A manual or
-enabled automatic check reads GitHub Releases and offers to open the exact
-GitHub release page; Reserve never downloads or executes an update.
+pinned to one provider. Reserve checks its signed update feed once a day by
+default. Sparkle verifies the update's Ed25519 signature and Apple Developer ID
+signature, then offers a familiar macOS install button. Checks send no system
+profile or analytics, and can be disabled in Settings > About.
 
 ## Privacy and storage
 
@@ -143,6 +149,7 @@ See [SECURITY.md](SECURITY.md) for reporting and support policy.
 - provider-limit refresh: configurable from 1 to 30 minutes;
 - official service health: no more than once every 10 minutes;
 - local aggregate scan: every 30 minutes or on manual refresh;
+- signed update feed: once every 24 hours, with no system profile attached;
 - scheduled work is skipped in Low Power Mode;
 - wake/activation refreshes only data that is due;
 - provider subprocess calls have deadlines, and descendant-held pipes cannot

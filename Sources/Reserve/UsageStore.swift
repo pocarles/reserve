@@ -10,7 +10,7 @@ struct ProviderViewState: Identifiable {
   var isRefreshing = false
   var isConnecting = false
   var localUsage: LocalUsageSummary?
-  var subscriptionCostUSD: Double = 0
+  var subscriptionCostUSD: Double?
   var renewalStart: Date?
   var nextRenewal: Date?
   var serviceStatus: ProviderServiceStatus?
@@ -85,6 +85,7 @@ final class UsageStore {
   private var refreshTokens: [ProviderID: Int] = [:]
   private var pendingRefreshes: Set<ProviderID> = []
   private var pendingClaudeKeychainInteraction = false
+  private var claudeAccessCompletions: [() -> Void] = []
   private var lastRefreshCompletedAt: Date?
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
@@ -152,7 +153,8 @@ final class UsageStore {
 
   /// Called only from an explicit button or checkbox. This one refresh may ask
   /// macOS for Keychain approval; scheduled refreshes always stay silent.
-  func allowClaudeKeychainAccess() {
+  func allowClaudeKeychainAccess(onFinished: (() -> Void)? = nil) {
+    if let onFinished { self.claudeAccessCompletions.append(onFinished) }
     self.defaults.set(true, forKey: "anthropic.keychainReadAllowed")
     self.states[.anthropic]?.requiresClaudeKeychainAccess = true
     self.pendingClaudeKeychainInteraction = true
@@ -306,37 +308,12 @@ final class UsageStore {
     }
   }
 
-  /// Whether Reserve looks for a new release on its own. Off by default: this
-  /// build is from source and there is no downloadable GitHub Release yet. The
-  /// check contacts GitHub and sends nothing but the current version.
+  /// The former updater preference, retained only so existing users and source
+  /// UI tests can carry their choice into Sparkle's native preference.
   var automaticUpdateChecks: Bool {
     get { self.defaults.bool(forKey: "updates.automatic") }
     set {
       self.defaults.set(newValue, forKey: "updates.automatic")
-      self.changed()
-    }
-  }
-
-  /// When the last automatic check ran, so launching Reserve repeatedly does not
-  /// mean asking GitHub repeatedly.
-  var lastUpdateCheck: Date? {
-    get { self.defaults.object(forKey: "updates.lastCheckedAt") as? Date }
-    set { self.defaults.set(newValue, forKey: "updates.lastCheckedAt") }
-  }
-
-  /// The newest release Reserve has seen, remembered so Settings can report it
-  /// whenever it is next opened rather than only while a check is running.
-  var availableUpdate: (version: String, url: URL)? {
-    get {
-      guard let version = self.defaults.string(forKey: "updates.availableVersion"),
-        let raw = self.defaults.string(forKey: "updates.availableURL"),
-        let url = URL(string: raw), url.scheme == "https"
-      else { return nil }
-      return (version, url)
-    }
-    set {
-      self.defaults.set(newValue?.version, forKey: "updates.availableVersion")
-      self.defaults.set(newValue?.url.absoluteString, forKey: "updates.availableURL")
       self.changed()
     }
   }
@@ -578,30 +555,21 @@ final class UsageStore {
     self.defaults.bool(forKey: "provider.\(provider.rawValue).enabled")
   }
 
-  func monthlySubscriptionCost(for provider: ProviderID) -> Double {
+  func monthlySubscriptionCost(for provider: ProviderID) -> Double? {
     let key = "subscription.monthlyCost.\(provider.rawValue)"
-    if self.defaults.object(forKey: key) != nil {
-      return max(0, self.defaults.double(forKey: key))
-    }
-    let plan = self.states[provider]?.snapshot?.planName?.lowercased() ?? ""
-    switch provider {
-    case .openAI:
-      if plan.contains("plus") { return 20 }
-      if plan.contains("business") || plan.contains("team") { return 30 }
-      return 200
-    case .anthropic:
-      if plan.contains("20") { return 200 }
-      if plan.contains("5") || plan.contains("premium") { return 100 }
-      if plan.contains("team") { return 25 }
-      return 20
-    case .grok:
-      if plan.contains("heavy") { return 300 }
-      return 30
-    }
+    guard let number = self.defaults.object(forKey: key) as? NSNumber,
+      number.doubleValue.isFinite
+    else { return nil }
+    return max(0, number.doubleValue)
   }
 
-  func setMonthlySubscriptionCost(_ value: Double, for provider: ProviderID) {
-    self.defaults.set(max(0, value), forKey: "subscription.monthlyCost.\(provider.rawValue)")
+  func setMonthlySubscriptionCost(_ value: Double?, for provider: ProviderID) {
+    let key = "subscription.monthlyCost.\(provider.rawValue)"
+    if let value, value.isFinite {
+      self.defaults.set(max(0, value), forKey: key)
+    } else {
+      self.defaults.removeObject(forKey: key)
+    }
     self.changed()
   }
 
@@ -833,7 +801,7 @@ final class UsageStore {
       "notifications.sound": false,
       "appearance.theme": AppearanceTheme.matrix.rawValue,
       "appearance.mode": AppearanceMode.system.rawValue,
-      "updates.automatic": false,
+      "updates.automatic": true,
       "menuBar.provider": "reserve",
       "menuBar.showsRemaining": true,
       "menuBar.showsReset": true,
@@ -1069,10 +1037,15 @@ final class UsageStore {
         self.states[provider]?.isRefreshing = false
         if allowKeychainInteraction { self.states[provider]?.isConnecting = false }
         if notify { self.changed() }
+        var startedFollowUpClaudeInteraction = false
         if provider == .anthropic, self.pendingClaudeKeychainInteraction {
-          self.refresh(.anthropic, allowKeychainInteraction: true)
+          startedFollowUpClaudeInteraction = self.refresh(
+            .anthropic, allowKeychainInteraction: true)
         } else if self.pendingRefreshes.remove(provider) != nil {
           self.refresh(provider)
+        }
+        if allowKeychainInteraction, !startedFollowUpClaudeInteraction {
+          self.completeClaudeKeychainInteraction()
         }
       }
     }
@@ -1129,6 +1102,20 @@ final class UsageStore {
     }
     guard isCurrent() else { return }
     self.reportStaleness(provider)
+  }
+
+  private func completeClaudeKeychainInteraction() {
+    let completions = self.claudeAccessCompletions
+    self.claudeAccessCompletions.removeAll(keepingCapacity: false)
+    for completion in completions { completion() }
+  }
+
+  func exerciseClaudeAccessCompletionForSelfTest() -> Bool {
+    var count = 0
+    self.claudeAccessCompletions.append { count += 1 }
+    self.completeClaudeKeychainInteraction()
+    self.completeClaudeKeychainInteraction()
+    return count == 1 && self.claudeAccessCompletions.isEmpty
   }
 
   /// Fires once when a provider's numbers go stale, and clears when they

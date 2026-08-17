@@ -33,6 +33,14 @@ CodexBar is distributed under the following license:
 No CodexBar WebKit integration, cookie extraction, raw history database,
 widget, executable updater, or provider-registry implementation is included.
 
+## Sparkle
+
+Reserve bundles [Sparkle 2.9.5](https://github.com/sparkle-project/Sparkle)
+for signed, user-approved macOS updates. Sparkle and its included third-party
+components are distributed under the licenses in the bundled
+`Sparkle-LICENSE.txt` file. Reserve removes Sparkle's sandbox-only XPC services
+because Reserve is not sandboxed.
+
 ## Provider names and marks
 
 OpenAI, Codex, Anthropic, Claude, xAI, Grok, and their associated marks belong

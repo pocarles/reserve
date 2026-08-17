@@ -33,9 +33,15 @@ enum ReserveApp {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+  static let claudeSetupTitle = "Show your Claude limits?"
+  static let claudeSetupMessage =
+    "Reserve found Claude on this Mac. Allow access to show your plan limits. "
+    + "Reserve never stores your login. On the next prompt, choose Always Allow."
+
   private var store: UsageStore?
   private var statusController: StatusItemController?
   private var settingsController: SettingsWindowController?
+  private var updater: ReserveUpdater?
 
   func applicationDidFinishLaunching(_: Notification) {
     NSApplication.shared.setActivationPolicy(.accessory)
@@ -51,6 +57,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let isUIStressTest = CommandLine.arguments.contains("--stress-ui")
     let isLifecycleSelfTest = CommandLine.arguments.contains("--self-test-lifecycle")
     let lifecycleCaptureIndex = CommandLine.arguments.firstIndex(of: "--capture-lifecycle")
+    let isAutomatedRun = isUISelfTest || renderIndex != nil || settingsRenderIndex != nil
+      || appearanceRenderIndex != nil || aboutRenderIndex != nil || alertsRenderIndex != nil
+      || insightsRenderIndex != nil || providersRenderIndex != nil || menuBarRenderIndex != nil
+      || isUIStressTest || isLifecycleSelfTest || lifecycleCaptureIndex != nil
     let isDashboardRender = renderIndex != nil
     let isSettingsRender = settingsRenderIndex != nil
     let isAppearanceRender = appearanceRenderIndex != nil
@@ -107,6 +117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       store.menuBarShowsReset = true
     }
     self.store = store
+    if Bundle.main.bundleURL.pathExtension == "app", !isAutomatedRun {
+      self.updater = ReserveUpdater()
+    }
     NotificationCenter.default.addObserver(
       self, selector: #selector(self.applicationBecameActive),
       name: NSApplication.didBecomeActiveNotification, object: nil)
@@ -173,29 +186,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
     } else {
       self.completeFirstLaunchIfNeeded()
-      self.checkForUpdatesIfEnabled()
-    }
-  }
-
-  /// Looks for a newer release at most once a day, and only when asked to. The
-  /// request carries the running version and nothing else, and the result is
-  /// remembered so Settings can report it without checking again.
-  private func checkForUpdatesIfEnabled() {
-    guard let store, store.automaticUpdateChecks else { return }
-    if let last = store.lastUpdateCheck, Date().timeIntervalSince(last) < 24 * 3_600 { return }
-    let version =
-      Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
-    Task { [weak self] in
-      let result = await UpdateChecker().check(currentVersion: version)
-      await MainActor.run {
-        guard let store = self?.store else { return }
-        store.lastUpdateCheck = Date()
-        if case .available(let newVersion, let url) = result {
-          store.availableUpdate = (newVersion, url)
-        } else {
-          store.availableUpdate = nil
-        }
-      }
     }
   }
 
@@ -439,15 +429,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "Connect Claude to Reserve?"
-        alert.informativeText =
-          "Reserve found your Claude sign-in securely stored on this Mac. Allow read-only "
-          + "access to show your remaining plan limits. Reserve never copies or stores the "
-          + "sign-in. If macOS asks, choose Always Allow so future refreshes stay automatic."
-        alert.addButton(withTitle: "Allow Access")
+        alert.messageText = Self.claudeSetupTitle
+        alert.informativeText = Self.claudeSetupMessage
+        alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Not Now")
         if alert.runModal() == .alertFirstButtonReturn {
-          store.allowClaudeKeychainAccess()
+          store.allowClaudeKeychainAccess { [weak self] in
+            self?.statusController?.showMenu()
+          }
+          return
         }
       }
       self.statusController?.showMenu()
@@ -741,13 +731,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let settingsResult = settingsController.validateForSelfTest()
     let brokenPipeIsSafe = ReserveApp.brokenPipeWriteFailsSafely()
     let loginCompletionQueuesRefresh = store.exerciseLoginCompletionDuringRefreshForSelfTest()
+    let claudeAccessRevealsOnce = store.exerciseClaudeAccessCompletionForSelfTest()
     let success = statusResult.success && settingsResult.success && brokenPipeIsSafe
-      && loginCompletionQueuesRefresh
+      && loginCompletionQueuesRefresh && claudeAccessRevealsOnce
     let details = [
       statusResult.details,
       settingsResult.details,
       "broken pipe handling=\(brokenPipeIsSafe)",
       "post-login refresh queue=\(loginCompletionQueuesRefresh)",
+      "post-Keychain reveal=\(claudeAccessRevealsOnce)",
     ].joined(separator: "; ")
     Self.finishUISelfTest(success: success, details: details)
   }
@@ -834,7 +826,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private func settingsControllerForUse() -> SettingsWindowController? {
     if let settingsController { return settingsController }
     guard let store else { return nil }
-    let controller = SettingsWindowController(store: store)
+    let controller = SettingsWindowController(store: store, updater: self.updater)
     self.settingsController = controller
     return controller
   }

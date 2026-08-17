@@ -10,12 +10,23 @@ let package = Package(
         .executable(name: "reserve-probe", targets: ["ReserveProbe"]),
         .executable(name: "reserve-selftest", targets: ["ReserveSelfTest"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.5"),
+    ],
     targets: [
         .target(name: "ReserveCore"),
         .executableTarget(
             name: "Reserve",
-            dependencies: ["ReserveCore"],
-            resources: [.copy("Resources/ProviderLogos")]),
+            dependencies: [
+                "ReserveCore",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            resources: [.copy("Resources/ProviderLogos")],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath", "-Xlinker", "@loader_path/../Frameworks",
+                ])
+            ]),
         .executableTarget(
             name: "ReserveProbe",
             dependencies: ["ReserveCore"]),

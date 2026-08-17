@@ -31,15 +31,15 @@ public struct OpenAIProvider: UsageProvider {
     let response = try rpc.decodeResult(OpenAIRateLimitsResponse.self, from: limitMessage)
     let selected = response.rateLimitsByLimitId?["codex"] ?? response.rateLimits
 
-    var planName = selected.planType
-    if planName?.isEmpty ?? true,
+    var planName = OpenAIPlanFormatter.plan(from: selected.planType)
+    if planName == nil,
       let message = try? await rpc.request(
         method: "account/read",
         params: ["refreshToken": false],
         timeout: .seconds(3)),
       let account = try? rpc.decodeResult(OpenAIAccountResponse.self, from: message)
     {
-      planName = account.account?.planType
+      planName = OpenAIPlanFormatter.plan(from: account.account?.planType)
     }
 
     var windows: [UsageWindow] = []
@@ -61,6 +61,29 @@ public struct OpenAIProvider: UsageProvider {
       planName: planName,
       windows: windows,
       source: "Codex app-server")
+  }
+}
+
+enum OpenAIPlanFormatter {
+  static func plan(from value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let normalized = trimmed.lowercased()
+      .replacingOccurrences(of: "_", with: "")
+      .replacingOccurrences(of: "-", with: "")
+      .replacingOccurrences(of: " ", with: "")
+      .replacingOccurrences(of: "chatgpt", with: "")
+    switch normalized {
+    case "free": return "Free"
+    case "plus": return "Plus"
+    case "pro": return "Pro"
+    case "team": return "Team"
+    case "business": return "Business"
+    case "enterprise": return "Enterprise"
+    case "edu", "education": return "Edu"
+    default: return trimmed == trimmed.lowercased() ? trimmed.capitalized : trimmed
+    }
   }
 }
 

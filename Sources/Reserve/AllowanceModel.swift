@@ -89,7 +89,7 @@ struct ProviderSummary {
   let lastUpdated: Date?
   /// Detail-layer material, kept out of the glance view.
   let localUsage: LocalUsageSummary?
-  let subscriptionCostUSD: Double
+  let subscriptionCostUSD: Double?
   let quotaSource: String?
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
@@ -140,7 +140,7 @@ enum AllowanceBuilder {
 
     return ProviderSummary(
       provider: state.provider,
-      planName: (planName?.isEmpty == false ? planName : nil) ?? "Plan",
+      planName: (planName?.isEmpty == false ? planName : nil) ?? "",
       allowances: allowances,
       paceState: allowances.first(where: { $0.isPrimary })?.paceState
         ?? allowances.first?.paceState
@@ -179,6 +179,7 @@ enum AllowanceBuilder {
   }
 
   static func needsConnection(_ state: ProviderViewState) -> Bool {
+    if state.requiresClaudeKeychainAccess { return true }
     guard let error = state.error?.lowercased() else { return state.snapshot == nil }
     return ["auth", "credential", "keychain", "sign in"].contains { error.contains($0) }
   }

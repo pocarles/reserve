@@ -137,6 +137,26 @@ jobs:
           RESERVE_OUTPUT_DIR: ${{ runner.temp }}/reserve-release
         run: ./Scripts/package_app.sh --mode release
 
+      - name: Generate signed Sparkle update feed
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          RESERVE_VERSION: ${{ steps.release_metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          set +x
+          [[ -n "$SPARKLE_PRIVATE_KEY" ]]
+          output_dir="$RUNNER_TEMP/reserve-release"
+          tool=.build/artifacts/sparkle/Sparkle/bin/generate_appcast
+          [[ -x "$tool" && -f "$output_dir/Reserve.dmg" ]]
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$tool" \
+            --ed-key-file - \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/v${RESERVE_VERSION}/" \
+            --link "https://github.com/$GITHUB_REPOSITORY/releases/tag/v${RESERVE_VERSION}" \
+            "$output_dir"
+          xmllint --noout "$output_dir/appcast.xml"
+          grep -Fq "Reserve.dmg" "$output_dir/appcast.xml"
+          grep -Fq "sparkle:edSignature=" "$output_dir/appcast.xml"
+
       - name: Remove temporary credentials
         if: always()
         env:
@@ -153,6 +173,7 @@ jobs:
           path: |
             ${{ runner.temp }}/reserve-release/Reserve.dmg
             ${{ runner.temp }}/reserve-release/Reserve.dmg.sha256
+            ${{ runner.temp }}/reserve-release/appcast.xml
           if-no-files-found: error
           retention-days: 14
 
@@ -175,14 +196,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          RELEASE_PREAMBLE: |
+            ## Updating from Reserve 0.9.1 or earlier
+
+            This is the one update that must be installed manually:
+
+            1. Download **Reserve.dmg** below.
+            2. Open it and drag Reserve into **Applications**.
+            3. Choose **Replace**, then reopen Reserve.
+
+            After this, Reserve can install future updates for you.
         run: |
           set -euo pipefail
           cd release-assets
           sha256sum -c Reserve.dmg.sha256
-          gh release create "$TAG" Reserve.dmg Reserve.dmg.sha256 \
+          gh release create "$TAG" Reserve.dmg Reserve.dmg.sha256 appcast.xml \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Reserve ${TAG#v}" \
+            --notes "$RELEASE_PREAMBLE" \
             --generate-notes \
             --draft
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
