@@ -33,21 +33,16 @@ enum ReserveApp {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-  static let claudeSetupTitle = "Show your Claude limits?"
+  static let claudeSetupTitle = "Show your Claude limits"
   static let claudeSetupMessage =
-    "Claude keeps your sign-in protected by macOS. Reserve uses it only to check your plan "
-    + "limits—it never sees your password or saves your sign-in.\n\n"
-    + "macOS may ask once. Choose Always Allow so future checks stay automatic."
+    "Reserve can use the Claude sign-in already on this Mac to check your plan limits."
+  static let claudeSetupReassurance = "Your sign-in stays protected by macOS"
+  static let claudeSetupPrivacy = "Reserve never sees your password or saves your sign-in."
+  static let claudeSetupFootnote =
+    "macOS may ask once. Choose Always Allow to keep future checks automatic."
 
   static func confirmClaudeLimitAccess() -> Bool {
-    NSApplication.shared.activate(ignoringOtherApps: true)
-    let alert = NSAlert()
-    alert.alertStyle = .informational
-    alert.messageText = Self.claudeSetupTitle
-    alert.informativeText = Self.claudeSetupMessage
-    alert.addButton(withTitle: "Show My Limits")
-    alert.addButton(withTitle: "Not Now")
-    return alert.runModal() == .alertFirstButtonReturn
+    ClaudeLimitAccessPrompt().ask()
   }
 
   private var store: UsageStore?
@@ -71,13 +66,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let menuBarRenderIndex = CommandLine.arguments.firstIndex(of: "--render-menu-bar")
     let isUIStressTest = CommandLine.arguments.contains("--stress-ui")
     let isLifecycleSelfTest = CommandLine.arguments.contains("--self-test-lifecycle")
+    let isClaudePromptPreview = CommandLine.arguments.contains("--show-claude-prompt")
     let lifecycleCaptureIndex = CommandLine.arguments.firstIndex(of: "--capture-lifecycle")
     let isNotificationVerification = CommandLine.arguments.contains("--verify-notifications")
     let isAutomatedRun = isUISelfTest || renderIndex != nil || settingsRenderIndex != nil
       || appearanceRenderIndex != nil || aboutRenderIndex != nil || alertsRenderIndex != nil
       || insightsRenderIndex != nil || providersRenderIndex != nil || menuBarRenderIndex != nil
       || isUIStressTest || isLifecycleSelfTest || lifecycleCaptureIndex != nil
-      || isNotificationVerification
+      || isNotificationVerification || isClaudePromptPreview
     let store: UsageStore
     if isAutomatedRun {
       Self.clearTestPreferences(suiteName: Self.uiSelfTestDefaultsSuite)
@@ -189,6 +185,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       self.runLifecycleSelfTest()
     } else if isUISelfTest {
       self.runUISelfTest()
+    } else if isClaudePromptPreview {
+      DispatchQueue.main.async { _ = Self.confirmClaudeLimitAccess() }
     } else if CommandLine.arguments.contains("--show-settings") {
       self.showSettings()
     } else if CommandLine.arguments.contains("--show-menu") {
@@ -582,6 +580,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
 
       var failures: [String] = []
+      if !settingsController.exerciseUpdatePresentationForSelfTest() {
+        failures.append("Settings did not move aside and return around the update prompt")
+      }
       if let before = statusItemFrameBeforeOpen,
         let after = statusController.statusItemScreenFrameForTesting
       {
@@ -721,14 +722,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let statusResult = statusController.validateForSelfTest(settingsWindow: settingsController.window)
     let settingsResult = settingsController.validateForSelfTest()
+    let claudePromptIsCalmAndWide = ClaudeLimitAccessPrompt().validateForSelfTest()
     let brokenPipeIsSafe = ReserveApp.brokenPipeWriteFailsSafely()
     let loginCompletionQueuesRefresh = store.exerciseLoginCompletionDuringRefreshForSelfTest()
     let claudeAccessRevealsOnce = store.exerciseClaudeAccessCompletionForSelfTest()
-    let success = statusResult.success && settingsResult.success && brokenPipeIsSafe
+    let success = statusResult.success && settingsResult.success && claudePromptIsCalmAndWide
+      && brokenPipeIsSafe
       && loginCompletionQueuesRefresh && claudeAccessRevealsOnce
     let details = [
       statusResult.details,
       settingsResult.details,
+      "Claude access prompt=\(claudePromptIsCalmAndWide)",
       "broken pipe handling=\(brokenPipeIsSafe)",
       "post-login refresh queue=\(loginCompletionQueuesRefresh)",
       "post-Keychain reveal=\(claudeAccessRevealsOnce)",

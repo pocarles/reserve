@@ -294,6 +294,17 @@ public enum UsageProviderError: LocalizedError, Sendable, Equatable {
   case unavailable(String)
   case processFailed(String)
 
+  /// Authentication failures need a recovery action in the main provider
+  /// card even when an older cached snapshot is still available.
+  public var requiresConnection: Bool {
+    switch self {
+    case .credentialsNotFound, .keychainConsentRequired, .unauthorized:
+      true
+    default:
+      false
+    }
+  }
+
   public var errorDescription: String? {
     switch self {
     case .executableNotFound(let name): "\(name) is not installed or could not be found."

@@ -59,6 +59,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   /// Guards against a pane rebuild re-entering through a store write made by one
   /// of the controls it is building.
   private var isApplyingPane = false
+  private var restoreAfterUpdatePresentation = false
 
   init(store: UsageStore, updater: ReserveUpdater?) {
     self.store = store
@@ -88,6 +89,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     // whatever was true when the pane was last built.
     self.storeObserver = store.observe { [weak self] in self?.storeChanged() }
     self.updater?.onChange = { [weak self] in self?.storeChanged() }
+    self.updater?.onWillPresentUpdateUI = { [weak self] in
+      self?.prepareForUpdatePresentation()
+    }
+    self.updater?.onDidFinishUpdateUI = { [weak self] in
+      self?.restoreAfterUpdatePresentationIfNeeded()
+    }
   }
 
   /// Rebuilds the visible pane when the store changes.
@@ -125,6 +132,30 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   /// The analytical surface, reached from the popover footer.
   func showInsights() { self.show(.insights) }
+
+  /// Settings deliberately floats above the dashboard, but Sparkle's standard
+  /// alert does not. Hide Settings for the update session so the alert can
+  /// never be trapped behind it, then return the user to the same pane.
+  private func prepareForUpdatePresentation() {
+    guard let window = self.window, window.isVisible else { return }
+    self.restoreAfterUpdatePresentation = true
+    window.orderOut(nil)
+  }
+
+  private func restoreAfterUpdatePresentationIfNeeded() {
+    guard self.restoreAfterUpdatePresentation else { return }
+    self.restoreAfterUpdatePresentation = false
+    self.showWindow(nil)
+  }
+
+  func exerciseUpdatePresentationForSelfTest() -> Bool {
+    guard let window = self.window, window.isVisible else { return false }
+    let originalPane = self.pane
+    self.prepareForUpdatePresentation()
+    let movedAside = !window.isVisible && self.restoreAfterUpdatePresentation
+    self.restoreAfterUpdatePresentationIfNeeded()
+    return movedAside && window.isVisible && self.pane == originalPane
+  }
 
   // MARK: - Toolbar
 

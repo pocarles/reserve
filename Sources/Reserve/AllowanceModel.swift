@@ -179,9 +179,9 @@ enum AllowanceBuilder {
   }
 
   static func needsConnection(_ state: ProviderViewState) -> Bool {
-    if state.requiresClaudeKeychainAccess { return true }
-    guard let error = state.error?.lowercased() else { return state.snapshot == nil }
-    return ["auth", "credential", "keychain", "sign in"].contains { error.contains($0) }
+    if state.requiresConnection || state.requiresClaudeKeychainAccess { return true }
+    if state.error != nil { return false }
+    return state.snapshot == nil
   }
 
   /// Automatic menu-bar mode keeps the Reserve identity while choosing the

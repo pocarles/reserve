@@ -255,6 +255,14 @@ public enum ReserveSelfTests {
     else { throw Failure("official service status decoding") }
     record("official service status decoding")
 
+    guard UsageProviderError.credentialsNotFound("missing").requiresConnection,
+      UsageProviderError.keychainConsentRequired.requiresConnection,
+      UsageProviderError.unauthorized("expired").requiresConnection,
+      !UsageProviderError.rateLimited(retryAt: nil).requiresConnection,
+      !UsageProviderError.unavailable("offline").requiresConnection
+    else { throw Failure("provider connection recovery classification") }
+    record("provider connection recovery classification")
+
     let notificationReset = Date(timeIntervalSince1970: 1_900_000_000)
     let oldNotificationSnapshot = UsageSnapshot(
       provider: .openAI,
