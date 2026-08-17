@@ -35,8 +35,20 @@ enum ReserveApp {
 final class AppDelegate: NSObject, NSApplicationDelegate {
   static let claudeSetupTitle = "Show your Claude limits?"
   static let claudeSetupMessage =
-    "Reserve found Claude on this Mac. Allow access to show your plan limits. "
-    + "Reserve never stores your login. On the next prompt, choose Always Allow."
+    "Claude keeps your sign-in protected by macOS. Reserve uses it only to check your plan "
+    + "limits—it never sees your password or saves your sign-in.\n\n"
+    + "macOS may ask once. Choose Always Allow so future checks stay automatic."
+
+  static func confirmClaudeLimitAccess() -> Bool {
+    NSApplication.shared.activate(ignoringOtherApps: true)
+    let alert = NSAlert()
+    alert.alertStyle = .informational
+    alert.messageText = Self.claudeSetupTitle
+    alert.informativeText = Self.claudeSetupMessage
+    alert.addButton(withTitle: "Show My Limits")
+    alert.addButton(withTitle: "Not Now")
+    return alert.runModal() == .alertFirstButtonReturn
+  }
 
   private var store: UsageStore?
   private var statusController: StatusItemController?
@@ -424,34 +436,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Launching at login is persistence, so it waits for the checkbox in
     // Settings rather than being arranged on the user's behalf.
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-      guard let self, let store = self.store else { return }
-      if Self.shouldOfferClaudeKeychainSetup(
-        hasCredential: store.claudeKeychainCredentialAvailable,
-        accessAllowed: store.claudeKeychainReadAllowed)
-      {
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = Self.claudeSetupTitle
-        alert.informativeText = Self.claudeSetupMessage
-        alert.addButton(withTitle: "Continue")
-        alert.addButton(withTitle: "Not Now")
-        if alert.runModal() == .alertFirstButtonReturn {
-          store.allowClaudeKeychainAccess { [weak self] in
-            self?.statusController?.showMenu()
-          }
-          return
-        }
-      }
+      guard let self else { return }
+      // First launch should feel like opening an app, not granting a security
+      // permission. Claude access is explained only after Show limits is chosen.
       self.statusController?.showMenu()
     }
-  }
-
-  static func shouldOfferClaudeKeychainSetup(
-    hasCredential: Bool,
-    accessAllowed: Bool
-  ) -> Bool {
-    hasCredential && !accessAllowed
   }
 
   @objc private func applicationBecameActive() {

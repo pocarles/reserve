@@ -36,6 +36,10 @@ source build is ad-hoc signed and is intended only for the Mac that built it.
 Reserve reuses sign-ins belonging to the official provider CLIs. It does not
 create another account or copy credentials into its own storage.
 
+Installation never asks for Claude access. If Claude protects its sign-in with
+macOS, Reserve first shows a **Show limits** action and explains why access is
+needed. The macOS prompt appears only after that action is confirmed.
+
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
 - Grok Build 1.0.0 or newer, authenticated with `grok login`.
@@ -139,8 +143,9 @@ Local totals come from session logs under `~/.claude/projects`,
 `~/.codex/sessions`, and `~/.grok/sessions`; only bounded daily aggregates are
 retained. Reserve may read `~/.claude/.credentials.json` and
 `~/.grok/auth.json` when present. Claude Code can instead keep its sign-in in
-Keychain; Reserve reads it only after the user enables the explicit provider
-setting, through Security.framework, and retains it in memory only.
+Keychain; Reserve reads it only after the user chooses **Show limits**, through
+Security.framework, and retains it in memory only. A current protected sign-in
+takes precedence over legacy credential files left behind by Claude Code.
 
 See [SECURITY.md](SECURITY.md) for reporting and support policy.
 
@@ -188,9 +193,9 @@ target.
 complete its official login. Then use Refresh in Reserve.
 
 **Claude is connected in the CLI but not Reserve.** If Claude Code stores its
-credential in Keychain, choose **Allow Access** on the Claude card and approve
-the read-only macOS prompt. You can disable that access later under Settings >
-Providers.
+credential with macOS, choose **Show limits** on the Claude card. Reserve
+explains the one-time approval before macOS asks. You can turn it off later
+under Settings > Providers.
 
 **Data is stale or rate limited.** Reserve keeps the last valid snapshot and
 retries after a bounded backoff. Check the provider's linked official status

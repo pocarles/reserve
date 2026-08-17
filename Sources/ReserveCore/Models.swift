@@ -299,7 +299,7 @@ public enum UsageProviderError: LocalizedError, Sendable, Equatable {
     case .executableNotFound(let name): "\(name) is not installed or could not be found."
     case .credentialsNotFound(let message): message
     case .keychainConsentRequired:
-      "Claude is ready. Allow access to show your plan limits."
+      "Claude is ready. Choose Show limits to add your plan limits."
     case .unauthorized(let message): message
     case .rateLimited(let retryAt):
       if let retryAt {

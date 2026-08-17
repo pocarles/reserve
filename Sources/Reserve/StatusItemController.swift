@@ -1049,11 +1049,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     if provider == .anthropic,
       self.store.states[provider]?.requiresClaudeKeychainAccess == true
     {
-      // The system Keychain sheet takes focus and closes menu-bar popovers.
-      // Reopen only after that sheet has finished so first-time users see the
-      // result instead of wondering whether Reserve crashed.
+      // Explain the benefit before macOS shows its system-owned Keychain sheet.
+      // Reopen after either path so the menu-bar app never appears to vanish.
       self.popover.performClose(nil)
-      self.store.allowClaudeKeychainAccess { [weak self] in self?.showMenu() }
+      DispatchQueue.main.async { [weak self] in
+        guard let self else { return }
+        guard AppDelegate.confirmClaudeLimitAccess() else {
+          self.showMenu()
+          return
+        }
+        self.store.allowClaudeKeychainAccess { [weak self] in self?.showMenu() }
+      }
       return
     }
     self.store.connect(provider)

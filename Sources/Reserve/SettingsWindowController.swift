@@ -239,9 +239,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       sections: [
         self.section(
           title: nil,
-          footer: "Reserve detects the provider tools installed on this Mac and reuses their "
-            + "existing sign-ins. If Claude uses Keychain, Reserve asks before reading it. "
-            + "Open a provider for its plan, sources and permissions.",
+          footer: "Reserve reuses your existing provider sign-ins. It never asks for passwords "
+            + "or saves sign-ins. Claude may need one-time macOS approval to show plan limits.",
           rows: rows)
       ])
   }
@@ -469,7 +468,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             + "asks for a password and never stores a token.",
           rows: [
             self.bullets([
-              "Claude Code's Keychain item, off until you enable it in Providers",
+              "Claude's protected macOS sign-in, only after you choose Show my Claude plan limits",
               "~/.claude/.credentials.json and ~/.grok/auth.json",
               "Session logs under ~/.claude/projects, ~/.codex/sessions and ~/.grok/sessions, "
                 + "for token counts only",
@@ -671,13 +670,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     ]
     if provider == .anthropic {
       let checkbox = NSButton(
-        checkboxWithTitle: "Allow Reserve to read my Claude sign-in",
+        checkboxWithTitle: "Show my Claude plan limits",
         target: self, action: #selector(self.keychainChanged(_:)))
       checkbox.identifier = NSUserInterfaceItemIdentifier("settings-automatic-claude")
       checkbox.state = self.store.claudeKeychainReadAllowed ? .on : .off
       checkbox.toolTip =
-        "Off by default. Reads Claude Code's Keychain item through Security.framework."
-      rows.append(self.formRow("Permissions:", checkbox, labelWidth: 92))
+        "Uses Claude's existing sign-in only to check limits. Reserve never stores it."
+      rows.append(self.formRow("Claude:", checkbox, labelWidth: 92))
     }
     let refresh = NSButton(
       title: "Refresh Now", target: self, action: #selector(self.refreshProvider(_:)))
@@ -959,6 +958,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   @objc private func keychainChanged(_ sender: NSButton) {
     if sender.state == .on {
+      guard AppDelegate.confirmClaudeLimitAccess() else {
+        sender.state = .off
+        return
+      }
       self.store.allowClaudeKeychainAccess()
     } else {
       self.store.claudeKeychainReadAllowed = false
@@ -1258,6 +1261,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.expandedProviders = [.anthropic]
     self.applyPane(animated: false)
     let expandedIDs = identifiers()
+    let expandedButtonTitles = descendants().compactMap { ($0 as? NSButton)?.title }
     let renewalField = descendants().compactMap { $0 as? NSTextField }.filter(\.isEditable)
       .first { $0.identifier?.rawValue == "renewal.anthropic" }
     let originalRenewalDay = self.store.renewalDay(for: .anthropic)
@@ -1280,6 +1284,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       providerRowsPresent
       && claudeIsHiddenUntilExpanded
       && expandedIDs.contains("settings-automatic-claude")
+      && expandedButtonTitles.contains("Show my Claude plan limits")
       && expandedIDs.contains("subscription.anthropic")
       && expandedIDs.contains("renewal.anthropic")
       && expandedIDs.contains("provider-detail-anthropic")
