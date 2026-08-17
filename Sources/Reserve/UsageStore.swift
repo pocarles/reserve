@@ -14,6 +14,7 @@ struct ProviderViewState: Identifiable {
   var renewalStart: Date?
   var nextRenewal: Date?
   var serviceStatus: ProviderServiceStatus?
+  var requiresConnection = false
   var requiresClaudeKeychainAccess = false
 }
 
@@ -501,6 +502,7 @@ final class UsageStore {
             guard self?.loginGenerations[provider] == generation else { return }
             self?.states[provider]?.error =
               "\(configuration.displayName) sign-in output exceeded 64 KB. Use Sign in to retry."
+            self?.states[provider]?.requiresConnection = true
             self?.states[provider]?.isConnecting = false
             self?.changed()
           }
@@ -525,6 +527,7 @@ final class UsageStore {
           guard self?.loginGenerations[provider] == generation else { return }
           self?.states[provider]?.error =
             "\(configuration.displayName) sign-in timed out. Use Sign in to try again."
+          self?.states[provider]?.requiresConnection = true
           self?.states[provider]?.isConnecting = false
           self?.changed()
         }
@@ -536,6 +539,7 @@ final class UsageStore {
     } catch {
       self.states[provider]?.error =
         "Could not start \(configuration.displayName) sign-in: \(error.localizedDescription)"
+      self.states[provider]?.requiresConnection = true
       self.states[provider]?.isConnecting = false
       self.changed()
     }
@@ -839,6 +843,7 @@ final class UsageStore {
       self.states[provider]?.error = nil
       if !self.refresh(provider, queueIfBusy: true) { self.changed() }
     } else {
+      self.states[provider]?.requiresConnection = true
       if self.states[provider]?.error == nil {
         self.states[provider]?.error =
           "\(provider.displayName) sign-in was not completed. Use Sign in to retry."
@@ -1070,6 +1075,7 @@ final class UsageStore {
       let snapshot = fetched.withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
       self.states[provider]?.error = nil
+      self.states[provider]?.requiresConnection = false
       self.states[provider]?.requiresClaudeKeychainAccess = false
       providerFetchSucceeded = true
       self.notifications.update(
@@ -1082,6 +1088,8 @@ final class UsageStore {
       // The cached snapshot is deliberately kept: a failed refresh should leave
       // the last known numbers on screen with an error beside them.
       self.states[provider]?.error = String(error.localizedDescription.prefix(500))
+      self.states[provider]?.requiresConnection =
+        (error as? UsageProviderError)?.requiresConnection == true
       let requiresClaudeKeychainAccess =
         provider == .anthropic
         && (error as? UsageProviderError) == .keychainConsentRequired

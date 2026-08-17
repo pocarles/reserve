@@ -44,6 +44,15 @@ private func cleanTestDefaults(suiteName: String) {
 @Suite
 struct ReserveCoreTests {
   @Test
+  func testOnlyAuthenticationErrorsRequireConnection() {
+    XCTAssertTrue(UsageProviderError.credentialsNotFound("missing").requiresConnection)
+    XCTAssertTrue(UsageProviderError.keychainConsentRequired.requiresConnection)
+    XCTAssertTrue(UsageProviderError.unauthorized("expired").requiresConnection)
+    XCTAssertFalse(UsageProviderError.rateLimited(retryAt: nil).requiresConnection)
+    XCTAssertFalse(UsageProviderError.unavailable("offline").requiresConnection)
+  }
+
+  @Test
   func testGrokUnifiedWeeklyResetIgnoresMonthlyIncludedSpend() throws {
     let data = Data(
       #"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-15T22:03:41Z","end":"2026-08-22T22:03:41Z"},"monthlyLimit":{"val":99900},"used":{"val":12345},"isUnifiedBillingUser":true}}"#.utf8)

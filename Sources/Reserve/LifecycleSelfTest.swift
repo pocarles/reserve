@@ -589,9 +589,15 @@ enum LifecycleSelfTest {
       "a provider availability failure is still presented as an authentication problem")
     var signedOut = ProviderViewState(provider: .anthropic)
     signedOut.error = "Claude OAuth credentials were not found. Use Sign in to authenticate."
+    signedOut.requiresConnection = true
     result.expect(
       AllowanceBuilder.needsConnection(signedOut),
       "missing provider credentials do not offer the sign-in recovery action")
+    signedOut.snapshot = UsageSnapshot(
+      provider: .anthropic, windows: [], fetchedAt: now, source: "cached")
+    result.expect(
+      AllowanceBuilder.needsConnection(signedOut),
+      "cached provider data hides the sign-in recovery action")
     var keychainAccess = ProviderViewState(provider: .anthropic)
     keychainAccess.error = UsageProviderError.keychainConsentRequired.localizedDescription
     keychainAccess.requiresClaudeKeychainAccess = true
@@ -599,11 +605,14 @@ enum LifecycleSelfTest {
       AllowanceBuilder.needsConnection(keychainAccess),
       "Claude access no longer offers its action after the explanation changes")
     result.expect(
-      AppDelegate.claudeSetupTitle == "Show your Claude limits?"
+      AppDelegate.claudeSetupTitle == "Show your Claude limits"
         && AppDelegate.claudeSetupMessage
-          == "Claude keeps your sign-in protected by macOS. Reserve uses it only to check your "
-            + "plan limits—it never sees your password or saves your sign-in.\n\n"
-            + "macOS may ask once. Choose Always Allow so future checks stay automatic.",
+          == "Reserve can use the Claude sign-in already on this Mac to check your plan limits."
+        && AppDelegate.claudeSetupReassurance == "Your sign-in stays protected by macOS"
+        && AppDelegate.claudeSetupPrivacy
+          == "Reserve never sees your password or saves your sign-in."
+        && AppDelegate.claudeSetupFootnote
+          == "macOS may ask once. Choose Always Allow to keep future checks automatic.",
       "the Claude access explanation is no longer short and reassuring")
     let summary = ProviderSummary(
       provider: .anthropic,
