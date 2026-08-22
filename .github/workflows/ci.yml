@@ -2,8 +2,6 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -13,12 +11,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  reserve-macos-ci:
+    name: reserve-macos-ci
     runs-on: macos-15
     timeout-minutes: 45
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Enforce the Reserve runner exception
+        shell: bash
+        run: |
+          set -euo pipefail
+          windows_family='win''dows'
+          windows_pattern="runs-on:[[:space:]]*${windows_family}|${windows_family}-[[:alnum:]._-]+"
+          if grep -RIniE --include='*.yml' --include='*.yaml' "$windows_pattern" .github/workflows; then
+            echo "::error::Non-Linux runners are not allowed in this repository."
+            exit 1
+          fi
+
+          mac_family='mac''os'
+          mac_pattern="runs-on:[[:space:]]*${mac_family}-[[:alnum:]._-]+"
+          mac_runner_count=$(grep -RIEh --include='*.yml' --include='*.yaml' "$mac_pattern" .github/workflows | wc -l | tr -d ' ')
+          if [ "$mac_runner_count" -ne 2 ]; then
+            echo "::error::Reserve must have exactly two Apple-hosted jobs: pull-request verification and release packaging."
+            exit 1
+          fi
+
+          unexpected_files=$(grep -RIlE --include='*.yml' --include='*.yaml' "$mac_pattern" .github/workflows | grep -Ev '^\.github/workflows/(ci|release)\.yml$' || true)
+          if [ -n "$unexpected_files" ]; then
+            printf '%s\n' "$unexpected_files"
+            echo "::error::Apple-hosted runners are limited to ci.yml and release.yml."
+            exit 1
+          fi
 
       - name: Show toolchain
         run: |
