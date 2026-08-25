@@ -400,9 +400,35 @@ enum LifecycleSelfTest {
     if let dashboardWindow = controller.dashboardWindowForTesting,
       let settingsWindow = settings.window
     {
+      func isInFront(_ candidate: NSWindow, of other: NSWindow) -> Bool {
+        guard let orderedWindows = NSWindow.windowNumbers(options: []),
+          let candidateIndex = orderedWindows.firstIndex(
+            of: NSNumber(value: candidate.windowNumber)),
+          let otherIndex = orderedWindows.firstIndex(of: NSNumber(value: other.windowNumber))
+        else { return false }
+        return candidateIndex < otherIndex
+      }
+
+      controller.bringSettingsToFrontForTesting()
+      self.settle()
       result.expect(
-        dashboardWindow.level.rawValue > settingsWindow.level.rawValue,
-        "Settings stayed above the dashboard after the dashboard was opened")
+        settingsWindow.level.rawValue > dashboardWindow.level.rawValue
+          && isInFront(settingsWindow, of: dashboardWindow),
+        "Settings did not move in front when it was activated")
+
+      controller.bringDashboardToFrontForTesting()
+      self.settle()
+      result.expect(
+        dashboardWindow.level.rawValue > settingsWindow.level.rawValue
+          && isInFront(dashboardWindow, of: settingsWindow),
+        "dashboard did not move back in front when it was activated")
+
+      controller.bringSettingsToFrontForTesting()
+      self.settle()
+      result.expect(
+        settingsWindow.level.rawValue > dashboardWindow.level.rawValue
+          && isInFront(settingsWindow, of: dashboardWindow),
+        "Settings did not return to the front when it was activated again")
     } else {
       result.failures.append("dashboard and Settings were not both open for the window-order check")
     }

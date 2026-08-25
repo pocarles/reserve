@@ -133,9 +133,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   /// The analytical surface, reached from the popover footer.
   func showInsights() { self.show(.insights) }
 
-  /// Settings deliberately floats above the dashboard, but Sparkle's standard
-  /// alert does not. Hide Settings for the update session so the alert can
-  /// never be trapped behind it, then return the user to the same pane.
+  /// Settings normally floats so it remains usable from an accessory app, but
+  /// Sparkle's standard alert does not. Hide Settings for the update session so
+  /// the alert cannot be trapped behind it, then return to the same pane.
   private func prepareForUpdatePresentation() {
     guard let window = self.window, window.isVisible else { return }
     self.restoreAfterUpdatePresentation = true
@@ -379,7 +379,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   /// Identity, updates and links, in the order someone looks for them. This is
   /// the About surface: the standard AppKit panel opens at the normal window
-  /// level, which is below this floating Settings window, so it was invisible
+  /// level, which is below Reserve's floating windows, so it was invisible
   /// whenever it was opened from here.
   private func aboutPane() -> NSView {
     self.pane(
@@ -1245,7 +1245,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && window.toolbarStyle == .preference
       && window.toolbar?.items.count == Pane.allCases.count
       && window.toolbar?.identifier == "settings-toolbar"
-    let staysAboveDashboard = window.level == .floating
+    let usesMenuBarWindowLevel = window.level == .floating
 
     var paneResults: [String] = []
     var allPanesFit = true
@@ -1459,13 +1459,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.applyPane(animated: false)
 
     let success =
-      isNative && staysAboveDashboard && allPanesFit && allPanesReadable && generalSuccess
+      isNative && usesMenuBarWindowLevel && allPanesFit && allPanesReadable && generalSuccess
       && providersSuccess && notificationsSuccess && appearanceSuccess && insightsSuccess
       && privacySuccess && aboutSuccess
     let details =
       success
       ? "settings is a native toolbar window with \(Pane.allCases.count) resizable panes, one General menu-bar model, adaptive full-surface themes with fixed quota semantics, deficit transition alerts, provider detail behind disclosure, and an About pane carrying identity, updates and links"
-      : "settings native=\(isNative), floating=\(staysAboveDashboard), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess), about=\(aboutSuccess)"
+      : "settings native=\(isNative), floating=\(usesMenuBarWindowLevel), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess), about=\(aboutSuccess)"
     return (success, details)
   }
 
