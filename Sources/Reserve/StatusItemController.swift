@@ -853,9 +853,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.updateStatusIcon()
     self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     self.applyAppearance()
-    // Settings stays open at the floating level. The dashboard is the surface
-    // the user just asked for, so it must sit above Settings until it closes.
-    self.popover.contentViewController?.view.window?.level = .popUpMenu
+    self.bringDashboardToFront()
     self.startMouseMonitors()
     self.updateMinuteTimer()
     // Keyboard and VoiceOver need a key window, and the popover only becomes
@@ -863,16 +861,24 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     NSApplication.shared.activate(ignoringOtherApps: true)
     if let window = self.popover.contentViewController?.view.window {
       window.makeKeyAndOrderFront(nil)
+      window.orderFrontRegardless()
       window.initialFirstResponder = dashboardController.view
       window.makeFirstResponder(dashboardController.firstKeyView())
     }
   }
 
   func popoverDidClose(_ notification: Notification) {
+    self.settingsWindow?.level = .floating
     self.stopMouseMonitors()
     self.lockedStatusItemLength = nil
     self.updateStatusIcon()
     self.updateMinuteTimer()
+  }
+
+  func popoverDidShow(_ notification: Notification) {
+    // NSPopover finishes its own ordering after `show(relativeTo:)` returns.
+    // Reapply the active-window ordering once that animation has completed.
+    self.bringDashboardToFront()
   }
 
   func shouldDismissDashboard(forClickedWindow window: NSWindow?) -> Bool {
@@ -888,6 +894,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mouseEvents) {
       [weak self] event in
       guard let self, self.popover.isShown else { return event }
+      self.bringReserveWindowToFront(forClickedWindow: event.window)
       if self.shouldDismissDashboard(forClickedWindow: event.window) {
         self.popover.performClose(nil)
       }
@@ -900,6 +907,37 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         self.popover.performClose(nil)
       }
     }
+  }
+
+  private func bringReserveWindowToFront(forClickedWindow window: NSWindow?) {
+    guard let window else { return }
+    if window === self.popover.contentViewController?.view.window {
+      self.settingsWindow?.level = .floating
+      window.level = .popUpMenu
+      window.orderFrontRegardless()
+    } else if self.isSettingsWindow(window) {
+      self.popover.contentViewController?.view.window?.level = .floating
+      window.level = .popUpMenu
+      window.makeKeyAndOrderFront(nil)
+      window.orderFrontRegardless()
+    }
+  }
+
+  private var settingsWindow: NSWindow? {
+    NSApp.windows.first(where: { self.isSettingsWindow($0) })
+  }
+
+  private func bringDashboardToFront() {
+    self.bringReserveWindowToFront(
+      forClickedWindow: self.popover.contentViewController?.view.window)
+  }
+
+  func bringDashboardToFrontForTesting() {
+    self.bringDashboardToFront()
+  }
+
+  func bringSettingsToFrontForTesting() {
+    self.bringReserveWindowToFront(forClickedWindow: self.settingsWindow)
   }
 
   private func stopMouseMonitors() {
@@ -1069,6 +1107,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
   private func showSettings() {
     self.openSettings()
+    self.bringReserveWindowToFront(forClickedWindow: self.settingsWindow)
   }
 
   private func connectProvider(_ provider: ProviderID) {
