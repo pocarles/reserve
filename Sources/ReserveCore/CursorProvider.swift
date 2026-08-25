@@ -21,7 +21,10 @@ public struct CursorProvider: UsageProvider {
   private let agentLocator: @Sendable ([String: String]) -> String?
   private let statusRunner: @Sendable (String, [String], [String: String]) async throws -> String
   private let credentialLoader: @Sendable (Bool) async throws -> CursorCredential
+  private let credentialSession: CursorCredentialSession
   private let requestHandler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
+  private static let sharedCredentialSession = CursorCredentialSession()
 
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -49,6 +52,7 @@ public struct CursorProvider: UsageProvider {
     self.credentialLoader = { allowInteraction in
       try await CursorCredentialLoader.load(allowInteraction: allowInteraction)
     }
+    self.credentialSession = Self.sharedCredentialSession
     self.requestHandler = {
       try await ProviderHTTPSession.boundedData(
         for: $0, using: session, maximumBytes: Self.maximumResponseBytes)
@@ -63,6 +67,7 @@ public struct CursorProvider: UsageProvider {
     agentLocator: @escaping @Sendable ([String: String]) -> String? = { _ in "/usr/bin/true" },
     statusRunner: @escaping @Sendable (String, [String], [String: String]) async throws -> String,
     credentialLoader: @escaping @Sendable (Bool) async throws -> CursorCredential,
+    credentialSession: CursorCredentialSession = CursorCredentialSession(),
     requestHandler: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse)
   ) {
     self.environment = environment
@@ -72,6 +77,7 @@ public struct CursorProvider: UsageProvider {
     self.agentLocator = agentLocator
     self.statusRunner = statusRunner
     self.credentialLoader = credentialLoader
+    self.credentialSession = credentialSession
     self.requestHandler = requestHandler
   }
 
@@ -81,24 +87,32 @@ public struct CursorProvider: UsageProvider {
       throw UsageProviderError.credentialsNotFound(
         "Cursor is not connected to Reserve. Use Sign in or Allow access.")
     }
-    guard let executable = self.agentLocator(self.environment) else {
-      throw UsageProviderError.executableNotFound("Cursor Agent")
+    let credential = try await self.credentialSession.credential {
+      guard let executable = self.agentLocator(self.environment) else {
+        throw UsageProviderError.executableNotFound("Cursor Agent")
+      }
+      let status = try await self.statusRunner(
+        executable, ["status", "--format", "json"],
+        BinaryLocator.childEnvironment(self.environment))
+      try Self.validateStatusOutput(status)
+      return try await self.credentialLoader(self.allowKeychainInteraction)
     }
-
-    let status = try await self.statusRunner(
-      executable, ["status", "--format", "json"],
-      BinaryLocator.childEnvironment(self.environment))
-    try Self.validateStatusOutput(status)
-
-    let credential = try await self.credentialLoader(self.allowKeychainInteraction)
     let client = CursorRPCClient(accessToken: credential.accessToken, handler: self.requestHandler)
-    let current = try await client.call(
-      .currentPeriodUsage, body: Data(#"{"includePooledUsage":false}"#.utf8),
-      as: CursorCurrentPeriodUsageResponse.self)
-    let plan = try await client.call(
-      .planInfo, body: Data("{}".utf8), as: CursorPlanInfoResponse.self)
-    let hardLimit = try? await client.call(
-      .hardLimit, body: Data("{}".utf8), as: CursorHardLimitResponse.self)
+    let current: CursorCurrentPeriodUsageResponse
+    let plan: CursorPlanInfoResponse
+    let hardLimit: CursorHardLimitResponse?
+    do {
+      current = try await client.call(
+        .currentPeriodUsage, body: Data(#"{"includePooledUsage":false}"#.utf8),
+        as: CursorCurrentPeriodUsageResponse.self)
+      plan = try await client.call(
+        .planInfo, body: Data("{}".utf8), as: CursorPlanInfoResponse.self)
+      hardLimit = try? await client.call(
+        .hardLimit, body: Data("{}".utf8), as: CursorHardLimitResponse.self)
+    } catch let error as UsageProviderError {
+      if case .unauthorized = error { await self.credentialSession.clear() }
+      throw error
+    }
 
     let billingStart = try Self.date(milliseconds: current.billingCycleStart)
     let billingEnd = try Self.date(
@@ -150,6 +164,10 @@ public struct CursorProvider: UsageProvider {
     #else
       false
     #endif
+  }
+
+  public static func clearCachedCredential() async {
+    await Self.sharedCredentialSession.clear()
   }
 
   static func validateStatusOutput(_ output: String) throws {
@@ -421,6 +439,41 @@ struct CursorDetailedUsageUnavailable: Error {}
 
 struct CursorCredential: Sendable {
   let accessToken: String
+}
+
+actor CursorCredentialSession {
+  private var credential: CursorCredential?
+  private var loadingTask: Task<CursorCredential, Error>?
+  private var generation = 0
+
+  func credential(
+    loader: @escaping @Sendable () async throws -> CursorCredential
+  ) async throws -> CursorCredential {
+    if let credential = self.credential { return credential }
+    if let loadingTask = self.loadingTask { return try await loadingTask.value }
+
+    let generation = self.generation
+    let task = Task { try await loader() }
+    self.loadingTask = task
+    do {
+      let credential = try await task.value
+      if generation == self.generation {
+        self.credential = credential
+        self.loadingTask = nil
+      }
+      return credential
+    } catch {
+      if generation == self.generation { self.loadingTask = nil }
+      throw error
+    }
+  }
+
+  func clear() {
+    self.generation += 1
+    self.credential = nil
+    self.loadingTask?.cancel()
+    self.loadingTask = nil
+  }
 }
 
 enum CursorCredentialLoader {
