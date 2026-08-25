@@ -881,12 +881,16 @@ struct CursorUsageEvent: Decodable, Sendable {
 
   var fingerprint: String {
     let usage = self.tokenUsage
-    let value = [
+    let inputTokens = String(usage?.inputTokens ?? 0)
+    let outputTokens = String(usage?.outputTokens ?? 0)
+    let cacheWriteTokens = String(usage?.cacheWriteTokens ?? 0)
+    let cacheReadTokens = String(usage?.cacheReadTokens ?? 0)
+    let totalCents = String(usage?.totalCents ?? 0)
+    let components: [String] = [
       String(self.timestamp), self.model, self.conversationID ?? "",
-      String(usage?.inputTokens ?? 0), String(usage?.outputTokens ?? 0),
-      String(usage?.cacheWriteTokens ?? 0), String(usage?.cacheReadTokens ?? 0),
-      String(usage?.totalCents ?? 0),
-    ].joined(separator: "|")
+      inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens, totalCents,
+    ]
+    let value = components.joined(separator: "|")
     return SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
   }
 }
