@@ -93,9 +93,12 @@ repeat the migration checks on a Mac with valid legacy UsageBar data.
 
 - [ ] Fresh install, first launch, quit, and relaunch succeed without a
       Gatekeeper override.
-- [ ] Codex, Claude, and Grok each refresh successfully with a real authorized
-      test account; disconnected/login handoff is checked without recording
-      credentials or output.
+- [ ] OpenAI, Claude, Grok, and Cursor each refresh successfully with a real
+      authorized test account; disconnected/login handoff is checked without
+      recording credentials or raw provider output.
+- [ ] Cursor starts disabled, one-time Keychain approval is explicit, both
+      allowance pools and on-demand spending match Cursor, detailed usage falls
+      back honestly when unavailable, and sign-out plus reauthentication work.
 - [ ] The draft release starts with the one-time 0.9.1-or-earlier installation
       steps before the generated changelog, including Download, Applications,
       Replace, and reopen.
@@ -104,7 +107,8 @@ repeat the migration checks on a Mac with valid legacy UsageBar data.
       store usable.
 - [ ] Sleep/wake recovery, launch at login, settings, notifications, manual
       update check, one-click install from the previous signed release,
-      stale/backoff behavior, and provider status links work.
+      stale/backoff behavior, and provider status links work. Opening the
+      dashboard while Settings is visible brings the dashboard fully in front.
 - [ ] The app remains responsive under oversized/malformed fixture cases,
       extreme counters, excessive local records, long provider identifiers,
       producer/consumer pressure, retained child-process pipes, and huge retry

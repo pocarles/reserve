@@ -397,6 +397,15 @@ enum LifecycleSelfTest {
     settings: SettingsWindowController
   ) -> Result {
     var result = Result()
+    if let dashboardWindow = controller.dashboardWindowForTesting,
+      let settingsWindow = settings.window
+    {
+      result.expect(
+        dashboardWindow.level.rawValue > settingsWindow.level.rawValue,
+        "Settings stayed above the dashboard after the dashboard was opened")
+    } else {
+      result.failures.append("dashboard and Settings were not both open for the window-order check")
+    }
     let originalTheme = store.appearanceTheme
     let originalMode = store.appearanceMode
     defer {

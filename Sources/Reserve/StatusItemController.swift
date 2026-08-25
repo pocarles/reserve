@@ -853,7 +853,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.updateStatusIcon()
     self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     self.applyAppearance()
-    self.popover.contentViewController?.view.window?.level = .normal
+    // Settings stays open at the floating level. The dashboard is the surface
+    // the user just asked for, so it must sit above Settings until it closes.
+    self.popover.contentViewController?.view.window?.level = .popUpMenu
     self.startMouseMonitors()
     self.updateMinuteTimer()
     // Keyboard and VoiceOver need a key window, and the popover only becomes
