@@ -4,6 +4,7 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   case openAI
   case anthropic
   case grok
+  case cursor
 
   public var id: String { self.rawValue }
 
@@ -12,6 +13,7 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
     case .openAI: "OpenAI"
     case .anthropic: "Anthropic"
     case .grok: "Grok"
+    case .cursor: "Cursor"
     }
   }
 
@@ -193,6 +195,9 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public let source: String
   public let includedSpend: IncludedSpend?
   public let billingRenewsAt: Date?
+  public let monthlyPriceMinorUnits: Int?
+  public let accountUsage: LocalUsageSummary?
+  public let detailedUsageUnavailable: Bool
 
   public init(
     provider: ProviderID,
@@ -201,7 +206,10 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     fetchedAt: Date = Date(),
     source: String,
     includedSpend: IncludedSpend? = nil,
-    billingRenewsAt: Date? = nil
+    billingRenewsAt: Date? = nil,
+    monthlyPriceMinorUnits: Int? = nil,
+    accountUsage: LocalUsageSummary? = nil,
+    detailedUsageUnavailable: Bool = false
   ) {
     self.provider = provider
     self.planName = planName.map { String($0.prefix(Self.maximumPlanNameCharacters)) }
@@ -210,10 +218,14 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     self.source = String(source.prefix(Self.maximumSourceCharacters))
     self.includedSpend = includedSpend
     self.billingRenewsAt = billingRenewsAt
+    self.monthlyPriceMinorUnits = monthlyPriceMinorUnits.map { max(0, $0) }
+    self.accountUsage = accountUsage
+    self.detailedUsageUnavailable = detailedUsageUnavailable
   }
 
   private enum CodingKeys: String, CodingKey {
     case provider, planName, windows, fetchedAt, source, includedSpend, billingRenewsAt
+    case monthlyPriceMinorUnits, accountUsage, detailedUsageUnavailable
   }
 
   public init(from decoder: Decoder) throws {
@@ -225,7 +237,12 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
       fetchedAt: try container.decode(Date.self, forKey: .fetchedAt),
       source: try container.decode(String.self, forKey: .source),
       includedSpend: try container.decodeIfPresent(IncludedSpend.self, forKey: .includedSpend),
-      billingRenewsAt: try container.decodeIfPresent(Date.self, forKey: .billingRenewsAt))
+      billingRenewsAt: try container.decodeIfPresent(Date.self, forKey: .billingRenewsAt),
+      monthlyPriceMinorUnits: try container.decodeIfPresent(
+        Int.self, forKey: .monthlyPriceMinorUnits),
+      accountUsage: try container.decodeIfPresent(LocalUsageSummary.self, forKey: .accountUsage),
+      detailedUsageUnavailable: try container.decodeIfPresent(
+        Bool.self, forKey: .detailedUsageUnavailable) ?? false)
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -237,6 +254,11 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     try container.encode(self.source, forKey: .source)
     try container.encodeIfPresent(self.includedSpend, forKey: .includedSpend)
     try container.encodeIfPresent(self.billingRenewsAt, forKey: .billingRenewsAt)
+    try container.encodeIfPresent(self.monthlyPriceMinorUnits, forKey: .monthlyPriceMinorUnits)
+    try container.encodeIfPresent(self.accountUsage, forKey: .accountUsage)
+    if self.detailedUsageUnavailable {
+      try container.encode(true, forKey: .detailedUsageUnavailable)
+    }
   }
 
   public var highestUsedPercent: Double? {
@@ -255,8 +277,17 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
       fetchedAt: self.fetchedAt,
       source: self.source,
       includedSpend: self.includedSpend,
-      billingRenewsAt: self.billingRenewsAt)
+      billingRenewsAt: self.billingRenewsAt,
+      monthlyPriceMinorUnits: self.monthlyPriceMinorUnits,
+      accountUsage: self.accountUsage,
+      detailedUsageUnavailable: self.detailedUsageUnavailable)
   }
+}
+
+public enum IncludedSpendLimitState: String, Codable, Equatable, Sendable {
+  case capped
+  case disabled
+  case unlimited
 }
 
 public struct IncludedSpend: Codable, Equatable, Sendable {
@@ -264,17 +295,52 @@ public struct IncludedSpend: Codable, Equatable, Sendable {
   public let usedMinorUnits: Int
   public let limitMinorUnits: Int
   public let currencyCode: String
+  public let limitState: IncludedSpendLimitState
 
   public init(
     label: String,
     usedMinorUnits: Int,
     limitMinorUnits: Int,
-    currencyCode: String = "USD"
+    currencyCode: String = "USD",
+    limitState: IncludedSpendLimitState = .capped
   ) {
     self.label = label
     self.usedMinorUnits = max(0, usedMinorUnits)
     self.limitMinorUnits = max(0, limitMinorUnits)
     self.currencyCode = currencyCode
+    self.limitState = limitState
+  }
+
+  public var remainingMinorUnits: Int? {
+    switch self.limitState {
+    case .capped: max(0, self.limitMinorUnits - self.usedMinorUnits)
+    case .disabled: 0
+    case .unlimited: nil
+    }
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case label, usedMinorUnits, limitMinorUnits, currencyCode, limitState
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      label: try container.decode(String.self, forKey: .label),
+      usedMinorUnits: try container.decode(Int.self, forKey: .usedMinorUnits),
+      limitMinorUnits: try container.decode(Int.self, forKey: .limitMinorUnits),
+      currencyCode: try container.decodeIfPresent(String.self, forKey: .currencyCode) ?? "USD",
+      limitState: try container.decodeIfPresent(IncludedSpendLimitState.self, forKey: .limitState)
+        ?? .capped)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(self.label, forKey: .label)
+    try container.encode(self.usedMinorUnits, forKey: .usedMinorUnits)
+    try container.encode(self.limitMinorUnits, forKey: .limitMinorUnits)
+    try container.encode(self.currencyCode, forKey: .currencyCode)
+    try container.encode(self.limitState, forKey: .limitState)
   }
 }
 
@@ -286,7 +352,7 @@ public protocol UsageProvider: Sendable {
 public enum UsageProviderError: LocalizedError, Sendable, Equatable {
   case executableNotFound(String)
   case credentialsNotFound(String)
-  case keychainConsentRequired
+  case keychainConsentRequired(ProviderID)
   case unauthorized(String)
   case rateLimited(retryAt: Date?)
   case timedOut(String)
@@ -309,8 +375,8 @@ public enum UsageProviderError: LocalizedError, Sendable, Equatable {
     switch self {
     case .executableNotFound(let name): "\(name) is not installed or could not be found."
     case .credentialsNotFound(let message): message
-    case .keychainConsentRequired:
-      "Claude is ready. Choose Show limits to add your plan limits."
+    case .keychainConsentRequired(let provider):
+      "\(provider.displayName) is ready. Choose Allow access to add your plan limits."
     case .unauthorized(let message): message
     case .rateLimited(let retryAt):
       if let retryAt {

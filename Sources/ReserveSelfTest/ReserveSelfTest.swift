@@ -28,6 +28,13 @@ struct ReserveSelfTest {
       openAIData: try Data(contentsOf: fixtures.appendingPathComponent("openai-rate-limits.json")),
       anthropicData: try Data(contentsOf: fixtures.appendingPathComponent("anthropic-usage.json")),
       grokData: try Data(contentsOf: fixtures.appendingPathComponent("grok-billing.json")),
+      cursorUsageData: try Data(contentsOf: fixtures.appendingPathComponent("cursor-usage.json")),
+      cursorDisabledSpendData: try Data(
+        contentsOf: fixtures.appendingPathComponent("cursor-spending-disabled.json")),
+      cursorMissingFieldsData: try Data(
+        contentsOf: fixtures.appendingPathComponent("cursor-missing-fields.json")),
+      cursorMalformedData: try Data(
+        contentsOf: fixtures.appendingPathComponent("cursor-malformed-values.json")),
       helperExecutable: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path,
       progress: { name in
         print("PASS \(name)")

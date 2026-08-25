@@ -1,0 +1,7 @@
+{
+  "spendLimitUsage": {
+    "individualUsed": 0,
+    "limitType": "disabled"
+  },
+  "enabled": false
+}

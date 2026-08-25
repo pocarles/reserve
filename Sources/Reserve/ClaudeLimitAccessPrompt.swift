@@ -1,20 +1,23 @@
 import AppKit
+import ReserveCore
 
-/// A calm, wide confirmation shown before macOS asks for Claude's protected
+/// A calm, wide confirmation shown before macOS asks for a provider's protected
 /// sign-in. The system alert made this short explanation look like an error by
 /// squeezing it into a tall warning-shaped column.
 @MainActor
-final class ClaudeLimitAccessPrompt: NSPanel {
+final class ProviderLimitAccessPrompt: NSPanel {
   static let size = NSSize(width: 520, height: 270)
+  private let provider: ProviderID
 
-  init() {
+  init(provider: ProviderID) {
+    self.provider = provider
     super.init(
       contentRect: NSRect(origin: .zero, size: Self.size),
       styleMask: [.titled, .fullSizeContentView],
       backing: .buffered,
       defer: false)
-    self.identifier = NSUserInterfaceItemIdentifier("claude-limit-access-prompt")
-    self.title = AppDelegate.claudeSetupTitle
+    self.identifier = NSUserInterfaceItemIdentifier("provider-limit-access-prompt")
+    self.title = "Allow \(provider.displayName) usage access"
     self.titleVisibility = .hidden
     self.titlebarAppearsTransparent = true
     self.isMovableByWindowBackground = true
@@ -47,30 +50,30 @@ final class ClaudeLimitAccessPrompt: NSPanel {
     let identifiers = Set(
       Self.descendants(of: self.contentView).compactMap { $0.identifier?.rawValue })
     return self.frame.width / self.frame.height > 1.7
-      && identifiers.contains("claude-access-title")
-      && identifiers.contains("claude-access-reassurance")
-      && identifiers.contains("claude-access-continue")
-      && identifiers.contains("claude-access-cancel")
+      && identifiers.contains("provider-access-title")
+      && identifiers.contains("provider-access-reassurance")
+      && identifiers.contains("provider-access-continue")
+      && identifiers.contains("provider-access-cancel")
   }
 
   private func makeContent() -> NSView {
     let content = ReserveSurface(fill: ReserveColor.background)
 
-    let logo = ReserveProviderLogo(provider: .anthropic, size: 42, glyph: 22)
+    let logo = ReserveProviderLogo(provider: self.provider, size: 42, glyph: 22)
     let title = Self.label(
-      AppDelegate.claudeSetupTitle,
+      "Allow \(self.provider.displayName) usage access",
       font: ReserveFont.sans(ReserveType.pageTitle, .semibold),
       color: ReserveColor.text)
-    title.identifier = NSUserInterfaceItemIdentifier("claude-access-title")
+    title.identifier = NSUserInterfaceItemIdentifier("provider-access-title")
     let message = Self.label(
-      AppDelegate.claudeSetupMessage,
+      "Reserve can use the \(self.provider.displayName) sign-in already on this Mac to check your plan usage.",
       font: ReserveFont.sans(ReserveType.body),
       color: ReserveColor.muted)
     let heading = NSStackView.column([title, message], spacing: 5)
     let header = NSStackView.row([logo, heading], spacing: 14, alignment: .top)
 
     let reassurance = ReserveSurface(fill: ReserveColor.elevated, radius: ReserveRadius.control)
-    reassurance.identifier = NSUserInterfaceItemIdentifier("claude-access-reassurance")
+    reassurance.identifier = NSUserInterfaceItemIdentifier("provider-access-reassurance")
     let shield = NSImageView(
       image: NSImage(
         systemSymbolName: "lock.shield.fill", accessibilityDescription: nil) ?? NSImage())
@@ -109,12 +112,12 @@ final class ClaudeLimitAccessPrompt: NSPanel {
     let cancel = ReserveTextButton(
       title: "Not now", color: ReserveColor.muted,
       action: { [weak self] in self?.finish(with: .cancel) })
-    cancel.identifier = NSUserInterfaceItemIdentifier("claude-access-cancel")
+    cancel.identifier = NSUserInterfaceItemIdentifier("provider-access-cancel")
     cancel.keyEquivalent = "\u{1b}"
     let accept = ReserveTextButton(
       title: "Continue", color: ReserveColor.accent, filled: true,
       action: { [weak self] in self?.finish(with: .OK) })
-    accept.identifier = NSUserInterfaceItemIdentifier("claude-access-continue")
+    accept.identifier = NSUserInterfaceItemIdentifier("provider-access-continue")
     accept.keyEquivalent = "\r"
     let actions = NSStackView.row([NSStackView.spacer(), cancel, accept], spacing: 8)
 

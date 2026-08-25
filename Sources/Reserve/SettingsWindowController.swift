@@ -271,7 +271,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         self.section(
           title: nil,
           footer: "Reserve reuses your existing provider sign-ins. It never asks for passwords "
-            + "or saves sign-ins. Claude may need one-time macOS approval to show plan limits.",
+            + "or saves sign-ins. Claude and Cursor need one-time macOS approval before Reserve reads their protected access tokens.",
           rows: rows)
       ])
   }
@@ -407,7 +407,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
               "© 2026 Pierre-Olivier Carles. MIT License.",
               size: 11, color: .secondaryLabelColor),
             SettingsLabel(
-              "Not affiliated with or endorsed by OpenAI, Anthropic, or xAI.",
+              "Not affiliated with or endorsed by OpenAI, Anthropic, xAI, or Anysphere.",
               size: 11, color: .tertiaryLabelColor),
             SettingsLabel(
               "Made in Florida with love.", size: 11, color: .tertiaryLabelColor),
@@ -499,10 +499,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             + "asks for a password and never stores a token.",
           rows: [
             self.bullets([
-              "Claude's protected macOS sign-in, only after you choose Show my Claude plan limits",
+              "Claude's protected macOS sign-in, only after you choose Allow access",
+              "Cursor's cursor-user / cursor-access-token Keychain item, only after you choose Allow access",
               "~/.claude/.credentials.json and ~/.grok/auth.json",
               "Session logs under ~/.claude/projects, ~/.codex/sessions and ~/.grok/sessions, "
                 + "for token counts only",
+              "Cursor account usage totals from Cursor's authenticated DashboardService; Reserve does not read Cursor prompts or transcripts",
             ])
           ]),
         self.section(
@@ -693,21 +695,22 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   /// Everything provider-specific lives behind its own row, including the
-  /// Claude sign-in permission.
+  /// Provider sign-in permission.
   private func providerDetail(_ provider: ProviderID) -> NSView {
     var rows: [NSView] = [
       self.formRow("Monthly cost:", self.planControls(provider), labelWidth: 92),
       self.formRow("Sources:", self.sourceLabels(provider), labelWidth: 92),
     ]
-    if provider == .anthropic {
+    if provider == .anthropic || provider == .cursor {
       let checkbox = NSButton(
-        checkboxWithTitle: "Show my Claude plan limits",
+        checkboxWithTitle: "Allow access to my \(provider.displayName) usage",
         target: self, action: #selector(self.keychainChanged(_:)))
-      checkbox.identifier = NSUserInterfaceItemIdentifier("settings-automatic-claude")
-      checkbox.state = self.store.claudeKeychainReadAllowed ? .on : .off
+      checkbox.identifier = NSUserInterfaceItemIdentifier(
+        "settings-keychain-\(provider.rawValue)")
+      checkbox.state = self.store.keychainReadAllowed(for: provider) ? .on : .off
       checkbox.toolTip =
-        "Uses Claude's existing sign-in only to check limits. Reserve never stores it."
-      rows.append(self.formRow("Claude:", checkbox, labelWidth: 92))
+        "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
+      rows.append(self.formRow("\(provider.displayName):", checkbox, labelWidth: 92))
     }
     let refresh = NSButton(
       title: "Refresh Now", target: self, action: #selector(self.refreshProvider(_:)))
@@ -782,8 +785,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       "Limits · provider reported · \(quotaSource)", size: 12, color: .secondaryLabelColor)
     let tokens = SettingsLabel(
       state?.localUsage == nil
-        ? "Tokens · no local logs found"
-        : "Tokens · from local logs on this Mac · value estimated",
+        ? (state?.snapshot?.detailedUsageUnavailable == true
+          ? "Tokens · detailed usage unavailable for this account"
+          : "Tokens · no usage data found")
+        : state?.localUsage?.origin == .providerAccount
+          ? "Tokens and value · provider-reported account data"
+          : "Tokens · from local logs on this Mac · value estimated",
       size: 12, color: .secondaryLabelColor)
     let freshness = SettingsLabel(
       (state?.snapshot?.fetchedAt).map { DashboardFormat.updated($0, now: Date()) }
@@ -802,7 +809,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     name.widthAnchor.constraint(equalToConstant: 92).isActive = true
     let usage = self.store.states[provider]?.localUsage
     let today = SettingsLabel(
-      usage.map { "\(DashboardFormat.tokens($0.todayTokens)) today" } ?? "No local data",
+      usage.map { "\(DashboardFormat.tokens($0.todayTokens)) today" }
+        ?? (self.store.states[provider]?.snapshot?.detailedUsageUnavailable == true
+          ? "Details unavailable" : "No usage data"),
       size: 12, color: .secondaryLabelColor)
     today.widthAnchor.constraint(equalToConstant: 130).isActive = true
     let rolling = SettingsLabel(
@@ -988,14 +997,19 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func keychainChanged(_ sender: NSButton) {
+    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(
+      of: "settings-keychain-", with: "")
+    guard let provider = ProviderID(rawValue: raw),
+      provider == .anthropic || provider == .cursor
+    else { return }
     if sender.state == .on {
-      guard AppDelegate.confirmClaudeLimitAccess() else {
+      guard AppDelegate.confirmLimitAccess(for: provider) else {
         sender.state = .off
         return
       }
-      self.store.allowClaudeKeychainAccess()
+      self.store.allowKeychainAccess(for: provider)
     } else {
-      self.store.claudeKeychainReadAllowed = false
+      self.store.setKeychainReadAllowed(false, for: provider)
     }
   }
 
@@ -1167,6 +1181,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       case .openAI: "codex"
       case .anthropic: "claude"
       case .grok: "grok"
+      case .cursor: "cursor-agent"
       }
     let state = self.store.states[provider]
     return Self.providerStatus(
@@ -1303,8 +1318,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         provider: .anthropic, hasSnapshot: false, hasError: false, toolDetected: false
       ).text
         == "Claude setup needed"
-    let claudeIsHiddenUntilExpanded = !providerIDs.contains("settings-automatic-claude")
-    self.expandedProviders = [.anthropic]
+    let keychainAccessIsHiddenUntilExpanded =
+      !providerIDs.contains("settings-keychain-anthropic")
+      && !providerIDs.contains("settings-keychain-cursor")
+    self.expandedProviders = [.anthropic, .cursor]
     self.applyPane(animated: false)
     let expandedIDs = identifiers()
     let expandedButtonTitles = descendants().compactMap { ($0 as? NSButton)?.title }
@@ -1328,9 +1345,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.store.setRenewalDay(originalRenewalDay, for: .anthropic)
     let providersSuccess =
       providerRowsPresent
-      && claudeIsHiddenUntilExpanded
-      && expandedIDs.contains("settings-automatic-claude")
-      && expandedButtonTitles.contains("Show my Claude plan limits")
+      && keychainAccessIsHiddenUntilExpanded
+      && expandedIDs.contains("settings-keychain-anthropic")
+      && expandedIDs.contains("settings-keychain-cursor")
+      && expandedButtonTitles.contains("Allow access to my Anthropic usage")
+      && expandedButtonTitles.contains("Allow access to my Cursor usage")
       && expandedIDs.contains("subscription.anthropic")
       && expandedIDs.contains("renewal.anthropic")
       && expandedIDs.contains("provider-detail-anthropic")

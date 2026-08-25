@@ -39,7 +39,8 @@ sparkle="$app/Contents/Frameworks/Sparkle.framework"
   && -f "$app/Contents/Resources/Sparkle-LICENSE.txt" \
   && -f "$provider_logos/openAI.svg" \
   && -f "$provider_logos/anthropic.svg" \
-  && -f "$provider_logos/grok.svg" ]] || {
+  && -f "$provider_logos/grok.svg" \
+  && -f "$provider_logos/cursor.svg" ]] || {
   echo "error: package is missing required app files" >&2
   exit 65
 }

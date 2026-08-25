@@ -5,6 +5,10 @@ public enum ReserveSelfTests {
     openAIData: Data,
     anthropicData: Data,
     grokData: Data,
+    cursorUsageData: Data,
+    cursorDisabledSpendData: Data,
+    cursorMissingFieldsData: Data,
+    cursorMalformedData: Data,
     helperExecutable: String? = nil,
     progress: @Sendable (String) -> Void = { _ in }
   ) async throws -> [String] {
@@ -242,6 +246,9 @@ public enum ReserveSelfTests {
     let degradedStatus = try ServiceStatusClient.decodeStatuspage(
       Data(#"{"status":{"indicator":"minor","description":"Partial System Degradation"}}"#.utf8),
       provider: .anthropic)
+    let cursorStatus = try ServiceStatusClient.decodeStatuspage(
+      Data(#"{"status":{"indicator":"none","description":"All Systems Operational"}}"#.utf8),
+      provider: .cursor)
     let xAIStatus = ServiceStatusClient.decodeXAI(
       Data(
         """
@@ -251,12 +258,15 @@ public enum ReserveSelfTests {
         """.utf8))
     guard healthyStatus.health == .operational,
       degradedStatus.health == .degraded,
+      cursorStatus.provider == .cursor,
+      cursorStatus.health == .operational,
+      cursorStatus.pageURL.host == "status.cursor.com",
       xAIStatus.health == .degraded
     else { throw Failure("official service status decoding") }
     record("official service status decoding")
 
     guard UsageProviderError.credentialsNotFound("missing").requiresConnection,
-      UsageProviderError.keychainConsentRequired.requiresConnection,
+      UsageProviderError.keychainConsentRequired(.anthropic).requiresConnection,
       UsageProviderError.unauthorized("expired").requiresConnection,
       !UsageProviderError.rateLimited(retryAt: nil).requiresConnection,
       !UsageProviderError.unavailable("offline").requiresConnection
@@ -296,7 +306,10 @@ public enum ReserveSelfTests {
       openAI.rateLimits.secondary?.windowDurationMins == 10080,
       openAI.rateLimits.primary?.stableID(fallback: "primary") == "five-hour",
       openAI.rateLimits.secondary?.stableID(fallback: "secondary") == "weekly",
-      openAI.rateLimits.planType == "pro"
+      openAI.rateLimits.planType == "pro",
+      OpenAIProvider.appServerArguments == [
+        "-s", "read-only", "-a", "never", "app-server",
+      ]
     else { throw Failure("OpenAI rate-limit decoding") }
     record("OpenAI rate-limit decoding")
 
@@ -309,7 +322,10 @@ public enum ReserveSelfTests {
       ClaudePlanFormatter.plan(from: "team") == "Team",
       GrokPlanFormatter.plan(from: "supergrok_heavy") == "SuperGrok Heavy",
       GrokPlanFormatter.plan(from: "x_premium_plus") == "X Premium+",
-      GrokPlanFormatter.plan(from: "premium") == "X Premium"
+      GrokPlanFormatter.plan(from: "premium") == "X Premium",
+      CursorPlanFormatter.plan(from: "pro_plus") == "Pro Plus",
+      CursorPlanFormatter.plan(from: "ultra") == "Ultra",
+      CursorPlanFormatter.plan(from: "free") == "Hobby"
     else { throw Failure("provider plan-name normalization") }
     record("provider plan-name normalization")
 
@@ -457,6 +473,42 @@ public enum ReserveSelfTests {
       throw Failure("Grok remote tier decoding")
     }
     record("Grok remote tier decoding")
+
+    let cursor = try JSONDecoder().decode(
+      CursorCurrentPeriodUsageResponse.self, from: cursorUsageData)
+    let cursorReset = try Self.cursorDate(milliseconds: cursor.billingCycleEnd)
+    let cursorWindows = try CursorProvider.windows(
+      usage: cursor.planUsage, resetsAt: cursorReset, windowMinutes: 44_640)
+    guard cursorWindows.map(\.id) == ["cursor-models", "other-models"],
+      cursorWindows.map(\.usedPercent) == [45, 72.5],
+      cursorWindows.allSatisfy({ $0.resetsAt == cursorReset }),
+      CursorProvider.includedSpend(current: cursor, hardLimit: nil)?.remainingMinorUnits == 3_750
+    else { throw Failure("Cursor usage decoding") }
+    record("Cursor usage decoding")
+
+    let cursorDisabled = try JSONDecoder().decode(
+      CursorCurrentPeriodUsageResponse.self, from: cursorDisabledSpendData)
+    guard CursorProvider.includedSpend(current: cursorDisabled, hardLimit: nil)?.limitState
+      == .disabled
+    else { throw Failure("Cursor disabled spending decoding") }
+    record("Cursor disabled spending decoding")
+
+    let cursorMissing = try JSONDecoder().decode(
+      CursorCurrentPeriodUsageResponse.self, from: cursorMissingFieldsData)
+    guard try CursorProvider.windows(
+      usage: cursorMissing.planUsage, resetsAt: nil, windowMinutes: nil).isEmpty
+    else { throw Failure("Cursor missing-field fallback") }
+    record("Cursor missing-field fallback")
+
+    do {
+      let malformed = try JSONDecoder().decode(
+        CursorCurrentPeriodUsageResponse.self, from: cursorMalformedData)
+      _ = try CursorProvider.windows(
+        usage: malformed.planUsage, resetsAt: nil, windowMinutes: nil)
+      throw Failure("malformed Cursor allowance")
+    } catch UsageProviderError.invalidResponse {
+      record("malformed Cursor allowance")
+    }
 
     guard SemanticVersion.first(in: "grok 1.0.3") == SemanticVersion(1, 0, 3),
       SemanticVersion(1, 0, 3) > SemanticVersion(0, 1, 210),
@@ -660,10 +712,33 @@ public enum ReserveSelfTests {
       source: "test",
       includedSpend: IncludedSpend(
         label: "Included credits", usedMinorUnits: 1234, limitMinorUnits: 5000))
-    try await cache.save([.openAI: snapshot])
+    let cursorSnapshot = UsageSnapshot(
+      provider: .cursor,
+      planName: "Pro Plus",
+      windows: [
+        UsageWindow(id: "cursor-models", label: "Cursor Models", usedPercent: 45),
+        UsageWindow(id: "other-models", label: "Other Models", usedPercent: 72.5),
+      ],
+      source: "Cursor DashboardService",
+      includedSpend: IncludedSpend(
+        label: "On-demand spending", usedMinorUnits: 1_250, limitMinorUnits: 5_000),
+      monthlyPriceMinorUnits: 6_000,
+      accountUsage: LocalUsageSummary(
+        provider: .cursor, periodDays: 30, inputTokens: 100, cachedInputTokens: 20,
+        cacheWriteInputTokens: 5, outputTokens: 10, apiEquivalentCostUSD: 1.25,
+        todayTokens: 15, cycleTokens: 90, cycleAPIEquivalentCostUSD: 1,
+        source: "Cursor account usage", origin: .providerAccount,
+        modelCosts: [
+          ModelUsageCost(
+            model: "claude-4", inputTokens: 100, cachedInputTokens: 20,
+            cacheWriteInputTokens: 5, outputTokens: 10, costUSD: 1.25)
+        ]),
+      detailedUsageUnavailable: false)
+    try await cache.save([.openAI: snapshot, .cursor: cursorSnapshot])
     let data = try Data(contentsOf: url)
     let text = String(decoding: data, as: UTF8.self)
     let loaded = await cache.load()[.openAI]
+    let loadedCursor = await cache.load()[.cursor]
     let fileMode =
       try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]
       as? NSNumber
@@ -675,11 +750,22 @@ public enum ReserveSelfTests {
       directoryMode?.intValue == 0o700,
       !text.localizedCaseInsensitiveContains("access_token"),
       !text.localizedCaseInsensitiveContains("authorization"),
+      !text.contains("scheduled-test-token"),
+      !text.contains("raw-provider-payload"),
       loaded?.provider == snapshot.provider,
       loaded?.planName == snapshot.planName,
       loaded?.windows == snapshot.windows,
       loaded?.source == snapshot.source,
-      loaded?.includedSpend == snapshot.includedSpend
+      loaded?.includedSpend == snapshot.includedSpend,
+      loadedCursor?.provider == cursorSnapshot.provider,
+      loadedCursor?.planName == cursorSnapshot.planName,
+      loadedCursor?.windows == cursorSnapshot.windows,
+      loadedCursor?.source == cursorSnapshot.source,
+      loadedCursor?.includedSpend == cursorSnapshot.includedSpend,
+      loadedCursor?.monthlyPriceMinorUnits == cursorSnapshot.monthlyPriceMinorUnits,
+      loadedCursor?.detailedUsageUnavailable == cursorSnapshot.detailedUsageUnavailable,
+      loadedCursor?.accountUsage?.origin == .providerAccount,
+      loadedCursor?.accountUsage?.modelCosts.first?.costUSD == 1.25
     else { throw Failure("normalized snapshot cache") }
     record("normalized snapshot cache")
 
@@ -868,6 +954,11 @@ public enum ReserveSelfTests {
     let plist = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Library/Preferences/\(suiteName).plist")
     try? FileManager.default.removeItem(at: plist)
+  }
+
+  private static func cursorDate(milliseconds: Int64?) throws -> Date? {
+    guard let milliseconds else { return nil }
+    return Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
   }
 
   private struct Failure: LocalizedError {

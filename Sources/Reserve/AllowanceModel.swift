@@ -85,13 +85,15 @@ struct ProviderSummary {
   let isRefreshing: Bool
   let needsConnection: Bool
   let connectionToolAvailable: Bool
-  let requiresClaudeKeychainAccess: Bool
+  let requiresKeychainAccess: Bool
   let error: String?
   let lastUpdated: Date?
   /// Detail-layer material, kept out of the glance view.
   let localUsage: LocalUsageSummary?
   let subscriptionCostUSD: Double?
   let quotaSource: String?
+  let includedSpend: IncludedSpend?
+  let detailedUsageUnavailable: Bool
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
   var secondary: [Allowance] { self.allowances.filter { !$0.isPrimary } }
@@ -151,12 +153,14 @@ enum AllowanceBuilder {
       isRefreshing: state.isRefreshing,
       needsConnection: Self.needsConnection(state),
       connectionToolAvailable: Self.connectionToolAvailable(for: state.provider),
-      requiresClaudeKeychainAccess: state.requiresClaudeKeychainAccess,
+      requiresKeychainAccess: state.requiresKeychainAccess,
       error: state.error,
       lastUpdated: state.snapshot?.fetchedAt,
       localUsage: state.localUsage,
       subscriptionCostUSD: state.subscriptionCostUSD,
-      quotaSource: state.snapshot?.source)
+      quotaSource: state.snapshot?.source,
+      includedSpend: state.snapshot?.includedSpend,
+      detailedUsageUnavailable: state.snapshot?.detailedUsageUnavailable ?? false)
   }
 
   private static func connectionToolAvailable(for provider: ProviderID) -> Bool {
@@ -164,6 +168,7 @@ enum AllowanceBuilder {
     case .openAI: "codex"
     case .anthropic: "claude"
     case .grok: "grok"
+    case .cursor: "cursor-agent"
     }
     return BinaryLocator.find(executable) != nil
   }
@@ -190,7 +195,7 @@ enum AllowanceBuilder {
   }
 
   static func needsConnection(_ state: ProviderViewState) -> Bool {
-    if state.requiresConnection || state.requiresClaudeKeychainAccess { return true }
+    if state.requiresConnection || state.requiresKeychainAccess { return true }
     if state.error != nil { return false }
     return state.snapshot == nil
   }

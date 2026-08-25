@@ -165,15 +165,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         isConnecting: summary.isConnecting, isRefreshing: summary.isRefreshing,
         needsConnection: summary.needsConnection,
         connectionToolAvailable: summary.connectionToolAvailable,
-        requiresClaudeKeychainAccess: summary.requiresClaudeKeychainAccess,
+        requiresKeychainAccess: summary.requiresKeychainAccess,
         error: summary.error,
         lastUpdated: summary.lastUpdated, localUsage: summary.localUsage,
-        subscriptionCostUSD: summary.subscriptionCostUSD, quotaSource: summary.quotaSource)
+        subscriptionCostUSD: summary.subscriptionCostUSD, quotaSource: summary.quotaSource,
+        includedSpend: summary.includedSpend,
+        detailedUsageUnavailable: summary.detailedUsageUnavailable)
     }
-    // Aggregate copy is checked against three providers. Indexing directly would
+    // Aggregate copy is checked against several providers. Indexing directly would
     // crash whenever a provider is disabled, which is an ordinary state.
-    guard previewSummaries.count >= 3 else {
-      return (false, "aggregate copy needs three enabled providers to check")
+    guard previewSummaries.count >= 4 else {
+      return (false, "aggregate copy needs four enabled providers to check")
     }
     let pluralSummary = AllowanceBuilder.headline(
       for: [
@@ -253,6 +255,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           source: "self-test")))
     let primaryWindowIgnoresComponentShares =
       nonSharePrimary.allowances.first(where: \.isPrimary)?.id == "usage-pool"
+      && AllowanceBuilder.summary(
+        for: ProviderViewState(
+          provider: .cursor,
+          snapshot: UsageSnapshot(
+            provider: .cursor,
+            windows: [
+              UsageWindow(id: "cursor-models", label: "Cursor Models", usedPercent: 42),
+              UsageWindow(id: "other-models", label: "Other Models", usedPercent: 73),
+            ],
+            source: "self-test")))
+        .allowances.first(where: \.isPrimary)?.id == "other-models"
     let compactMoneyKeepsCurrency =
       DashboardFormat.money(14_200) == "$14.2K"
       && DashboardFormat.money(1_420_000) == "$1.42M"
@@ -405,8 +418,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       !identifiers.contains("status-anthropic")
       && !identifiers.contains("status-openAI")
       && !identifiers.contains("status-grok")
+      && !identifiers.contains("status-cursor")
+    let expectedSecondaryWindows = self.store.orderedStates
+      .filter { self.store.isEnabled($0.provider) }
+      .reduce(0) { count, state in
+        count + max(0, (state.snapshot?.windows.count ?? 0) - 1)
+      }
     let secondaryWindowsPresent =
-      descendants.filter { ($0.identifier?.rawValue ?? "").hasPrefix("secondary-") }.count == 5
+      descendants.filter { ($0.identifier?.rawValue ?? "").hasPrefix("secondary-") }.count
+      == expectedSecondaryWindows
     // Motion: the refresh control turns only while a refresh is in flight, and
     // nothing animates when the system asks for less motion.
     let idleSpinner = descendants.compactMap { $0 as? ReserveIconButton }.first {
@@ -558,6 +578,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       // Only one row opens at a time.
       && !expandedIDs.contains("usage-detail-openAI")
       && !expandedIDs.contains("usage-detail-grok")
+      && !expandedIDs.contains("usage-detail-cursor")
     self.store.expandedProvider = originalExpansion
     dashboardController.update()
     dashboardController.view.layoutSubtreeIfNeeded()
@@ -590,6 +611,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         for: .grok)?.host
         == "auth.x.ai"
       && UsageStore.authorizationURL(
+        in: "Continue at https://auth.cursor.com/oauth/authorize?code=sample",
+        for: .cursor)?.host
+        == "auth.cursor.com"
+      && UsageStore.authorizationURL(
         in: "https://example.com/oauth/authorize?code=not-trusted", for: .anthropic) == nil
     let updateMigrationWorks: Bool = {
       let domain = "Reserve.UpdaterMigration.SelfTest"
@@ -613,8 +638,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       return migrated && carriedForward && preserved
         && ReserveUpdater.dailyInterval == 24 * 3_600
     }()
-    // A calm plan does not earn the provider subprocess a sweep costs; anything
-    // that could change the menu bar still refreshes on time.
+    // Scheduled refreshes honor the configured interval. A recent manual
+    // refresh still prevents an unnecessary provider subprocess.
     func state(_ used: Double, fetchedMinutesAgo: Double, resetsInHours: Double) -> ProviderViewState {
       var value = ProviderViewState(provider: .openAI)
       value.snapshot = UsageSnapshot(
@@ -629,13 +654,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       return value
     }
     let calm = state(20, fetchedMinutesAgo: 5, resetsInHours: 100)
-    let adaptiveSchedulingWorks =
+    let scheduledRefreshWorks =
       // Calm and recently refreshed: skip.
       !UsageStore.scheduledRefreshIsWorthwhile(
         states: [calm], lastCompletedAt: Date().addingTimeInterval(-5 * 60), intervalMinutes: 30)
-      // Never let data age past twice the interval.
+      // Refresh once the configured interval has elapsed.
       && UsageStore.scheduledRefreshIsWorthwhile(
-        states: [calm], lastCompletedAt: Date().addingTimeInterval(-61 * 60), intervalMinutes: 30)
+        states: [calm], lastCompletedAt: Date().addingTimeInterval(-31 * 60), intervalMinutes: 30)
       // Nothing cached yet.
       && UsageStore.scheduledRefreshIsWorthwhile(
         states: [ProviderViewState(provider: .openAI)],
@@ -670,7 +695,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       firstClickSelectionWorks, footerButtonsArePadded, providerButtonsArePadded,
       refreshButtonIsPadded, dashboardTypographyIsReadable, oauthURLParsingIsSafe,
       outsideClickDismissalWorks, updateMigrationWorks,
-      adaptiveSchedulingWorks,
+      scheduledRefreshWorks,
       staleFreshnessIsVisible, freshWithoutForecastDoesNotLookStale,
       automaticSourceWorks,
       pinnedModelWorks, aggregateCopyWorks, deficitForecastUsesRenewalGap,
@@ -680,7 +705,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), adaptiveScheduling=\(adaptiveSchedulingWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (
@@ -1045,19 +1070,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   }
 
   private func connectProvider(_ provider: ProviderID) {
-    if provider == .anthropic,
-      self.store.states[provider]?.requiresClaudeKeychainAccess == true
+    if self.store.states[provider]?.requiresKeychainAccess == true
     {
       // Explain the benefit before macOS shows its system-owned Keychain sheet.
       // Reopen after either path so the menu-bar app never appears to vanish.
       self.popover.performClose(nil)
       DispatchQueue.main.async { [weak self] in
         guard let self else { return }
-        guard AppDelegate.confirmClaudeLimitAccess() else {
+        guard AppDelegate.confirmLimitAccess(for: provider) else {
           self.showMenu()
           return
         }
-        self.store.allowClaudeKeychainAccess { [weak self] in self?.showMenu() }
+        self.store.allowKeychainAccess(for: provider) { [weak self] in self?.showMenu() }
       }
       return
     }

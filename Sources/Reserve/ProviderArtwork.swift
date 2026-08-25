@@ -51,6 +51,7 @@ enum ProviderArtwork {
       case .openAI: "O"
       case .anthropic: "A"
       case .grok: "G"
+      case .cursor: "C"
       }
     let size = NSSize(width: 18, height: 18)
     let image = NSImage(size: size, flipped: false) { rect in

@@ -61,7 +61,7 @@ final class DashboardViewController: NSViewController {
       parts.append(summary.planName)
       parts.append(summary.error ?? "-")
       parts.append(summary.needsConnection ? "connect" : "-")
-      parts.append(summary.requiresClaudeKeychainAccess ? "keychain" : "-")
+      parts.append(summary.requiresKeychainAccess ? "keychain" : "-")
       parts.append(summary.isConnecting ? "connecting" : "-")
       parts.append(summary.isRefreshing ? "refreshing" : "-")
       parts.append(summary.serviceStatus?.health.rawValue ?? "-")
@@ -71,6 +71,8 @@ final class DashboardViewController: NSViewController {
         summary.serviceStatus.map { String($0.fetchedAt.timeIntervalSinceReferenceDate) } ?? "-")
       parts.append(summary.quotaSource ?? "-")
       parts.append(summary.subscriptionCostUSD.map { String($0) } ?? "-")
+      parts.append(String(reflecting: summary.includedSpend))
+      parts.append(summary.detailedUsageUnavailable ? "usage-unavailable" : "-")
       parts.append(String(reflecting: summary.localUsage))
       for allowance in summary.allowances {
         parts.append(allowance.id)
@@ -666,8 +668,8 @@ final class ProviderDashboardCard: NSView {
     let trailing: NSView
     if summary.needsConnection, !summary.isConnecting, !summary.isRefreshing {
       let actionTitle =
-        summary.requiresClaudeKeychainAccess
-        ? "Show limits"
+        summary.requiresKeychainAccess
+        ? "Allow access"
         : !summary.connectionToolAvailable && summary.provider == .anthropic ? "Set up" : "Sign in"
       let connect = ReserveTextButton(
         title: actionTitle, size: ReserveType.metadata, color: ReserveColor.warning, filled: true,
@@ -675,8 +677,8 @@ final class ProviderDashboardCard: NSView {
         action: { connectProvider(summary.provider) })
       connect.identifier = NSUserInterfaceItemIdentifier("connect-\(summary.provider.rawValue)")
       connect.toolTip =
-        summary.requiresClaudeKeychainAccess
-        ? "Uses Claude's existing sign-in only to check limits. Reserve never stores it."
+        summary.requiresKeychainAccess
+        ? "Uses \(summary.provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
         : !summary.connectionToolAvailable && summary.provider == .anthropic
           ? "Open Claude to finish its one-time Code setup"
         : "Sign in with the official \(summary.provider.displayName) tool to read plan limits"
@@ -699,12 +701,12 @@ final class ProviderDashboardCard: NSView {
 
   private static func unavailableRow(summary: ProviderSummary) -> NSView {
     let message =
-      summary.isConnecting && summary.requiresClaudeKeychainAccess
+      summary.isConnecting && summary.requiresKeychainAccess
       ? "One-time macOS approval…"
       : summary.isConnecting
       ? "Complete the sign-in in your browser"
-      : summary.requiresClaudeKeychainAccess
-        ? "Claude is ready · show your plan limits"
+      : summary.requiresKeychainAccess
+        ? "\(summary.provider.displayName) is ready · allow usage access"
       : !summary.connectionToolAvailable && summary.provider == .anthropic
         ? "One-time Claude setup needed"
       : summary.needsConnection && summary.localUsage != nil
@@ -1047,7 +1049,7 @@ final class DetailDisclosureButton: NSButton {
   @objc private func performAction() { self.handler(self.provider) }
 }
 
-/// Layer 2: activity and estimated value, the numbers the glance view no longer
+/// Layer 2: activity and provider value, the numbers the glance view no longer
 /// carries.
 @MainActor
 private final class UsageDetailGrid: NSView {
@@ -1055,13 +1057,16 @@ private final class UsageDetailGrid: NSView {
     super.init(frame: .zero)
     self.identifier = NSUserInterfaceItemIdentifier("usage-detail-\(summary.provider.rawValue)")
     let usage = summary.localUsage
+    let accountData = usage?.origin == .providerAccount
     let cells: [NSView] = [
       Self.cell(
-        "Local tokens today", usage.map { DashboardFormat.tokens($0.todayTokens) } ?? "—"),
+        accountData ? "Account tokens today" : "Local tokens today",
+        usage.map { DashboardFormat.tokens($0.todayTokens) } ?? "—"),
       Self.cell(
-        "Local · last 30 days", usage.map { DashboardFormat.tokens($0.totalTokens) } ?? "—"),
+        accountData ? "Account · last 30 days" : "Local · last 30 days",
+        usage.map { DashboardFormat.tokens($0.totalTokens) } ?? "—"),
       Self.cell(
-        "Estimated API value",
+        accountData ? "Provider-reported usage value" : "Estimated API value",
         usage.map { DashboardFormat.money($0.apiEquivalentCostUSD) } ?? "—"),
       Self.cell(
         "Monthly cost",
@@ -1073,6 +1078,30 @@ private final class UsageDetailGrid: NSView {
       row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
     }
     var rows: [NSView] = [top, bottom]
+    if let spend = summary.includedSpend {
+      let value: String =
+        switch spend.limitState {
+        case .disabled: "Disabled"
+        case .unlimited:
+          "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) used · unlimited"
+        case .capped:
+          "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) of \(DashboardFormat.money(Double(spend.limitMinorUnits) / 100)) · \(DashboardFormat.money(Double(spend.remainingMinorUnits ?? 0) / 100)) left"
+        }
+      rows.append(Self.cell(spend.label, value))
+    }
+    if summary.detailedUsageUnavailable {
+      rows.append(
+        ReserveLabel(
+          "Detailed usage unavailable for this account.",
+          font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+        ).flexible())
+    }
+    if let models = usage?.modelCosts.prefix(3), !models.isEmpty {
+      let text = models.map {
+        "\($0.model) \(DashboardFormat.money($0.costUSD))"
+      }.joined(separator: " · ")
+      rows.append(Self.cell("Models", text))
+    }
     if let series = usage?.dailyTokens, series.contains(where: { $0.tokens > 0 }) {
       let chart = ReserveSparkline(series: series, color: ReserveColor.chartPrimary)
       chart.identifier = NSUserInterfaceItemIdentifier(

@@ -58,7 +58,7 @@ public struct AnthropicProvider: UsageProvider {
     } catch UsageProviderError.unauthorized where !self.allowKeychainRead {
       #if canImport(Security)
         if ClaudeCredentialLoader.keychainItemExistsWithoutPrompt() {
-          throw UsageProviderError.keychainConsentRequired
+          throw UsageProviderError.keychainConsentRequired(.anthropic)
         }
       #endif
       throw UsageProviderError.unauthorized(
@@ -273,7 +273,7 @@ enum ClaudeCredentialLoader {
     #if canImport(Security)
       if let keychainError { throw keychainError }
       if self.keychainItemExistsWithoutPrompt() {
-        throw UsageProviderError.keychainConsentRequired
+        throw UsageProviderError.keychainConsentRequired(.anthropic)
       }
     #endif
     throw UsageProviderError.credentialsNotFound(
@@ -356,7 +356,7 @@ enum ClaudeCredentialLoader {
       if status == errSecInteractionNotAllowed || status == errSecUserCanceled
         || status == errSecAuthFailed
       {
-        throw UsageProviderError.keychainConsentRequired
+        throw UsageProviderError.keychainConsentRequired(.anthropic)
       }
       guard status == errSecSuccess, let data = result as? Data else {
         throw UsageProviderError.credentialsNotFound(
