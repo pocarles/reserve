@@ -8,6 +8,8 @@ struct ReserveProbe {
     let appDefaults = UserDefaults(suiteName: "com.pocarles.reserve")
     let allowClaudeKeychainRead =
       appDefaults?.bool(forKey: "anthropic.keychainReadAllowed") ?? false
+    let allowCursorKeychainRead =
+      appDefaults?.bool(forKey: "cursor.keychainReadAllowed") ?? false
     let argument = CommandLine.arguments.dropFirst().first
     if argument?.lowercased() == "local" {
       await self.printLocalUsage()
@@ -18,10 +20,11 @@ struct ReserveProbe {
     case "openai": selected = [.openAI]
     case "anthropic", "claude": selected = [.anthropic]
     case "grok": selected = [.grok]
+    case "cursor": selected = [.cursor]
     case nil, "all": selected = ProviderID.allCases
     default:
       FileHandle.standardError.write(
-        Data("Usage: reserve-probe [openai|anthropic|grok|local|all]\n".utf8))
+        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|local|all]\n".utf8))
       exit(64)
     }
 
@@ -33,6 +36,7 @@ struct ReserveProbe {
         case .openAI: OpenAIProvider()
         case .anthropic: AnthropicProvider(allowKeychainRead: allowClaudeKeychainRead)
         case .grok: GrokProvider()
+        case .cursor: CursorProvider(allowKeychainRead: allowCursorKeychainRead)
         }
       do {
         snapshots.append(try await fetcher.fetch())

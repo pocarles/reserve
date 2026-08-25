@@ -1,8 +1,8 @@
 # Reserve
 
 Reserve is a native macOS menu-bar app that shows how much subscription
-capacity remains in OpenAI Codex, Anthropic Claude, and Grok, when each window
-resets, and whether the current pace is likely to last.
+capacity remains in OpenAI Codex, Anthropic Claude, Grok, and Cursor, when each
+window resets, and whether the current pace is likely to last.
 
 It is deliberately small: no Reserve account, browser automation, WebView,
 cookie extraction, telemetry, crash reporting, cloud service, or third-party
@@ -36,24 +36,29 @@ source build is ad-hoc signed and is intended only for the Mac that built it.
 Reserve reuses sign-ins belonging to the official provider CLIs. It does not
 create another account or copy credentials into its own storage.
 
-Installation never asks for Claude access. If Claude protects its sign-in with
-macOS, Reserve first shows a **Show limits** action and explains why access is
-needed. The macOS prompt appears only after that action is confirmed.
+Installation never asks for Claude or Cursor access. If a provider protects its
+sign-in with macOS, Reserve first shows an **Allow access** action and explains
+why access is needed. The macOS prompt appears only after that action is
+confirmed. Cursor also starts disabled after installation or upgrade.
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
-- Grok Build 1.0.0 or newer, authenticated with `grok login`.
+- Grok Build 1.0.0 or newer, authenticated with `grok login`; and
+- `cursor-agent`, authenticated with `cursor-agent login`, for an individual
+  Cursor account. Teams and Enterprise Admin API keys are not supported.
 
 If a CLI is absent or signed out, Reserve reports that state. A Connect action
 runs the provider's official login command and restricts browser handoff URLs to
 that provider's expected HTTPS hosts. Temporary login output stays in memory.
 
 Anthropic's subscription-usage endpoint is not a documented public API and may
-change or rate-limit Reserve without notice. Grok Build 1.x does not expose its
-billing method through ACP, so Reserve reads the authenticated billing endpoint
-used by the CLI. OpenAI limits come from Codex app-server JSON-RPC. Provider
-changes can temporarily break a refresh even when the local app is healthy;
-the last valid snapshot remains visible and is marked stale.
+change or rate-limit Reserve without notice. Cursor's authenticated individual
+usage RPC is also undocumented and may change without notice. Grok Build 1.x
+does not expose its billing method through ACP, so Reserve reads the
+authenticated billing endpoint used by the CLI. OpenAI limits come from Codex
+app-server JSON-RPC. Provider changes can temporarily break a refresh even when
+the local app is healthy; the last valid snapshot remains visible and is marked
+stale.
 
 ## Build from source
 
@@ -87,11 +92,13 @@ make lifecycle-test
 swift run reserve-probe openai
 swift run reserve-probe anthropic
 swift run reserve-probe grok
+swift run reserve-probe cursor
 swift run reserve-probe local
 ```
 
 The probe prints snapshots and errors, never credential material. The
-Anthropic probe honors the same explicit Keychain-consent setting as the app.
+Anthropic and Cursor probes honor the same explicit Keychain-consent setting as
+the app.
 
 ## What Reserve shows
 
@@ -101,10 +108,24 @@ time, progress, pace marker, and a short projection. Five-hour windows stay
 secondary to plan-level allowances. Grok's Build and Chat shares are shown as
 components of its shared weekly pool, not as extra quota.
 
+Cursor shows Cursor Models and Other Models as separate monthly allowances with
+the same reported billing reset. The glance view follows whichever pool is more
+constrained. Hobby, Pro, Pro Plus, and Ultra default to $0, $20, $60, and $200
+per month; Cursor's reported plan price and renewal date take precedence when
+available. On-demand spending is shown literally as disabled, unlimited, or a
+dollar amount used against its configured cap.
+
 The optional savings view is an API-equivalent estimate, not a provider bill.
 OpenAI and Anthropic use the observed input/cache/output mix when available;
 Grok exposes an aggregate token count, so its comparison is approximate.
 Subscription prices remain user-editable.
+
+Cursor's account insights come from provider-reported usage events. Reserve
+labels their dollar total **Provider-reported usage value** rather than estimated
+API savings. It aggregates input, output, cache-read, and cache-write tokens by
+day and model without reading prompts or transcripts. If Cursor does not expose
+detailed events for an individual account, the plan allowances keep working and
+Reserve says **Detailed usage unavailable for this account.**
 
 Service-health labels come from the providers' official status sources. The
 default notification stream reports state transitions such as deficit,
@@ -137,15 +158,25 @@ The snapshot cache is capped at 100 KB. The local index is capped at 12 MB and
 contains daily token/cost aggregates plus hashed file keys and byte offsets for
 incremental scans. OAuth tokens, account identifiers, local paths, prompts,
 responses, cookies, authorization headers, raw provider payloads, and process
-logs are never cached.
+logs are never cached. Cursor's normalized daily and model totals may be cached
+with the same bounds as other aggregate usage data.
 
 Local totals come from session logs under `~/.claude/projects`,
 `~/.codex/sessions`, and `~/.grok/sessions`; only bounded daily aggregates are
-retained. Reserve may read `~/.claude/.credentials.json` and
+retained. Reserve never scans Cursor transcripts or prompt text. It may read
+`~/.claude/.credentials.json` and
 `~/.grok/auth.json` when present. Claude Code can instead keep its sign-in in
-Keychain; Reserve reads it only after the user chooses **Show limits**, through
+Keychain; Reserve reads it only after the user chooses **Allow access**, through
 Security.framework, and retains it in memory only. A current protected sign-in
 takes precedence over legacy credential files left behind by Claude Code.
+
+For Cursor, Reserve first runs the official
+`cursor-agent status --format json` command with strict time and output limits
+so Cursor can refresh its own credential. Only after **Allow access** does
+Reserve read the `cursor-user` / `cursor-access-token` Keychain item. It never
+reads the Cursor refresh token, writes Cursor Keychain items, or stores the
+access token or raw DashboardService responses. Scheduled refreshes disallow
+Keychain interaction, and turning access off invalidates an in-flight refresh.
 
 See [SECURITY.md](SECURITY.md) for reporting and support policy.
 
@@ -177,9 +208,9 @@ AppKit NSStatusItem + NSPopover
          UsageStore
        /      |       \
   cache   local scan   providers
-                       /   |   \
-                  Codex Claude Grok
-                   RPC  HTTPS HTTPS
+                       /   |    |    \
+                  Codex Claude Grok Cursor
+                   RPC  HTTPS HTTPS HTTPS
 ```
 
 `ReserveCore` owns provider, cache, scanner, and notification-domain behavior.
@@ -193,9 +224,14 @@ target.
 complete its official login. Then use Refresh in Reserve.
 
 **Claude is connected in the CLI but not Reserve.** If Claude Code stores its
-credential with macOS, choose **Show limits** on the Claude card. Reserve
+credential with macOS, choose **Allow access** on the Claude card. Reserve
 explains the one-time approval before macOS asks. You can turn it off later
 under Settings > Providers.
+
+**Cursor is signed in but not visible.** Enable Cursor under Settings >
+Providers. Choose **Allow access** to reuse the existing Cursor Agent sign-in,
+or **Sign in** to run `cursor-agent login`. Cursor remains off until you enable
+it.
 
 **Data is stale or rate limited.** Reserve keeps the last valid snapshot and
 retries after a bounded backoff. Check the provider's linked official status
@@ -210,14 +246,15 @@ same GitHub Release. Do not open the DMG.
 
 ## Contributing and release process
 
-Focused contributions that improve the lightweight three-provider product are
+Focused contributions that improve the lightweight four-provider product are
 welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md). Maintainer release operations
 are documented in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 
 ## Independence and trademarks
 
 Reserve is an independent open-source project. It is not affiliated with,
-endorsed by, sponsored by, or an official product of OpenAI, Anthropic, or xAI.
+endorsed by, sponsored by, or an official product of OpenAI, Anthropic, xAI, or
+Anysphere.
 Provider names and marks belong to their respective owners. See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

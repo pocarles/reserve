@@ -15,7 +15,7 @@ struct ProviderViewState: Identifiable {
   var nextRenewal: Date?
   var serviceStatus: ProviderServiceStatus?
   var requiresConnection = false
-  var requiresClaudeKeychainAccess = false
+  var requiresKeychainAccess = false
 }
 
 enum PreviewScenario: String, CaseIterable {
@@ -85,8 +85,8 @@ final class UsageStore {
   /// discarded rather than applied.
   private var refreshTokens: [ProviderID: Int] = [:]
   private var pendingRefreshes: Set<ProviderID> = []
-  private var pendingClaudeKeychainInteraction = false
-  private var claudeAccessCompletions: [() -> Void] = []
+  private var pendingKeychainInteractions: Set<ProviderID> = []
+  private var keychainAccessCompletions: [ProviderID: [() -> Void]] = [:]
   private var lastRefreshCompletedAt: Date?
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
@@ -139,23 +139,53 @@ final class UsageStore {
   }
 
   var claudeKeychainReadAllowed: Bool {
-    get { self.defaults.bool(forKey: "anthropic.keychainReadAllowed") }
-    set {
-      self.defaults.set(newValue, forKey: "anthropic.keychainReadAllowed")
-      if !newValue { self.pendingClaudeKeychainInteraction = false }
-      self.changed()
-      if newValue { self.refresh(.anthropic) }
+    get { self.keychainReadAllowed(for: .anthropic) }
+    set { self.setKeychainReadAllowed(newValue, for: .anthropic) }
+  }
+
+  var cursorKeychainReadAllowed: Bool {
+    get { self.keychainReadAllowed(for: .cursor) }
+    set { self.setKeychainReadAllowed(newValue, for: .cursor) }
+  }
+
+  func keychainReadAllowed(for provider: ProviderID) -> Bool {
+    self.defaults.bool(forKey: "\(provider.rawValue).keychainReadAllowed")
+  }
+
+  func setKeychainReadAllowed(_ allowed: Bool, for provider: ProviderID) {
+    guard provider == .anthropic || provider == .cursor else { return }
+    self.defaults.set(allowed, forKey: "\(provider.rawValue).keychainReadAllowed")
+    if !allowed {
+      self.pendingKeychainInteractions.remove(provider)
+      self.refreshTokens[provider] = (self.refreshTokens[provider] ?? 0) + 1
+      self.states[provider]?.isRefreshing = false
+      self.states[provider]?.isConnecting = false
+      if provider == .cursor {
+        self.states[provider]?.requiresKeychainAccess = true
+        self.states[provider]?.requiresConnection = true
+        self.states[provider]?.error = "Cursor access is off. Choose Allow access to resume checks."
+        self.states[provider]?.localUsage = nil
+      } else {
+        self.states[provider]?.requiresKeychainAccess = false
+      }
     }
+    self.changed()
+    if allowed { self.refresh(provider) }
   }
 
   /// Called only from an explicit button or checkbox. This one refresh may ask
   /// macOS for Keychain approval; scheduled refreshes always stay silent.
   func allowClaudeKeychainAccess(onFinished: (() -> Void)? = nil) {
-    if let onFinished { self.claudeAccessCompletions.append(onFinished) }
-    self.defaults.set(true, forKey: "anthropic.keychainReadAllowed")
-    self.states[.anthropic]?.requiresClaudeKeychainAccess = true
-    self.pendingClaudeKeychainInteraction = true
-    if !self.refresh(.anthropic, allowKeychainInteraction: true) { self.changed() }
+    self.allowKeychainAccess(for: .anthropic, onFinished: onFinished)
+  }
+
+  func allowKeychainAccess(for provider: ProviderID, onFinished: (() -> Void)? = nil) {
+    guard provider == .anthropic || provider == .cursor else { return }
+    if let onFinished { self.keychainAccessCompletions[provider, default: []].append(onFinished) }
+    self.defaults.set(true, forKey: "\(provider.rawValue).keychainReadAllowed")
+    self.states[provider]?.requiresKeychainAccess = true
+    self.pendingKeychainInteractions.insert(provider)
+    if !self.refresh(provider, allowKeychainInteraction: true) { self.changed() }
   }
 
   var refreshIntervalMinutes: Int {
@@ -392,7 +422,8 @@ final class UsageStore {
     }
   }
 
-  /// The scheduled sweep. Skips the round when nothing on screen could change.
+  /// The scheduled sweep. A recent manual refresh can skip the round only while
+  /// every enabled provider remains healthy.
   private func refreshAllIfWorthwhile(now: Date = Date()) {
     guard
       Self.scheduledRefreshIsWorthwhile(
@@ -420,7 +451,7 @@ final class UsageStore {
       return false
     }
     if allowKeychainInteraction {
-      self.pendingClaudeKeychainInteraction = false
+      self.pendingKeychainInteractions.remove(provider)
       self.states[provider]?.isConnecting = true
       self.changed()
     }
@@ -433,10 +464,9 @@ final class UsageStore {
   }
 
   func connect(_ provider: ProviderID) {
-    if provider == .anthropic,
-      self.states[provider]?.requiresClaudeKeychainAccess == true
+    if self.states[provider]?.requiresKeychainAccess == true
     {
-      self.allowClaudeKeychainAccess()
+      self.allowKeychainAccess(for: provider)
       return
     }
     guard self.loginProcesses[provider]?.isRunning != true else { return }
@@ -556,6 +586,12 @@ final class UsageStore {
 
   func setEnabled(_ provider: ProviderID, enabled: Bool) {
     self.defaults.set(enabled, forKey: "provider.\(provider.rawValue).enabled")
+    if !enabled {
+      self.pendingKeychainInteractions.remove(provider)
+      self.refreshTokens[provider] = (self.refreshTokens[provider] ?? 0) + 1
+      self.states[provider]?.isConnecting = false
+      self.states[provider]?.isRefreshing = false
+    }
     self.changed()
     if enabled { self.refresh(provider) }
   }
@@ -566,10 +602,22 @@ final class UsageStore {
 
   func monthlySubscriptionCost(for provider: ProviderID) -> Double? {
     let key = "subscription.monthlyCost.\(provider.rawValue)"
-    guard let number = self.defaults.object(forKey: key) as? NSNumber,
+    if let number = self.defaults.object(forKey: key) as? NSNumber,
       number.doubleValue.isFinite
-    else { return nil }
-    return max(0, number.doubleValue)
+    {
+      return max(0, number.doubleValue)
+    }
+    if let reported = self.states[provider]?.snapshot?.monthlyPriceMinorUnits {
+      return Double(reported) / 100
+    }
+    guard provider == .cursor else { return nil }
+    switch self.states[provider]?.snapshot?.planName?.lowercased() {
+    case "hobby": return 0
+    case "pro": return 20
+    case "pro plus": return 60
+    case "ultra": return 200
+    default: return nil
+    }
   }
 
   func setMonthlySubscriptionCost(_ value: Double?, for provider: ProviderID) {
@@ -673,17 +721,20 @@ final class UsageStore {
   }
 
   func installPreviewSnapshots(now: Date = Date(), scenario: PreviewScenario = .deficit) {
-    let usage: (openAI: Double, anthropic: Double, grok: Double) =
+    for provider in ProviderID.allCases {
+      self.defaults.set(true, forKey: "provider.\(provider.rawValue).enabled")
+    }
+    let usage: (openAI: Double, anthropic: Double, grok: Double, cursor: Double) =
       switch scenario {
-      case .allReserve, .stale, .unknown, .keychainAccess: (24, 32, 43)
-      case .mixed: (24, 48, 43)
-      case .deficit: (61, 32, 43)
-      case .multipleDeficit: (61, 60, 70)
-      case .exhausted: (100, 32, 43)
+      case .allReserve, .stale, .unknown, .keychainAccess: (24, 32, 43, 37)
+      case .mixed: (24, 48, 43, 54)
+      case .deficit: (61, 32, 43, 37)
+      case .multipleDeficit: (61, 60, 70, 68)
+      case .exhausted: (100, 32, 43, 37)
       }
     let openAIWindowMinutes: Int? = scenario == .unknown ? nil : 10_080
     let grokFetchedAt = now.addingTimeInterval(scenario == .stale ? -42 * 60 : -126)
-    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19]) {
+    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19, 24]) {
       self.defaults.set(day, forKey: "subscription.renewalDay.\(provider.rawValue)")
     }
     self.states[.openAI] = ProviderViewState(
@@ -745,8 +796,9 @@ final class UsageStore {
       pageURL: URL(string: "https://status.claude.com")!)
     if scenario == .keychainAccess {
       self.states[.anthropic]?.snapshot = nil
-      self.states[.anthropic]?.error = UsageProviderError.keychainConsentRequired.localizedDescription
-      self.states[.anthropic]?.requiresClaudeKeychainAccess = true
+      self.states[.anthropic]?.error = UsageProviderError.keychainConsentRequired(.anthropic)
+        .localizedDescription
+      self.states[.anthropic]?.requiresKeychainAccess = true
     }
     self.states[.grok] = ProviderViewState(
       provider: .grok,
@@ -778,6 +830,40 @@ final class UsageStore {
     self.states[.grok]?.serviceStatus = ProviderServiceStatus(
       provider: .grok, health: .operational, detail: "All systems operational",
       pageURL: URL(string: "https://status.x.ai")!)
+    self.states[.cursor] = ProviderViewState(
+      provider: .cursor,
+      snapshot: UsageSnapshot(
+        provider: .cursor,
+        planName: "Pro Plus",
+        windows: [
+          UsageWindow(
+            id: "cursor-models", label: "Cursor Models", usedPercent: usage.cursor,
+            windowMinutes: 43_200, resetsAt: now.addingTimeInterval(18 * 86_400)),
+          UsageWindow(
+            id: "other-models", label: "Other Models", usedPercent: 22,
+            windowMinutes: 43_200, resetsAt: now.addingTimeInterval(18 * 86_400)),
+        ],
+        fetchedAt: now.addingTimeInterval(-64),
+        source: "Cursor DashboardService",
+        includedSpend: IncludedSpend(
+          label: "On-demand spending", usedMinorUnits: 1_240, limitMinorUnits: 5_000),
+        billingRenewsAt: now.addingTimeInterval(18 * 86_400),
+        monthlyPriceMinorUnits: 6_000,
+        accountUsage: LocalUsageSummary(
+          provider: .cursor, periodDays: 30,
+          inputTokens: 2_100_000_000, cachedInputTokens: 1_250_000_000,
+          cacheWriteInputTokens: 210_000_000, outputTokens: 48_000_000,
+          apiEquivalentCostUSD: 183.42,
+          todayTokens: 96_000_000, cycleTokens: 1_820_000_000,
+          cycleAPIEquivalentCostUSD: 154.11,
+          source: "Cursor account usage", origin: .providerAccount,
+          dailyTokens: Self.previewSeries(peak: 210_000_000, phase: 4.8, now: now))),
+      localUsage: nil)
+    let cursorPreviewUsage = self.states[.cursor]?.snapshot?.accountUsage
+    self.states[.cursor]?.localUsage = cursorPreviewUsage
+    self.states[.cursor]?.serviceStatus = ProviderServiceStatus(
+      provider: .cursor, health: .operational, detail: "All systems operational",
+      pageURL: URL(string: "https://status.cursor.com")!)
     self.changed()
   }
 
@@ -786,9 +872,11 @@ final class UsageStore {
       "provider.openAI.enabled": true,
       "provider.anthropic.enabled": true,
       "provider.grok.enabled": true,
+      "provider.cursor.enabled": false,
       // Reading Claude Code's Keychain item is another application's OAuth
       // token, so it is opt-in and stays off until asked for.
       "anthropic.keychainReadAllowed": false,
+      "cursor.keychainReadAllowed": false,
       // Weekly quotas move slowly, and every sweep spawns a provider CLI that
       // costs far more than Reserve itself. Half-hourly is plenty; the interval
       // remains configurable.
@@ -924,6 +1012,10 @@ final class UsageStore {
       LoginConfiguration(
         executable: "grok", arguments: ["login", "--oauth"], displayName: "Grok Build",
         trustedHosts: ["auth.x.ai", "x.ai", "grok.com"])
+    case .cursor:
+      LoginConfiguration(
+        executable: "cursor-agent", arguments: ["login"], displayName: "Cursor Agent",
+        trustedHosts: ["cursor.com", "auth.cursor.com", "www.cursor.com"])
     }
   }
 
@@ -954,13 +1046,10 @@ final class UsageStore {
     Task { await self.performLocalUsageScan() }
   }
 
-  /// Whether a scheduled sweep earns the provider subprocesses it costs.
+  /// Whether a scheduled sweep should start provider subprocesses.
   ///
-  /// A refresh spawns a provider CLI — `codex app-server` alone peaks near
-  /// 100 MB — so a calm plan is not worth waking for on every tick. Anything
-  /// that could actually change what the menu bar says still refreshes on time:
-  /// data that is missing, stale or errored, a window close to its reset, or a
-  /// plan far enough through its allowance that the number moves.
+  /// The configured interval is literal. A manual refresh may have completed
+  /// shortly before a scheduled tick, so that tick can still be skipped.
   static func scheduledRefreshIsWorthwhile(
     states: [ProviderViewState],
     lastCompletedAt: Date?,
@@ -968,9 +1057,8 @@ final class UsageStore {
     now: Date = Date()
   ) -> Bool {
     guard let lastCompletedAt else { return true }
-    // Never let the data get more than twice the configured interval old.
     let interval = TimeInterval(max(1, intervalMinutes) * 60)
-    if now.timeIntervalSince(lastCompletedAt) >= interval * 2 { return true }
+    if now.timeIntervalSince(lastCompletedAt) >= interval { return true }
     return states.contains { state in
       if state.error != nil { return true }
       guard let snapshot = state.snapshot else { return true }
@@ -1047,15 +1135,15 @@ final class UsageStore {
         self.states[provider]?.isRefreshing = false
         if allowKeychainInteraction { self.states[provider]?.isConnecting = false }
         if notify { self.changed() }
-        var startedFollowUpClaudeInteraction = false
-        if provider == .anthropic, self.pendingClaudeKeychainInteraction {
-          startedFollowUpClaudeInteraction = self.refresh(
-            .anthropic, allowKeychainInteraction: true)
+        var startedFollowUpKeychainInteraction = false
+        if self.pendingKeychainInteractions.contains(provider) {
+          startedFollowUpKeychainInteraction = self.refresh(
+            provider, allowKeychainInteraction: true)
         } else if self.pendingRefreshes.remove(provider) != nil {
           self.refresh(provider)
         }
-        if allowKeychainInteraction, !startedFollowUpClaudeInteraction {
-          self.completeClaudeKeychainInteraction()
+        if allowKeychainInteraction, !startedFollowUpKeychainInteraction {
+          self.completeKeychainInteraction(for: provider)
         }
       }
     }
@@ -1068,6 +1156,10 @@ final class UsageStore {
           allowKeychainRead: self.claudeKeychainReadAllowed,
           allowKeychainInteraction: allowKeychainInteraction)
       case .grok: GrokProvider()
+      case .cursor:
+        CursorProvider(
+          allowKeychainRead: self.cursorKeychainReadAllowed,
+          allowKeychainInteraction: allowKeychainInteraction)
       }
     let previousHealth = self.states[provider]?.serviceStatus?.health
     if !allowKeychainInteraction {
@@ -1085,7 +1177,10 @@ final class UsageStore {
       self.states[provider]?.snapshot = snapshot
       self.states[provider]?.error = nil
       self.states[provider]?.requiresConnection = false
-      self.states[provider]?.requiresClaudeKeychainAccess = false
+      self.states[provider]?.requiresKeychainAccess = false
+      if provider == .cursor {
+        self.states[provider]?.localUsage = snapshot.accountUsage
+      }
       providerFetchSucceeded = true
       self.notifications.update(
         previous: previous,
@@ -1099,12 +1194,15 @@ final class UsageStore {
       self.states[provider]?.error = String(error.localizedDescription.prefix(500))
       self.states[provider]?.requiresConnection =
         (error as? UsageProviderError)?.requiresConnection == true
-      let requiresClaudeKeychainAccess =
-        provider == .anthropic
-        && (error as? UsageProviderError) == .keychainConsentRequired
-      self.states[provider]?.requiresClaudeKeychainAccess = requiresClaudeKeychainAccess
-      if requiresClaudeKeychainAccess {
-        self.defaults.set(false, forKey: "anthropic.keychainReadAllowed")
+      let requiresKeychainAccess: Bool
+      if case .keychainConsentRequired(let consentProvider) = error as? UsageProviderError {
+        requiresKeychainAccess = consentProvider == provider
+      } else {
+        requiresKeychainAccess = false
+      }
+      self.states[provider]?.requiresKeychainAccess = requiresKeychainAccess
+      if requiresKeychainAccess {
+        self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
       }
     }
     if allowKeychainInteraction, providerFetchSucceeded {
@@ -1117,18 +1215,32 @@ final class UsageStore {
     self.reportStaleness(provider)
   }
 
-  private func completeClaudeKeychainInteraction() {
-    let completions = self.claudeAccessCompletions
-    self.claudeAccessCompletions.removeAll(keepingCapacity: false)
+  private func completeKeychainInteraction(for provider: ProviderID) {
+    let completions = self.keychainAccessCompletions.removeValue(forKey: provider) ?? []
     for completion in completions { completion() }
   }
 
   func exerciseClaudeAccessCompletionForSelfTest() -> Bool {
     var count = 0
-    self.claudeAccessCompletions.append { count += 1 }
-    self.completeClaudeKeychainInteraction()
-    self.completeClaudeKeychainInteraction()
-    return count == 1 && self.claudeAccessCompletions.isEmpty
+    self.keychainAccessCompletions[.anthropic, default: []].append { count += 1 }
+    self.completeKeychainInteraction(for: .anthropic)
+    self.completeKeychainInteraction(for: .anthropic)
+    return count == 1 && self.keychainAccessCompletions[.anthropic] == nil
+  }
+
+  func exerciseCursorAccessDisableForSelfTest() -> Bool {
+    self.defaults.set(true, forKey: "cursor.keychainReadAllowed")
+    self.states[.cursor]?.isRefreshing = true
+    self.states[.cursor]?.isConnecting = true
+    self.states[.cursor]?.localUsage = LocalUsageSummary(
+      provider: .cursor, periodDays: 30, inputTokens: 1, outputTokens: 1,
+      apiEquivalentCostUSD: 0, origin: .providerAccount)
+    self.setKeychainReadAllowed(false, for: .cursor)
+    return !self.cursorKeychainReadAllowed
+      && self.states[.cursor]?.isRefreshing == false
+      && self.states[.cursor]?.isConnecting == false
+      && self.states[.cursor]?.localUsage == nil
+      && self.states[.cursor]?.requiresKeychainAccess == true
   }
 
   /// Fires once when a provider's numbers go stale, and clears when they

@@ -80,6 +80,7 @@ public actor ServiceStatusClient {
       case .openAI: URL(string: "https://status.openai.com/api/v2/summary.json")!
       case .anthropic: URL(string: "https://status.claude.com/api/v2/summary.json")!
       case .grok: URL(string: "https://status.x.ai/feed.xml")!
+      case .cursor: URL(string: "https://status.cursor.com/api/v2/summary.json")!
       }
     var request = URLRequest(url: endpoint)
     request.setValue("Reserve/1.0", forHTTPHeaderField: "User-Agent")
@@ -88,7 +89,7 @@ public actor ServiceStatusClient {
     guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count <= 512_000
     else { throw StatusError.invalidResponse }
     switch provider {
-    case .openAI, .anthropic:
+    case .openAI, .anthropic, .cursor:
       return try Self.decodeStatuspage(data, provider: provider, now: now)
     case .grok:
       return Self.decodeXAI(data, now: now)
@@ -146,6 +147,7 @@ public actor ServiceStatusClient {
     case .openAI: URL(string: "https://status.openai.com")!
     case .anthropic: URL(string: "https://status.claude.com")!
     case .grok: URL(string: "https://status.x.ai")!
+    case .cursor: URL(string: "https://status.cursor.com")!
     }
   }
 }

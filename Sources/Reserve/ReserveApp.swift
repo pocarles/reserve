@@ -42,7 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     "macOS may ask once. Choose Always Allow to keep future checks automatic."
 
   static func confirmClaudeLimitAccess() -> Bool {
-    ClaudeLimitAccessPrompt().ask()
+    self.confirmLimitAccess(for: .anthropic)
+  }
+
+  static func confirmLimitAccess(for provider: ProviderID) -> Bool {
+    ProviderLimitAccessPrompt(provider: provider).ask()
   }
 
   private var store: UsageStore?
@@ -67,13 +71,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let isUIStressTest = CommandLine.arguments.contains("--stress-ui")
     let isLifecycleSelfTest = CommandLine.arguments.contains("--self-test-lifecycle")
     let isClaudePromptPreview = CommandLine.arguments.contains("--show-claude-prompt")
+    let isCursorPromptPreview = CommandLine.arguments.contains("--show-cursor-prompt")
     let lifecycleCaptureIndex = CommandLine.arguments.firstIndex(of: "--capture-lifecycle")
     let isNotificationVerification = CommandLine.arguments.contains("--verify-notifications")
     let isAutomatedRun = isUISelfTest || renderIndex != nil || settingsRenderIndex != nil
       || appearanceRenderIndex != nil || aboutRenderIndex != nil || alertsRenderIndex != nil
       || insightsRenderIndex != nil || providersRenderIndex != nil || menuBarRenderIndex != nil
       || isUIStressTest || isLifecycleSelfTest || lifecycleCaptureIndex != nil
-      || isNotificationVerification || isClaudePromptPreview
+      || isNotificationVerification || isClaudePromptPreview || isCursorPromptPreview
     let store: UsageStore
     if isAutomatedRun {
       Self.clearTestPreferences(suiteName: Self.uiSelfTestDefaultsSuite)
@@ -187,6 +192,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       self.runUISelfTest()
     } else if isClaudePromptPreview {
       DispatchQueue.main.async { _ = Self.confirmClaudeLimitAccess() }
+    } else if isCursorPromptPreview {
+      DispatchQueue.main.async { _ = Self.confirmLimitAccess(for: .cursor) }
     } else if CommandLine.arguments.contains("--show-settings") {
       self.showSettings()
     } else if CommandLine.arguments.contains("--show-menu") {
@@ -436,7 +443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
       guard let self else { return }
       // First launch should feel like opening an app, not granting a security
-      // permission. Claude access is explained only after Show limits is chosen.
+      // permission. Protected access is explained only after Allow access is chosen.
       self.statusController?.showMenu()
     }
   }
@@ -722,17 +729,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let statusResult = statusController.validateForSelfTest(settingsWindow: settingsController.window)
     let settingsResult = settingsController.validateForSelfTest()
-    let claudePromptIsCalmAndWide = ClaudeLimitAccessPrompt().validateForSelfTest()
+    let claudePromptIsCalmAndWide = ProviderLimitAccessPrompt(provider: .anthropic)
+      .validateForSelfTest()
+    let cursorPromptIsCalmAndWide = ProviderLimitAccessPrompt(provider: .cursor)
+      .validateForSelfTest()
     let brokenPipeIsSafe = ReserveApp.brokenPipeWriteFailsSafely()
     let loginCompletionQueuesRefresh = store.exerciseLoginCompletionDuringRefreshForSelfTest()
     let claudeAccessRevealsOnce = store.exerciseClaudeAccessCompletionForSelfTest()
     let success = statusResult.success && settingsResult.success && claudePromptIsCalmAndWide
+      && cursorPromptIsCalmAndWide
       && brokenPipeIsSafe
       && loginCompletionQueuesRefresh && claudeAccessRevealsOnce
     let details = [
       statusResult.details,
       settingsResult.details,
-      "Claude access prompt=\(claudePromptIsCalmAndWide)",
+      "provider access prompts=\(claudePromptIsCalmAndWide && cursorPromptIsCalmAndWide)",
       "broken pipe handling=\(brokenPipeIsSafe)",
       "post-login refresh queue=\(loginCompletionQueuesRefresh)",
       "post-Keychain reveal=\(claudeAccessRevealsOnce)",

@@ -2,6 +2,7 @@ import Foundation
 
 public struct OpenAIProvider: UsageProvider {
   public let id: ProviderID = .openAI
+  static let appServerArguments = ["-s", "read-only", "-a", "never", "app-server"]
   private let environment: [String: String]
 
   public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -15,7 +16,7 @@ public struct OpenAIProvider: UsageProvider {
 
     let rpc = try JSONRPCProcess(
       executable: executable,
-      arguments: ["-s", "read-only", "-a", "untrusted", "app-server"],
+      arguments: Self.appServerArguments,
       environment: BinaryLocator.childEnvironment(self.environment))
     defer { rpc.shutdown() }
 

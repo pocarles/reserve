@@ -44,9 +44,351 @@ private func cleanTestDefaults(suiteName: String) {
 @Suite
 struct ReserveCoreTests {
   @Test
+  func testOpenAIUsesApprovalFlagSupportedByCurrentCodexHelpers() {
+    XCTAssertEqual(
+      OpenAIProvider.appServerArguments,
+      ["-s", "read-only", "-a", "never", "app-server"])
+  }
+
+  @Test
+  func testCursorIsFourthProviderAndStartsWithDistinctPools() throws {
+    XCTAssertEqual(ProviderID.allCases.count, 4)
+    XCTAssertEqual(ProviderID.cursor.displayName, "Cursor")
+    let data = Data(
+      #"{"billingCycleStart":"1787616000000","billingCycleEnd":"1790294400000","planUsage":{"autoSpend":1800,"autoLimit":4000,"apiPercentUsed":72.5}}"#.utf8)
+    let response = try JSONDecoder().decode(CursorCurrentPeriodUsageResponse.self, from: data)
+    let reset = Date(timeIntervalSince1970: 1_790_294_400)
+    let windows = try CursorProvider.windows(
+      usage: response.planUsage, resetsAt: reset, windowMinutes: 44_640)
+
+    XCTAssertEqual(windows.map(\.id), ["cursor-models", "other-models"])
+    XCTAssertEqual(windows.map(\.label), ["Cursor Models", "Other Models"])
+    XCTAssertEqual(windows[0].usedPercent, 45)
+    XCTAssertEqual(windows[1].usedPercent, 72.5)
+    XCTAssertEqual(windows[0].resetsAt, reset)
+    XCTAssertEqual(windows[1].resetsAt, reset)
+  }
+
+  @Test
+  func testCursorPlanNamesPricesAndMalformedValues() throws {
+    XCTAssertEqual(CursorPlanFormatter.plan(from: "pro_plus"), "Pro Plus")
+    XCTAssertEqual(CursorPlanFormatter.plan(from: "ultra"), "Ultra")
+    XCTAssertEqual(CursorPlanFormatter.plan(from: "free"), "Hobby")
+    XCTAssertEqual(
+      CursorPlanFormatter.plan(from: "pro", monthlyPriceMinorUnits: 6_000), "Pro Plus")
+    XCTAssertEqual(CursorProvider.monthlyPriceMinorUnits("$60 / month"), 6_000)
+    XCTAssertEqual(CursorProvider.monthlyPriceMinorUnits("200.00"), 20_000)
+    XCTAssertNil(CursorProvider.monthlyPriceMinorUnits("custom"))
+
+    let malformed = Data(#"{"autoPercentUsed":"NaN"}"#.utf8)
+    do {
+      _ = try JSONDecoder().decode(CursorPlanUsage.self, from: malformed)
+      XCTFail("malformed Cursor percentage was accepted")
+    } catch {
+      // Expected.
+    }
+  }
+
+  @Test
+  func testCursorOnDemandSpendPreservesCapDisabledAndUnlimited() throws {
+    func current(_ json: String) throws -> CursorCurrentPeriodUsageResponse {
+      try JSONDecoder().decode(CursorCurrentPeriodUsageResponse.self, from: Data(json.utf8))
+    }
+    func hard(_ json: String) throws -> CursorHardLimitResponse {
+      try JSONDecoder().decode(CursorHardLimitResponse.self, from: Data(json.utf8))
+    }
+
+    let capped = CursorProvider.includedSpend(
+      current: try current(
+        #"{"spendLimitUsage":{"individualLimit":5000,"individualUsed":1250,"individualRemaining":3750,"limitType":"individual"}}"#),
+      hardLimit: try hard(#"{"hardLimit":50}"#))
+    XCTAssertEqual(capped?.limitState, .capped)
+    XCTAssertEqual(capped?.usedMinorUnits, 1_250)
+    XCTAssertEqual(capped?.limitMinorUnits, 5_000)
+    XCTAssertEqual(capped?.remainingMinorUnits, 3_750)
+
+    let disabled = CursorProvider.includedSpend(
+      current: try current(#"{"spendLimitUsage":{"individualUsed":0}}"#),
+      hardLimit: try hard(#"{"noUsageBasedAllowed":true}"#))
+    XCTAssertEqual(disabled?.limitState, .disabled)
+    XCTAssertEqual(disabled?.remainingMinorUnits, 0)
+
+    let unlimited = CursorProvider.includedSpend(
+      current: try current(
+        #"{"spendLimitUsage":{"individualUsed":900,"limitType":"unlimited"}}"#),
+      hardLimit: try hard(#"{"noUsageBasedAllowed":false}"#))
+    XCTAssertEqual(unlimited?.limitState, .unlimited)
+    XCTAssertNil(unlimited?.remainingMinorUnits)
+
+    let sentinelUnlimited = CursorProvider.includedSpend(
+      current: try current(#"{"spendLimitUsage":{"individualUsed":900}}"#),
+      hardLimit: try hard(#"{"hardLimit":2147483647}"#))
+    XCTAssertEqual(sentinelUnlimited?.limitState, .unlimited)
+
+    let zeroLimit = CursorProvider.includedSpend(
+      current: try current(#"{"spendLimitUsage":{"individualUsed":0}}"#),
+      hardLimit: try hard(#"{"hardLimit":0}"#))
+    XCTAssertEqual(zeroLimit?.limitState, .disabled)
+  }
+
+  @Test
+  func testCursorStatusOutputIsStrictAndContainsNoCredential() throws {
+    try CursorProvider.validateStatusOutput(
+      #"{"status":"authenticated","isAuthenticated":true,"hasAccessToken":true,"hasRefreshToken":true,"userInfo":{}}"#)
+    for invalid in ["", "signed in", "[]", "{}", #"{"isAuthenticated":false}"#,
+      #"{"isAuthenticated":true,"hasAccessToken":false}"#]
+    {
+      do {
+        try CursorProvider.validateStatusOutput(invalid)
+        XCTFail("invalid cursor-agent status output was accepted")
+      } catch {
+        // Expected.
+      }
+    }
+  }
+
+  @Test
+  func testCursorKeychainAccessIsOptInAndScheduledRefreshCannotPrompt() async throws {
+    let denied = CursorProvider(
+      environment: [:], allowKeychainRead: false,
+      keychainItemExists: { true },
+      statusRunner: { _, _, _ in throw TestFailure(description: "status ran before consent") },
+      credentialLoader: { _ in throw TestFailure(description: "Keychain read before consent") },
+      requestHandler: { _ in throw TestFailure(description: "network ran before consent") })
+    do {
+      _ = try await denied.fetch()
+      XCTFail("Cursor Keychain access proceeded without consent")
+    } catch UsageProviderError.keychainConsentRequired(let provider) {
+      XCTAssertEqual(provider, .cursor)
+    }
+
+    let scheduled = CursorProvider(
+      environment: [:], allowKeychainRead: true, allowKeychainInteraction: false,
+      agentLocator: { _ in "/usr/bin/true" },
+      statusRunner: { executable, arguments, _ in
+        XCTAssertEqual(executable, "/usr/bin/true")
+        XCTAssertEqual(arguments, ["status", "--format", "json"])
+        return #"{"isAuthenticated":true,"hasAccessToken":true}"#
+      },
+      credentialLoader: { allowInteraction in
+        XCTAssertFalse(allowInteraction)
+        return CursorCredential(accessToken: "scheduled-test-token")
+      },
+      requestHandler: { request in
+        XCTAssertEqual(
+          request.value(forHTTPHeaderField: "Authorization"),
+          "Bearer scheduled-test-token")
+        let payload: String
+        switch request.url?.lastPathComponent {
+        case "GetCurrentPeriodUsage":
+          payload = #"{"billingCycleStart":"1787616000000","billingCycleEnd":"1790294400000","planUsage":{"autoSpend":1800,"autoLimit":4000,"apiPercentUsed":72.5},"spendLimitUsage":{"individualLimit":5000,"individualUsed":1250,"limitType":"individual"},"enabled":true}"#
+        case "GetPlanInfo":
+          payload = #"{"planInfo":{"planName":"pro_plus","price":"$60 / month","billingCycleEnd":"1790294400000"}}"#
+        case "GetHardLimit":
+          payload = #"{"hardLimit":50}"#
+        case "GetMe":
+          payload = #"{"userId":7}"#
+        case "GetTeams":
+          payload = #"{"teams":[]}"#
+        default:
+          throw TestFailure(description: "unexpected Cursor RPC")
+        }
+        return (
+          Data(payload.utf8),
+          HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"])!)
+      })
+    let snapshot = try await scheduled.fetch()
+    XCTAssertEqual(snapshot.provider, .cursor)
+    XCTAssertEqual(snapshot.planName, "Pro Plus")
+    XCTAssertEqual(snapshot.monthlyPriceMinorUnits, 6_000)
+    XCTAssertEqual(snapshot.windows.count, 2)
+    XCTAssertTrue(snapshot.detailedUsageUnavailable)
+  }
+
+  @Test
+  func testCursorIndividualUsageSelectsOnlyOneBilledSingleSeatTeam() throws {
+    let response = try JSONDecoder().decode(
+      CursorTeamsResponse.self,
+      from: Data(
+        #"{"teams":[{"id":42,"seats":1,"purchasedSeats":1,"hasBilling":true,"isEnterprise":false,"isDirectMember":true,"subscriptionStatus":"active"},{"id":99,"seats":20,"hasBilling":true,"isEnterprise":false,"isDirectMember":true}]}"#.utf8))
+    XCTAssertEqual(response.individualTeamID, 42)
+
+    let ambiguous = try JSONDecoder().decode(
+      CursorTeamsResponse.self,
+      from: Data(
+        #"{"teams":[{"id":1,"seats":1,"hasBilling":true},{"id":2,"seats":1,"hasBilling":true}]}"#.utf8))
+    XCTAssertNil(ambiguous.individualTeamID)
+
+    let enterprise = try JSONDecoder().decode(
+      CursorTeamsResponse.self,
+      from: Data(#"{"teams":[{"id":7,"seats":1,"isEnterprise":true}]}"#.utf8))
+    XCTAssertNil(enterprise.individualTeamID)
+  }
+
+  @Test
+  func testCursorMissingAllowanceFieldsUseLimitsOnlyFailure() async throws {
+    let provider = CursorProvider(
+      environment: [:], allowKeychainRead: true,
+      statusRunner: { _, _, _ in #"{"isAuthenticated":true,"hasAccessToken":true}"# },
+      credentialLoader: { _ in CursorCredential(accessToken: "test") },
+      requestHandler: { request in
+        let payload = request.url?.lastPathComponent == "GetPlanInfo" ? "{}" : "{}"
+        return (
+          Data(payload.utf8),
+          HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+      })
+    do {
+      _ = try await provider.fetch()
+      XCTFail("Cursor accepted a response without either usage pool")
+    } catch UsageProviderError.unavailable {
+      // Expected. Missing optional fields do not crash or invent an allowance.
+    }
+  }
+
+  @Test
+  func testCursorRPCIsHTTPSAllowlistedAndMapsAuthenticationFailures() async throws {
+    let ok = CursorRPCClient(accessToken: "test-only-secret") { request in
+      XCTAssertEqual(request.url?.scheme, "https")
+      XCTAssertEqual(request.url?.host, CursorProvider.serviceHost)
+      XCTAssertEqual(request.value(forHTTPHeaderField: "Connect-Protocol-Version"), "1")
+      XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-only-secret")
+      return (
+        Data(#"{"planInfo":{"planName":"pro","price":"$20"}}"#.utf8),
+        HTTPURLResponse(
+          url: request.url!, statusCode: 200, httpVersion: nil,
+          headerFields: ["Content-Type": "application/json"])!)
+    }
+    let plan: CursorPlanInfoResponse = try await ok.call(
+      .planInfo, body: Data("{}".utf8))
+    XCTAssertEqual(plan.planInfo?.planName, "pro")
+
+    let unauthorized = CursorRPCClient(accessToken: "expired") { request in
+      (
+        Data(#"{"code":"unauthenticated"}"#.utf8),
+        HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!)
+    }
+    do {
+      let _: CursorPlanInfoResponse = try await unauthorized.call(
+        .planInfo, body: Data("{}".utf8))
+      XCTFail("unauthorized Cursor response was accepted")
+    } catch UsageProviderError.unauthorized {
+      // Expected.
+    }
+  }
+
+  @Test
+  func testCursorRPCRejectsOversizedPayloadsAndRateLimits() async throws {
+    let oversized = CursorRPCClient(accessToken: "test") { request in
+      (
+        Data(repeating: 0x20, count: CursorProvider.maximumResponseBytes + 1),
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    do {
+      let _: CursorPlanInfoResponse = try await oversized.call(
+        .planInfo, body: Data("{}".utf8))
+      XCTFail("oversized Cursor response was accepted")
+    } catch UsageProviderError.invalidResponse {
+      // Expected.
+    }
+
+    let limited = CursorRPCClient(accessToken: "test") { request in
+      (
+        Data(),
+        HTTPURLResponse(
+          url: request.url!, statusCode: 429, httpVersion: nil,
+          headerFields: ["Retry-After": "60"])!)
+    }
+    do {
+      let _: CursorPlanInfoResponse = try await limited.call(
+        .planInfo, body: Data("{}".utf8))
+      XCTFail("rate-limited Cursor response was accepted")
+    } catch UsageProviderError.rateLimited(let retryAt) {
+      XCTAssertTrue(retryAt != nil)
+    }
+  }
+
+  @Test
+  func testCursorUsageEventsDeduplicateAndBuildDailyTotals() async throws {
+    let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
+    let client = CursorRPCClient(accessToken: "test") { request in
+      let event = #"{"timestamp":"\#(timestamp)","model":"claude-4","conversationId":"c1","tokenUsage":{"inputTokens":100,"outputTokens":20,"cacheWriteTokens":5,"cacheReadTokens":50,"totalCents":1.25}}"#
+      return (
+        Data(#"{"totalUsageEventsCount":2,"usageEventsDisplay":[\#(event)]}"#.utf8),
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    let events = try await CursorProvider.events(
+      client: client, teamID: 1, userID: 2,
+      start: Date().addingTimeInterval(-86_400), end: Date().addingTimeInterval(1))
+    XCTAssertEqual(events.count, 1)
+    let series = CursorUsageAggregator.dailySeries(
+      events: events, start: Calendar.current.startOfDay(for: Date()), now: Date())
+    XCTAssertEqual(series.last?.tokens, 175)
+  }
+
+  @Test
+  func testCursorAggregatedUsagePreservesTokenCategoriesModelsAndCost() throws {
+    let response = try JSONDecoder().decode(
+      CursorAggregatedUsageResponse.self,
+      from: Data(
+        #"{"aggregations":[{"modelIntent":"claude-4","inputTokens":"100","outputTokens":"20","cacheWriteTokens":"5","cacheReadTokens":"50","totalCents":125.5}],"totalInputTokens":"100","totalOutputTokens":"20","totalCacheWriteTokens":"5","totalCacheReadTokens":"50","totalCostCents":125.5}"#.utf8))
+    XCTAssertEqual(response.totalInputTokens, 100)
+    XCTAssertEqual(response.totalOutputTokens, 20)
+    XCTAssertEqual(response.totalCacheWriteTokens, 5)
+    XCTAssertEqual(response.totalCacheReadTokens, 50)
+    XCTAssertEqual(response.totalTokens, 175)
+    XCTAssertEqual(response.totalCostCents, 125.5)
+    XCTAssertEqual(response.aggregations.first?.modelUsageCost.model, "claude-4")
+    XCTAssertEqual(response.aggregations.first?.modelUsageCost.costUSD, 1.255)
+  }
+
+  @Test
+  func testCursorUsagePaginationIsBounded() async throws {
+    let client = CursorRPCClient(accessToken: "test") { request in
+      let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as! [String: Any]
+      let page = body["page"] as! Int
+      let event = #"{"timestamp":"\#(1_780_000_000_000 + page)","model":"m","conversationId":"c\#(page)","tokenUsage":{"inputTokens":1}}"#
+      return (
+        Data(#"{"totalUsageEventsCount":21,"usageEventsDisplay":[\#(event)]}"#.utf8),
+        HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+    do {
+      _ = try await CursorProvider.events(
+        client: client, teamID: 1, userID: 2,
+        start: Date(timeIntervalSince1970: 1_779_000_000),
+        end: Date(timeIntervalSince1970: 1_781_000_000))
+      XCTFail("Cursor pagination exceeded its page bound")
+    } catch is CursorDetailedUsageUnavailable {
+      // Expected after exactly the configured maximum number of pages.
+    }
+  }
+
+  @Test
+  func testCursorUsageEventsWithoutExactCountUseLimitsOnlyFallback() async throws {
+    let client = CursorRPCClient(accessToken: "test") { request in
+      (
+        Data(#"{"usageEventsDisplay":[{"timestamp":"1780000000000","model":"m","tokenUsage":{"inputTokens":1}}]}"#.utf8),
+        HTTPURLResponse(
+          url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+      )
+    }
+
+    do {
+      _ = try await CursorProvider.events(
+        client: client, teamID: 1, userID: 1,
+        start: Date(timeIntervalSince1970: 1_779_999_000),
+        end: Date(timeIntervalSince1970: 1_780_001_000))
+      XCTFail("Cursor accepted an event page without an exact total count")
+    } catch is CursorDetailedUsageUnavailable {
+      // Expected: incomplete account data must not be presented as exact usage.
+    }
+  }
+
+  @Test
   func testOnlyAuthenticationErrorsRequireConnection() {
     XCTAssertTrue(UsageProviderError.credentialsNotFound("missing").requiresConnection)
-    XCTAssertTrue(UsageProviderError.keychainConsentRequired.requiresConnection)
+    XCTAssertTrue(UsageProviderError.keychainConsentRequired(.anthropic).requiresConnection)
     XCTAssertTrue(UsageProviderError.unauthorized("expired").requiresConnection)
     XCTAssertFalse(UsageProviderError.rateLimited(retryAt: nil).requiresConnection)
     XCTAssertFalse(UsageProviderError.unavailable("offline").requiresConnection)

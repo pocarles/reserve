@@ -17,6 +17,38 @@ public struct DailyUsage: Codable, Equatable, Sendable, Identifiable {
   }
 }
 
+public enum UsageInsightOrigin: String, Codable, Equatable, Sendable {
+  case localDevice
+  case providerAccount
+}
+
+public struct ModelUsageCost: Codable, Equatable, Sendable, Identifiable {
+  public let model: String
+  public let inputTokens: Int64
+  public let cachedInputTokens: Int64
+  public let cacheWriteInputTokens: Int64
+  public let outputTokens: Int64
+  public let costUSD: Double
+
+  public var id: String { self.model }
+
+  public init(
+    model: String,
+    inputTokens: Int64,
+    cachedInputTokens: Int64,
+    cacheWriteInputTokens: Int64,
+    outputTokens: Int64,
+    costUSD: Double
+  ) {
+    self.model = String(model.prefix(128))
+    self.inputTokens = max(0, inputTokens)
+    self.cachedInputTokens = max(0, cachedInputTokens)
+    self.cacheWriteInputTokens = max(0, cacheWriteInputTokens)
+    self.outputTokens = max(0, outputTokens)
+    self.costUSD = costUSD.isFinite ? max(0, costUSD) : 0
+  }
+}
+
 public struct LocalUsageSummary: Codable, Equatable, Sendable {
   public let provider: ProviderID
   public let periodDays: Int
@@ -33,6 +65,8 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
   public let isCycleCostEstimate: Bool
   public let fetchedAt: Date
   public let source: String
+  public let origin: UsageInsightOrigin
+  public let modelCosts: [ModelUsageCost]
   /// Oldest first, one entry per day of the period including quiet days.
   public let dailyTokens: [DailyUsage]
 
@@ -52,6 +86,8 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     isCycleCostEstimate: Bool? = nil,
     fetchedAt: Date = Date(),
     source: String = "Local session logs",
+    origin: UsageInsightOrigin = .localDevice,
+    modelCosts: [ModelUsageCost] = [],
     dailyTokens: [DailyUsage] = []
   ) {
     let normalizedInput = max(0, inputTokens)
@@ -59,7 +95,7 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     let normalizedCacheWrite = max(0, cacheWriteInputTokens)
     let normalizedOutput = max(0, outputTokens)
     let fallbackTokens = saturatingNonnegativeSum(
-      normalizedInput, provider == .anthropic ? normalizedCached : 0,
+      normalizedInput, provider == .anthropic || provider == .cursor ? normalizedCached : 0,
       normalizedCacheWrite, normalizedOutput)
     self.provider = provider
     self.periodDays = periodDays
@@ -77,6 +113,8 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     self.fetchedAt = fetchedAt
     self.dailyTokens = dailyTokens
     self.source = source
+    self.origin = origin
+    self.modelCosts = Array(modelCosts.prefix(128))
   }
 
   public var totalTokens: Int64 {
@@ -85,7 +123,8 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
 
   private var totalTokensValue: Int64 {
     saturatingNonnegativeSum(
-      self.inputTokens, self.provider == .anthropic ? self.cachedInputTokens : 0,
+      self.inputTokens,
+      self.provider == .anthropic || self.provider == .cursor ? self.cachedInputTokens : 0,
       self.cacheWriteInputTokens, self.outputTokens)
   }
 }
@@ -959,6 +998,10 @@ private enum Pricing {
       if model.contains("4.3") || model.contains("4.20") {
         return Rates(input: 1.25, cached: 0.2, cacheWrite: 1.25, output: 2.5)
       }
+      return nil
+    case .cursor:
+      // Cursor supplies provider-reported costs. Reserve never estimates them
+      // from local transcripts.
       return nil
     }
   }

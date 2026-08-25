@@ -397,6 +397,15 @@ enum LifecycleSelfTest {
     settings: SettingsWindowController
   ) -> Result {
     var result = Result()
+    if let dashboardWindow = controller.dashboardWindowForTesting,
+      let settingsWindow = settings.window
+    {
+      result.expect(
+        dashboardWindow.level.rawValue > settingsWindow.level.rawValue,
+        "Settings stayed above the dashboard after the dashboard was opened")
+    } else {
+      result.failures.append("dashboard and Settings were not both open for the window-order check")
+    }
     let originalTheme = store.appearanceTheme
     let originalMode = store.appearanceMode
     defer {
@@ -599,8 +608,8 @@ enum LifecycleSelfTest {
       AllowanceBuilder.needsConnection(signedOut),
       "cached provider data hides the sign-in recovery action")
     var keychainAccess = ProviderViewState(provider: .anthropic)
-    keychainAccess.error = UsageProviderError.keychainConsentRequired.localizedDescription
-    keychainAccess.requiresClaudeKeychainAccess = true
+    keychainAccess.error = UsageProviderError.keychainConsentRequired(.anthropic).localizedDescription
+    keychainAccess.requiresKeychainAccess = true
     result.expect(
       AllowanceBuilder.needsConnection(keychainAccess),
       "Claude access no longer offers its action after the explanation changes")
@@ -624,14 +633,16 @@ enum LifecycleSelfTest {
       isRefreshing: false,
       needsConnection: true,
       connectionToolAvailable: true,
-      requiresClaudeKeychainAccess: true,
+      requiresKeychainAccess: true,
       error: "Anthropic sign-in was not completed.",
       lastUpdated: nil,
       localUsage: LocalUsageSummary(
         provider: .anthropic, periodDays: 30, inputTokens: 100, outputTokens: 20,
         apiEquivalentCostUSD: 1, todayTokens: 12),
       subscriptionCostUSD: nil,
-      quotaSource: nil)
+      quotaSource: nil,
+      includedSpend: nil,
+      detailedUsageUnavailable: false)
     let card = ProviderDashboardCard(
       summary: summary, now: now, isSelectedForMenuBar: false, isExpanded: true,
       connectProvider: { _ in }, selectMenuBarProvider: { _ in })
@@ -640,11 +651,11 @@ enum LifecycleSelfTest {
     let signIn = descendants.compactMap { $0 as? NSButton }
       .first { $0.identifier?.rawValue == "connect-anthropic" }
     result.expect(
-      signIn?.title == "Show limits",
+      signIn?.title == "Allow access",
       "the Claude recovery action does not lead with its benefit")
     let copy = descendants.compactMap { $0 as? NSTextField }.map(\.stringValue)
     result.expect(
-      copy.contains("Claude is ready · show your plan limits"),
+      copy.contains("Anthropic is ready · allow usage access"),
       "Claude access does not explain the benefit in plain language")
     result.expect(
       copy.contains("Monthly cost") && copy.contains("Not set")
@@ -661,12 +672,14 @@ enum LifecycleSelfTest {
       isRefreshing: false,
       needsConnection: true,
       connectionToolAvailable: false,
-      requiresClaudeKeychainAccess: false,
+      requiresKeychainAccess: false,
       error: "Claude OAuth credentials were not found.",
       lastUpdated: nil,
       localUsage: summary.localUsage,
       subscriptionCostUSD: nil,
-      quotaSource: nil)
+      quotaSource: nil,
+      includedSpend: nil,
+      detailedUsageUnavailable: false)
     let setupCard = ProviderDashboardCard(
       summary: setupSummary, now: now, isSelectedForMenuBar: false,
       connectProvider: { _ in }, selectMenuBarProvider: { _ in })
@@ -696,8 +709,15 @@ enum LifecycleSelfTest {
     result.expect(
       store.monthlySubscriptionCost(for: .openAI) == nil
         && store.monthlySubscriptionCost(for: .anthropic) == nil
-        && store.monthlySubscriptionCost(for: .grok) == nil,
+        && store.monthlySubscriptionCost(for: .grok) == nil
+        && store.monthlySubscriptionCost(for: .cursor) == nil,
       "Reserve still invents a monthly cost before a user enters one")
+    result.expect(
+      !store.isEnabled(.cursor) && !store.cursorKeychainReadAllowed,
+      "Cursor no longer starts disabled with Keychain access off")
+    result.expect(
+      store.exerciseCursorAccessDisableForSelfTest(),
+      "turning off Cursor access did not take effect immediately")
     store.setMonthlySubscriptionCost(90, for: .anthropic)
     result.expect(
       store.monthlySubscriptionCost(for: .anthropic) == 90,

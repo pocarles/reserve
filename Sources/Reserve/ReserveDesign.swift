@@ -112,6 +112,8 @@ enum ReserveColor {
       return Self.dynamic(light: 0xC2_5B_36, dark: 0xE8_70_45)
     case .grok:
       return Self.dynamic(light: 0x1F_63_92, dark: 0x6B_AE_EE)
+    case .cursor:
+      return Self.dynamic(light: 0x12_12_12, dark: 0xF4_F4_F4)
     }
   }
 
