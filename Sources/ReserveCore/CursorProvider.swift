@@ -391,7 +391,13 @@ public struct CursorProvider: UsageProvider {
       ])
       let response: CursorFilteredUsageResponse = try await client.call(
         .filteredUsageEvents, body: body)
-      expectedCount = response.totalUsageEventsCount
+      guard let reportedCount = response.totalUsageEventsCount,
+        reportedCount >= 0, reportedCount <= Self.maximumEventCount,
+        expectedCount == nil || expectedCount == reportedCount
+      else {
+        throw CursorDetailedUsageUnavailable()
+      }
+      expectedCount = reportedCount
       rawCount += response.usageEventsDisplay.count
       guard rawCount <= Self.maximumEventCount else {
         throw CursorDetailedUsageUnavailable()
@@ -404,7 +410,7 @@ public struct CursorProvider: UsageProvider {
         throw CursorDetailedUsageUnavailable()
       }
     }
-    if let expectedCount, rawCount < expectedCount {
+    if let expectedCount, rawCount != expectedCount {
       throw CursorDetailedUsageUnavailable()
     }
     return result
@@ -843,7 +849,7 @@ struct CursorModelAggregation: Decodable, Sendable {
 }
 
 struct CursorFilteredUsageResponse: Decodable, Sendable {
-  let totalUsageEventsCount: Int
+  let totalUsageEventsCount: Int?
   let usageEventsDisplay: [CursorUsageEvent]
 
   enum CodingKeys: String, CodingKey { case totalUsageEventsCount, usageEventsDisplay }
@@ -851,7 +857,7 @@ struct CursorFilteredUsageResponse: Decodable, Sendable {
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     self.totalUsageEventsCount = try container.decodeFlexibleIntIfPresent(
-      forKey: .totalUsageEventsCount) ?? 0
+      forKey: .totalUsageEventsCount)
     self.usageEventsDisplay = try container.decodeIfPresent(
       [CursorUsageEvent].self, forKey: .usageEventsDisplay) ?? []
   }

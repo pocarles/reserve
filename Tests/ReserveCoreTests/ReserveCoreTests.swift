@@ -365,6 +365,27 @@ struct ReserveCoreTests {
   }
 
   @Test
+  func testCursorUsageEventsWithoutExactCountUseLimitsOnlyFallback() async throws {
+    let client = CursorRPCClient(accessToken: "test") { request in
+      (
+        Data(#"{"usageEventsDisplay":[{"timestamp":"1780000000000","model":"m","tokenUsage":{"inputTokens":1}}]}"#.utf8),
+        HTTPURLResponse(
+          url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+      )
+    }
+
+    do {
+      _ = try await CursorProvider.events(
+        client: client, teamID: 1, userID: 1,
+        start: Date(timeIntervalSince1970: 1_779_999_000),
+        end: Date(timeIntervalSince1970: 1_780_001_000))
+      XCTFail("Cursor accepted an event page without an exact total count")
+    } catch is CursorDetailedUsageUnavailable {
+      // Expected: incomplete account data must not be presented as exact usage.
+    }
+  }
+
+  @Test
   func testOnlyAuthenticationErrorsRequireConnection() {
     XCTAssertTrue(UsageProviderError.credentialsNotFound("missing").requiresConnection)
     XCTAssertTrue(UsageProviderError.keychainConsentRequired(.anthropic).requiresConnection)
