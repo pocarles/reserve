@@ -7,12 +7,34 @@ import ReserveCore
 enum ReserveApp {
   static func main() {
     _ = signal(SIGPIPE, SIG_IGN)
+    let instanceLock: SingleInstanceLock
+    do {
+      guard let acquired = try SingleInstanceLock.acquire(at: SingleInstanceLock.reserveLockURL())
+      else {
+        self.activateExistingInstance()
+        return
+      }
+      instanceLock = acquired
+    } catch {
+      fputs("Reserve could not acquire its single-instance lock: \(error)\n", stderr)
+      return
+    }
     let application = NSApplication.shared
     let delegate = AppDelegate()
     application.delegate = delegate
-    withExtendedLifetime(delegate) {
+    withExtendedLifetime((delegate, instanceLock)) {
       application.run()
     }
+  }
+
+  private static func activateExistingInstance() {
+    let currentProcess = ProcessInfo.processInfo.processIdentifier
+    let existing = NSWorkspace.shared.runningApplications.first { application in
+      guard application.processIdentifier != currentProcess else { return false }
+      return application.bundleIdentifier == "com.pocarles.reserve"
+        || application.executableURL?.lastPathComponent == "Reserve"
+    }
+    existing?.activate()
   }
 
   /// `FileHandle.write` cannot translate a broken pipe into `EPIPE` unless the

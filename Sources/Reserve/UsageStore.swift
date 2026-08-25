@@ -156,6 +156,9 @@ final class UsageStore {
     guard provider == .anthropic || provider == .cursor else { return }
     self.defaults.set(allowed, forKey: "\(provider.rawValue).keychainReadAllowed")
     if !allowed {
+      if provider == .cursor {
+        Task { await CursorProvider.clearCachedCredential() }
+      }
       self.pendingKeychainInteractions.remove(provider)
       self.refreshTokens[provider] = (self.refreshTokens[provider] ?? 0) + 1
       self.states[provider]?.isRefreshing = false

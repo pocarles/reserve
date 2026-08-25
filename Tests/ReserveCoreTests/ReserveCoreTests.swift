@@ -208,6 +208,113 @@ struct ReserveCoreTests {
   }
 
   @Test
+  func testCursorCredentialIsReadOncePerProcessAndClearsOnDemand() async throws {
+    let session = CursorCredentialSession()
+    let statusRuns = AsyncCounter()
+    let credentialReads = AsyncCounter()
+    let provider = CursorProvider(
+      environment: [:], allowKeychainRead: true,
+      agentLocator: { _ in "/usr/bin/true" },
+      statusRunner: { _, arguments, _ in
+        XCTAssertEqual(arguments, ["status", "--format", "json"])
+        await statusRuns.increment()
+        return #"{"isAuthenticated":true,"hasAccessToken":true}"#
+      },
+      credentialLoader: { _ in
+        await credentialReads.increment()
+        return CursorCredential(accessToken: "memory-only-test-token")
+      },
+      credentialSession: session,
+      requestHandler: { request in
+        let payload: String
+        switch request.url?.lastPathComponent {
+        case "GetCurrentPeriodUsage":
+          payload = #"{"billingCycleStart":"1787616000000","billingCycleEnd":"1790294400000","planUsage":{"autoPercentUsed":10,"apiPercentUsed":20}}"#
+        case "GetPlanInfo":
+          payload = #"{"planInfo":{"planName":"pro","billingCycleEnd":"1790294400000"}}"#
+        case "GetHardLimit":
+          payload = #"{"hardLimit":0,"noUsageBasedAllowed":true}"#
+        case "GetMe":
+          payload = #"{"userId":7}"#
+        case "GetTeams":
+          payload = #"{"teams":[]}"#
+        default:
+          throw TestFailure(description: "unexpected Cursor RPC")
+        }
+        return (
+          Data(payload.utf8),
+          HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"])!)
+      })
+
+    _ = try await provider.fetch()
+    _ = try await provider.fetch()
+    XCTAssertEqual(await statusRuns.current(), 1)
+    XCTAssertEqual(await credentialReads.current(), 1)
+
+    await session.clear()
+    _ = try await provider.fetch()
+    XCTAssertEqual(await statusRuns.current(), 2)
+    XCTAssertEqual(await credentialReads.current(), 2)
+  }
+
+  @Test
+  func testCursorUnauthorizedResponseClearsMemoryCredential() async throws {
+    let session = CursorCredentialSession()
+    _ = try await session.credential {
+      CursorCredential(accessToken: "expired-memory-token")
+    }
+    let provider = CursorProvider(
+      environment: [:], allowKeychainRead: true,
+      statusRunner: { _, _, _ in
+        throw TestFailure(description: "status reran while a credential was cached")
+      },
+      credentialLoader: { _ in
+        throw TestFailure(description: "Keychain was read while a credential was cached")
+      },
+      credentialSession: session,
+      requestHandler: { request in
+        (
+          Data(#"{"code":"unauthenticated"}"#.utf8),
+          HTTPURLResponse(
+            url: request.url!, statusCode: 401, httpVersion: nil,
+            headerFields: nil)!)
+      })
+
+    do {
+      _ = try await provider.fetch()
+      XCTFail("Cursor accepted an expired cached credential")
+    } catch UsageProviderError.unauthorized {
+      // Expected. The next access must load a fresh credential.
+    }
+
+    let reloads = AsyncCounter()
+    let refreshed = try await session.credential {
+      await reloads.increment()
+      return CursorCredential(accessToken: "refreshed-memory-token")
+    }
+    XCTAssertEqual(refreshed.accessToken, "refreshed-memory-token")
+    XCTAssertEqual(await reloads.current(), 1)
+  }
+
+  @Test
+  func testSingleInstanceLockRejectsConcurrentOwnerAndRecovers() throws {
+    let root = try TemporaryRoot()
+    defer { root.remove() }
+    let lockURL = root.url.appendingPathComponent("Reserve.instance.lock")
+
+    var first: SingleInstanceLock? = try SingleInstanceLock.acquire(at: lockURL)
+    #expect(first != nil)
+    let second = try SingleInstanceLock.acquire(at: lockURL)
+    #expect(second == nil)
+
+    first = nil
+    let replacement = try SingleInstanceLock.acquire(at: lockURL)
+    #expect(replacement != nil)
+  }
+
+  @Test
   func testCursorIndividualUsageSelectsOnlyOneBilledSingleSeatTeam() throws {
     let response = try JSONDecoder().decode(
       CursorTeamsResponse.self,
@@ -883,4 +990,11 @@ private final class TemporaryRoot {
   func remove() {
     try? FileManager.default.removeItem(at: self.url)
   }
+}
+
+private actor AsyncCounter {
+  private var value = 0
+
+  func increment() { self.value += 1 }
+  func current() -> Int { self.value }
 }
