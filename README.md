@@ -14,15 +14,13 @@ updates.
 Reserve requires macOS 14 or newer and is distributed as a signed, notarized
 Universal 2 app for Apple silicon and Intel Macs.
 
-1. Download [`Reserve.dmg`](https://github.com/pocarles/reserve/releases/latest/download/Reserve.dmg)
-   and [`Reserve.dmg.sha256`](https://github.com/pocarles/reserve/releases/latest/download/Reserve.dmg.sha256).
-2. In Terminal, verify the download from its directory:
+1. Download [`Reserve.dmg`](https://github.com/pocarles/reserve/releases/latest/download/Reserve.dmg).
+2. Open the DMG and drag Reserve to Applications.
 
-   ```sh
-   shasum -a 256 -c Reserve.dmg.sha256
-   ```
-
-3. Open the DMG and drag Reserve to Applications.
+macOS verifies the signed, notarized app when it opens. The release also
+includes an optional
+[`Reserve.dmg.sha256`](https://github.com/pocarles/reserve/releases/latest/download/Reserve.dmg.sha256)
+for people who want to verify the download manually.
 
 This manual step is required for the first Sparkle-enabled release. After that,
 Reserve checks once a day by default and presents an **Install Update** button
@@ -33,8 +31,12 @@ source build is ad-hoc signed and is intended only for the Mac that built it.
 
 ## Provider requirements
 
-Reserve reuses sign-ins belonging to the official provider CLIs. It does not
-create another account or copy credentials into its own storage.
+Reserve reuses sign-ins belonging to small official provider helpers. It does
+not create another account or copy credentials into its own storage. People do
+not need to use Terminal. If a helper is missing, choose **Set up**. Reserve
+explains the change, downloads the provider's official installer after
+approval, installs it for the current Mac user, and opens browser sign-in.
+An outdated helper offers **Update** instead.
 
 Installation never asks for Claude or Cursor access. If a provider protects its
 sign-in with macOS, Reserve first shows an **Allow access** action and explains
@@ -47,9 +49,13 @@ confirmed. Cursor also starts disabled after installation or upgrade.
 - `cursor-agent`, authenticated with `cursor-agent login`, for an individual
   Cursor account. Teams and Enterprise Admin API keys are not supported.
 
-If a CLI is absent or signed out, Reserve reports that state. A Connect action
-runs the provider's official login command and restricts browser handoff URLs to
-that provider's expected HTTPS hosts. Temporary login output stays in memory.
+Reserve keeps installation, updates, sign-in, and usage access as separate
+states with one clear action for each. Provider installation and updates never
+run silently. Installer downloads are bounded, remain on the provider's exact
+official HTTPS host, run with a minimal environment that excludes unrelated API
+keys, and are removed from temporary storage afterward. Sign-in browser
+handoffs remain restricted to the provider's expected HTTPS hosts. Temporary
+setup and login output stays in memory.
 
 Anthropic's subscription-usage endpoint is not a documented public API and may
 change or rate-limit Reserve without notice. Cursor's authenticated individual
@@ -220,8 +226,11 @@ target.
 
 ## Troubleshooting
 
-**A provider says it is disconnected.** Run that provider CLI in Terminal and
-complete its official login. Then use Refresh in Reserve.
+**A provider needs setup.** Choose **Set up** on its card. Reserve installs the
+official helper and opens browser sign-in without requiring Terminal.
+
+**A provider needs an update.** Choose **Update**. Reserve uses the helper's
+own update command and checks the limits again.
 
 **Claude is connected in the CLI but not Reserve.** If Claude Code stores its
 credential with macOS, choose **Allow access** on the Claude card. Reserve
@@ -241,8 +250,8 @@ page before reconnecting.
 the signed and notarized DMG from GitHub Releases. Ad-hoc builds are not
 portable.
 
-**The checksum fails.** Delete both downloads and retrieve them again from the
-same GitHub Release. Do not open the DMG.
+**The optional checksum fails.** Delete both downloads and retrieve them again
+from the same GitHub Release. Do not open the DMG.
 
 ## Contributing and release process
 

@@ -24,7 +24,7 @@ public struct GrokProvider: UsageProvider {
     guard let version = SemanticVersion.first(in: versionOutput),
       version >= SemanticVersion(1, 0, 0)
     else {
-      throw UsageProviderError.unavailable(
+      throw UsageProviderError.updateRequired(
         "Grok Build 1.0.0 or newer is required for background billing access. Found: \(versionOutput)."
       )
     }

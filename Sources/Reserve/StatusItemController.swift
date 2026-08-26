@@ -6,6 +6,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   private let store: UsageStore
   private let openSettings: () -> Void
   private let openInsights: () -> Void
+  private let setupProvider: (ProviderID) -> Void
   private let isSettingsWindow: (NSWindow?) -> Bool
   private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
   private let popover = NSPopover()
@@ -30,11 +31,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     store: UsageStore,
     openSettings: @escaping () -> Void,
     openInsights: @escaping () -> Void,
+    setupProvider: @escaping (ProviderID) -> Void,
     isSettingsWindow: @escaping (NSWindow?) -> Bool
   ) {
     self.store = store
     self.openSettings = openSettings
     self.openInsights = openInsights
+    self.setupProvider = setupProvider
     self.isSettingsWindow = isSettingsWindow
     super.init()
     self.statusItem.button?.toolTip = "Reserve"
@@ -166,6 +169,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         needsConnection: summary.needsConnection,
         connectionToolAvailable: summary.connectionToolAvailable,
         requiresKeychainAccess: summary.requiresKeychainAccess,
+        setupAction: summary.setupAction,
         error: summary.error,
         lastUpdated: summary.lastUpdated, localUsage: summary.localUsage,
         subscriptionCostUSD: summary.subscriptionCostUSD, quotaSource: summary.quotaSource,
@@ -1111,22 +1115,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   }
 
   private func connectProvider(_ provider: ProviderID) {
-    if self.store.states[provider]?.requiresKeychainAccess == true
-    {
-      // Explain the benefit before macOS shows its system-owned Keychain sheet.
-      // Reopen after either path so the menu-bar app never appears to vanish.
-      self.popover.performClose(nil)
-      DispatchQueue.main.async { [weak self] in
-        guard let self else { return }
-        guard AppDelegate.confirmLimitAccess(for: provider) else {
-          self.showMenu()
-          return
-        }
-        self.store.allowKeychainAccess(for: provider) { [weak self] in self?.showMenu() }
-      }
-      return
-    }
-    self.store.connect(provider)
+    self.popover.performClose(nil)
+    DispatchQueue.main.async { [weak self] in self?.setupProvider(provider) }
   }
 
   private func dashboardControllerForUse() -> DashboardViewController {

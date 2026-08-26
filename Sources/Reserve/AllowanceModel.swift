@@ -86,6 +86,7 @@ struct ProviderSummary {
   let needsConnection: Bool
   let connectionToolAvailable: Bool
   let requiresKeychainAccess: Bool
+  let setupAction: ProviderSetupAction?
   let error: String?
   let lastUpdated: Date?
   /// Detail-layer material, kept out of the glance view.
@@ -102,6 +103,44 @@ struct ProviderSummary {
   var serviceIsExceptional: Bool {
     guard let health = self.serviceStatus?.health else { return false }
     return health != .operational
+  }
+}
+
+enum ProviderSetupAction: String, Equatable {
+  case install
+  case update
+  case signIn
+  case allowAccess
+
+  var buttonTitle: String {
+    switch self {
+    case .install: "Set up"
+    case .update: "Update"
+    case .signIn: "Sign in"
+    case .allowAccess: "Allow access"
+    }
+  }
+
+  func message(for provider: ProviderID) -> String {
+    switch self {
+    case .install: "Set up \(provider.displayName) to show plan limits"
+    case .update: "Update \(provider.displayName) to resume plan limits"
+    case .signIn: "Sign in to \(provider.displayName) to show plan limits"
+    case .allowAccess: "\(provider.displayName) is ready · allow usage access"
+    }
+  }
+
+  func toolTip(for provider: ProviderID) -> String {
+    switch self {
+    case .install:
+      "Install \(ProviderHelperCatalog.definition(for: provider).displayName) without using Terminal"
+    case .update:
+      "Update \(ProviderHelperCatalog.definition(for: provider).displayName) and reconnect"
+    case .signIn:
+      "Sign in with \(provider.displayName) in your browser"
+    case .allowAccess:
+      "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
+    }
   }
 }
 
@@ -141,6 +180,9 @@ enum AllowanceBuilder {
     let isStale = SmartAlertDetector.isStale(
       lastUpdated: state.snapshot?.fetchedAt, now: now)
 
+    let connectionToolAvailable = Self.connectionToolAvailable(for: state.provider)
+    let setupAction = Self.setupAction(
+      for: state, connectionToolAvailable: connectionToolAvailable)
     return ProviderSummary(
       provider: state.provider,
       planName: (planName?.isEmpty == false ? planName : nil) ?? "",
@@ -151,9 +193,10 @@ enum AllowanceBuilder {
       serviceStatus: state.serviceStatus,
       isConnecting: state.isConnecting,
       isRefreshing: state.isRefreshing,
-      needsConnection: Self.needsConnection(state),
-      connectionToolAvailable: Self.connectionToolAvailable(for: state.provider),
+      needsConnection: setupAction != nil,
+      connectionToolAvailable: connectionToolAvailable,
       requiresKeychainAccess: state.requiresKeychainAccess,
+      setupAction: setupAction,
       error: state.error,
       lastUpdated: state.snapshot?.fetchedAt,
       localUsage: state.localUsage,
@@ -195,9 +238,21 @@ enum AllowanceBuilder {
   }
 
   static func needsConnection(_ state: ProviderViewState) -> Bool {
-    if state.requiresConnection || state.requiresKeychainAccess { return true }
-    if state.error != nil { return false }
-    return state.snapshot == nil
+    let available = Self.connectionToolAvailable(for: state.provider)
+    return Self.setupAction(for: state, connectionToolAvailable: available) != nil
+  }
+
+  static func setupAction(
+    for state: ProviderViewState,
+    connectionToolAvailable: Bool? = nil
+  ) -> ProviderSetupAction? {
+    if state.requiresKeychainAccess { return .allowAccess }
+    if state.requiresUpdate { return .update }
+    if state.requiresInstallation { return .install }
+    if state.requiresConnection { return .signIn }
+    guard state.snapshot == nil, state.error == nil else { return nil }
+    let available = connectionToolAvailable ?? Self.connectionToolAvailable(for: state.provider)
+    return available ? .signIn : .install
   }
 
   /// Automatic menu-bar mode keeps the Reserve identity while choosing the

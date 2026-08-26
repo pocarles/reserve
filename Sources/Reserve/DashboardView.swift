@@ -666,22 +666,16 @@ final class ProviderDashboardCard: NSView {
     }
 
     let trailing: NSView
-    if summary.needsConnection, !summary.isConnecting, !summary.isRefreshing {
-      let actionTitle =
-        summary.requiresKeychainAccess
-        ? "Allow access"
-        : !summary.connectionToolAvailable && summary.provider == .anthropic ? "Set up" : "Sign in"
+    if let setupAction = summary.setupAction,
+      !summary.isConnecting, !summary.isRefreshing
+    {
       let connect = ReserveTextButton(
-        title: actionTitle, size: ReserveType.metadata, color: ReserveColor.warning, filled: true,
+        title: setupAction.buttonTitle,
+        size: ReserveType.metadata, color: ReserveColor.warning, filled: true,
         minimumWidth: 64, height: 24,
         action: { connectProvider(summary.provider) })
       connect.identifier = NSUserInterfaceItemIdentifier("connect-\(summary.provider.rawValue)")
-      connect.toolTip =
-        summary.requiresKeychainAccess
-        ? "Uses \(summary.provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
-        : !summary.connectionToolAvailable && summary.provider == .anthropic
-          ? "Open Claude to finish its one-time Code setup"
-        : "Sign in with the official \(summary.provider.displayName) tool to read plan limits"
+      connect.toolTip = setupAction.toolTip(for: summary.provider)
       trailing = connect
     } else if let primary = summary.primary {
       trailing = RemainingValueView(allowance: primary, paceState: summary.paceState)
@@ -700,18 +694,18 @@ final class ProviderDashboardCard: NSView {
   }
 
   private static func unavailableRow(summary: ProviderSummary) -> NSView {
-    let message =
-      summary.isConnecting && summary.requiresKeychainAccess
-      ? "One-time macOS approval…"
-      : summary.isConnecting
-      ? "Complete the sign-in in your browser"
-      : summary.requiresKeychainAccess
-        ? "\(summary.provider.displayName) is ready · allow usage access"
-      : !summary.connectionToolAvailable && summary.provider == .anthropic
-        ? "One-time Claude setup needed"
-      : summary.needsConnection && summary.localUsage != nil
-        ? "Plan limits unavailable · local activity available"
-        : summary.error ?? "Sign in to read plan limits"
+    let message: String
+    if summary.isConnecting && summary.requiresKeychainAccess {
+      message = "One-time macOS approval…"
+    } else if summary.isConnecting {
+      message = "Complete the sign-in in your browser"
+    } else if let setupAction = summary.setupAction {
+      message = setupAction.message(for: summary.provider)
+    } else if summary.needsConnection && summary.localUsage != nil {
+      message = "Plan limits unavailable · local activity available"
+    } else {
+      message = summary.error ?? "Sign in to read plan limits"
+    }
     let label = ReserveLabel(
       message, font: ReserveFont.sans(ReserveType.metadata),
       color: summary.needsConnection ? ReserveColor.warning : ReserveColor.muted
@@ -732,7 +726,13 @@ private final class ProviderFreshnessBanner: NSView {
     self.identifier = NSUserInterfaceItemIdentifier("freshness-\(summary.provider.rawValue)")
     let state: String
     let fullState: String
-    if summary.needsConnection {
+    if summary.setupAction == .install {
+      state = "Setup needed"
+      fullState = state
+    } else if summary.setupAction == .update {
+      state = "Update needed"
+      fullState = state
+    } else if summary.needsConnection {
       state = "Disconnected"
       fullState = state
     } else if summary.error != nil {

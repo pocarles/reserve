@@ -614,9 +614,16 @@ enum LifecycleSelfTest {
     let now = Date()
     var missingCLI = ProviderViewState(provider: .grok)
     missingCLI.error = "Grok Build CLI is not installed."
+    missingCLI.requiresInstallation = true
     result.expect(
-      !AllowanceBuilder.needsConnection(missingCLI),
-      "a missing provider CLI is still presented as an authentication problem")
+      AllowanceBuilder.setupAction(for: missingCLI, connectionToolAvailable: false) == .install,
+      "a missing provider helper does not offer native setup")
+    var outdatedCLI = ProviderViewState(provider: .grok)
+    outdatedCLI.error = "Grok Build 1.0.0 or newer is required."
+    outdatedCLI.requiresUpdate = true
+    result.expect(
+      AllowanceBuilder.setupAction(for: outdatedCLI, connectionToolAvailable: true) == .update,
+      "an outdated provider helper does not offer a one-click update")
     var unavailable = ProviderViewState(provider: .anthropic)
     unavailable.error = "Anthropic usage request failed: The Internet connection appears offline."
     result.expect(
@@ -660,6 +667,7 @@ enum LifecycleSelfTest {
       needsConnection: true,
       connectionToolAvailable: true,
       requiresKeychainAccess: true,
+      setupAction: .allowAccess,
       error: "Anthropic sign-in was not completed.",
       lastUpdated: nil,
       localUsage: LocalUsageSummary(
@@ -699,6 +707,7 @@ enum LifecycleSelfTest {
       needsConnection: true,
       connectionToolAvailable: false,
       requiresKeychainAccess: false,
+      setupAction: .install,
       error: "Claude OAuth credentials were not found.",
       lastUpdated: nil,
       localUsage: summary.localUsage,
@@ -715,8 +724,25 @@ enum LifecycleSelfTest {
       .first { $0.identifier?.rawValue == "connect-anthropic" }
     let setupCopy = setupDescendants.compactMap { ($0 as? NSTextField)?.stringValue }
     result.expect(
-      setupButton?.title == "Set up" && setupCopy.contains("One-time Claude setup needed"),
-      "Claude Desktop without its helper still looks broken instead of offering setup")
+      setupButton?.title == "Set up"
+        && setupCopy.contains("Set up Anthropic to show plan limits"),
+      "a missing provider helper still looks broken instead of offering setup")
+    result.expect(
+      ProviderID.allCases.allSatisfy {
+        ProviderHelperSetupPrompt(provider: $0, action: .install).validateForSelfTest()
+      },
+      "the no-Terminal setup confirmation is incomplete for one or more providers")
+    var setupGate = ProviderSetupGate()
+    let firstSetupStarted = setupGate.begin(.openAI)
+    let overlappingSetupWasBlocked = !setupGate.begin(.cursor)
+    setupGate.finish(.cursor)
+    let wrongProviderCouldNotClearGate = !setupGate.begin(.grok)
+    setupGate.finish(.openAI)
+    let nextSetupStartedAfterFinish = setupGate.begin(.anthropic)
+    result.expect(
+      firstSetupStarted && overlappingSetupWasBlocked && wrongProviderCouldNotClearGate
+        && nextSetupStartedAfterFinish,
+      "provider setup work can overlap or the active setup gate clears for the wrong provider")
 
     let domain = "com.pocarles.reserve.cost-selftest"
     guard let defaults = UserDefaults(suiteName: domain) else {

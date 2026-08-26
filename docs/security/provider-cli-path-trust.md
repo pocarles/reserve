@@ -26,5 +26,8 @@ Reserve does not accept executable paths from network responses or documents.
 - Add filesystem fixtures covering safe installs, Homebrew-style symlinks,
   hostile ancestors, races, and useful error messages.
 
-Preserve compatibility with official CLI installs and do not add a privileged
-helper or a Reserve-managed CLI updater.
+Preserve compatibility with official helper installs. Provider setup must stay
+user-approved, user-level, restricted to the fixed official installer catalog,
+and separate from Reserve's own Sparkle updater. Do not add a privileged
+helper, accept an installer URL from remote data, or silently install or update
+provider software.
