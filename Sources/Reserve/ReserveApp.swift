@@ -851,7 +851,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
       statusController.closeMenuForStressTest()
       settingsController.showWindow(nil)
-      settingsController.window?.orderOut(nil)
+      settingsController.window?.close()
       try? await Task.sleep(for: .seconds(3))
       let footprintBefore = Self.physicalFootprintBytes()
       for _ in 0..<30 {
@@ -861,7 +861,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? await Task.sleep(for: .milliseconds(100))
         settingsController.showWindow(nil)
         try? await Task.sleep(for: .milliseconds(50))
-        settingsController.window?.orderOut(nil)
+        settingsController.window?.close()
         try? await Task.sleep(for: .milliseconds(50))
       }
       try? await Task.sleep(for: .seconds(3))
