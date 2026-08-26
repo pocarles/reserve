@@ -32,9 +32,9 @@ struct Allowance: Identifiable {
 extension UsagePaceState {
   var label: String {
     switch self {
-    case .reserve: "Reserve"
+    case .reserve: "Under pace"
     case .onPace: "On pace"
-    case .deficit: "Deficit"
+    case .deficit: "May run out early"
     case .exhausted: "Exhausted"
     case .unknown: "Unknown"
     case .stale: "Stale"
@@ -199,7 +199,7 @@ enum AllowanceBuilder {
       setupAction: setupAction,
       error: state.error,
       lastUpdated: state.snapshot?.fetchedAt,
-      localUsage: state.localUsage,
+      localUsage: state.snapshot?.accountUsage ?? state.localUsage,
       subscriptionCostUSD: state.subscriptionCostUSD,
       quotaSource: state.snapshot?.source,
       includedSpend: state.snapshot?.includedSpend,
@@ -221,6 +221,12 @@ enum AllowanceBuilder {
     let label = window.label
     if label.localizedCaseInsensitiveCompare("Weekly") == .orderedSame { return "Weekly limit" }
     if label.localizedCaseInsensitiveCompare("5 hours") == .orderedSame { return "5-hour window" }
+    if label.localizedCaseInsensitiveCompare("Grok Build share") == .orderedSame {
+      return "Build share"
+    }
+    if label.localizedCaseInsensitiveCompare("Grok Chat share") == .orderedSame {
+      return "Chat share"
+    }
     if label.localizedCaseInsensitiveContains("share") { return label }
     if label.localizedCaseInsensitiveContains("weekly") { return "\(label) limit" }
     return label
@@ -317,8 +323,8 @@ enum AllowanceBuilder {
       }!
       let amount = Int((worst.paceState.deficitPercent ?? 0).rounded())
       return (
-        deficits.count == 1 ? "1 plan in deficit" : "\(deficits.count) plans in deficit",
-        "\(worst.provider.displayName) · \(amount)% in deficit"
+        deficits.count == 1 ? "1 plan may run out early" : "\(deficits.count) plans may run out early",
+        "\(worst.provider.displayName) · \(amount) points over pace"
           + (stale.isEmpty ? "" : " · \(stale.count) also need an update"),
         worst.paceState)
     }

@@ -323,7 +323,7 @@ public enum ReserveSelfTests {
       GrokPlanFormatter.plan(from: "supergrok_heavy") == "SuperGrok Heavy",
       GrokPlanFormatter.plan(from: "x_premium_plus") == "X Premium+",
       GrokPlanFormatter.plan(from: "premium") == "X Premium",
-      CursorPlanFormatter.plan(from: "pro_plus") == "Pro Plus",
+      CursorPlanFormatter.plan(from: "pro_plus") == "Pro+",
       CursorPlanFormatter.plan(from: "ultra") == "Ultra",
       CursorPlanFormatter.plan(from: "free") == "Hobby"
     else { throw Failure("provider plan-name normalization") }
@@ -477,7 +477,7 @@ public enum ReserveSelfTests {
     let cursor = try JSONDecoder().decode(
       CursorCurrentPeriodUsageResponse.self, from: cursorUsageData)
     let cursorReset = try Self.cursorDate(milliseconds: cursor.billingCycleEnd)
-    let cursorWindows = try CursorProvider.windows(
+    let cursorWindows = try CursorProvider.planWindows(
       usage: cursor.planUsage, resetsAt: cursorReset, windowMinutes: 44_640)
     guard cursorWindows.map(\.id) == ["cursor-models", "other-models"],
       cursorWindows.map(\.usedPercent) == [45, 72.5],
@@ -495,7 +495,7 @@ public enum ReserveSelfTests {
 
     let cursorMissing = try JSONDecoder().decode(
       CursorCurrentPeriodUsageResponse.self, from: cursorMissingFieldsData)
-    guard try CursorProvider.windows(
+    guard try CursorProvider.planWindows(
       usage: cursorMissing.planUsage, resetsAt: nil, windowMinutes: nil).isEmpty
     else { throw Failure("Cursor missing-field fallback") }
     record("Cursor missing-field fallback")
@@ -503,7 +503,7 @@ public enum ReserveSelfTests {
     do {
       let malformed = try JSONDecoder().decode(
         CursorCurrentPeriodUsageResponse.self, from: cursorMalformedData)
-      _ = try CursorProvider.windows(
+      _ = try CursorProvider.planWindows(
         usage: malformed.planUsage, resetsAt: nil, windowMinutes: nil)
       throw Failure("malformed Cursor allowance")
     } catch UsageProviderError.invalidResponse {
@@ -714,7 +714,7 @@ public enum ReserveSelfTests {
         label: "Included credits", usedMinorUnits: 1234, limitMinorUnits: 5000))
     let cursorSnapshot = UsageSnapshot(
       provider: .cursor,
-      planName: "Pro Plus",
+      planName: "Pro+",
       windows: [
         UsageWindow(id: "cursor-models", label: "Cursor Models", usedPercent: 45),
         UsageWindow(id: "other-models", label: "Other Models", usedPercent: 72.5),

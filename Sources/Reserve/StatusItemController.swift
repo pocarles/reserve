@@ -218,9 +218,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         withState(previewSummaries[2], .reserve(percent: 18)),
       ])
     let aggregateCopyWorks =
-      singleSummary.primary == "1 plan in deficit"
-      && pluralSummary.primary == "2 plans in deficit"
-      && pluralSummary.secondary.contains("8% in deficit")
+      singleSummary.primary == "1 plan may run out early"
+      && pluralSummary.primary == "2 plans may run out early"
+      && pluralSummary.secondary.contains("8 points over pace")
       && staleSummary.primary == "1 plan needs an update"
       && staleSummary.secondary.contains("2 other plans have reserve")
       && oneHealthyStale.secondary.contains("1 other plan has reserve")
@@ -246,7 +246,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           usedPercent: forecastWindow.usedPercent, resetsAt: forecastWindow.resetsAt,
           projection: forecastProjection, isPrimary: true, paceState: .deficit(percent: 25)),
         paceState: .deficit(percent: 25), lastUpdated: forecastNow, now: forecastNow
-      ) == "25% deficit · runs out 3d 2h early"
+      ) == "25 points over pace · may run out 3d 2h before reset"
     let nonSharePrimary = AllowanceBuilder.summary(
       for: ProviderViewState(
         provider: .grok,
@@ -406,6 +406,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let percentagesAreLabelled =
       labels.filter { $0 == "left" }.count == ProviderID.allCases.count
       && labels.contains { $0.hasSuffix("% left") }
+      && !labels.contains { $0.hasSuffix("% used") }
+      && DashboardFormat.remainingPercent(99.7525) == "99"
     let forecastCount = descendants.filter { $0.identifier?.rawValue == "forecast" }.count
     let allowanceCount = descendants.filter {
       ($0.identifier?.rawValue ?? "").hasPrefix("allowance-")
@@ -414,8 +416,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       forecastCount == ProviderID.allCases.count
       && allowanceCount == ProviderID.allCases.count
       && labels.contains {
-        $0.contains("in reserve") || $0.hasPrefix("On pace") || $0.contains("in deficit")
-          || $0.hasPrefix("Forecast unavailable")
+        $0.contains("points under pace") || $0.hasPrefix("On pace")
+          || $0.contains("points over pace") || $0.hasPrefix("Forecast unavailable")
+          || $0 == "Too early to forecast" || $0 == "No usage yet"
       }
     // Provider availability is announced only when it is not normal.
     let serviceStatusIsExceptionOnly =
@@ -520,21 +523,21 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let spokenRows = liveDescendants.compactMap { $0 as? ProviderDashboardCard }
     let rowsAreSpoken =
       spokenRows.count == ProviderID.allCases.count
-      && spokenRows.allSatisfy {
-        $0.accessibilityRole() == .button
-          && ($0.accessibilityLabel() ?? "").isEmpty == false
-          && ($0.accessibilityValue() as? String ?? "").contains("percent left")
-          && ($0.accessibilityHelp() ?? "").isEmpty == false
+      && spokenRows.allSatisfy { row in
+        row.accessibilityRole() == .button
+          && (row.accessibilityLabel() ?? "").isEmpty == false
+          && (row.accessibilityValue() as? String ?? "").contains("percent left")
+          && (row.accessibilityHelp() ?? "").isEmpty == false
       }
     // Decoration must not announce itself: the row already says which provider
     // it is, so no image may carry its own label.
     let decorationIsSilent = liveDescendants.compactMap { $0 as? NSImageView }
       .allSatisfy { ($0.accessibilityLabel() ?? "").isEmpty }
     let renderedMeters = liveDescendants.compactMap { $0 as? ReserveMeter }
-    let metersAreSpoken = renderedMeters.allSatisfy {
-        $0.accessibilityRole() == .progressIndicator
-          && ($0.accessibilityLabel() ?? "").isEmpty == false
-          && ($0.accessibilityValue() as? String ?? "").contains("percent left")
+    let metersAreSpoken = renderedMeters.allSatisfy { meter in
+        meter.accessibilityRole() == .progressIndicator
+          && (meter.accessibilityLabel() ?? "").isEmpty == false
+          && (meter.accessibilityValue() as? String ?? "").contains("percent left")
       }
     let primaryAllowances = previewSummaries.compactMap(\.primary)
     let meterSemanticsWork =
@@ -554,6 +557,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       ReserveSparkline.heightFraction(tokens: 0, peak: 10_000) == 0
       && ReserveSparkline.heightFraction(tokens: 10_000, peak: 10_000) == 1
       && abs(ReserveSparkline.heightFraction(tokens: 400, peak: 10_000) - 0.2) < 0.001
+    let cursorAccountUsageSurvivesLocalScan =
+      UsageStore.usageAfterLocalScan(
+        provider: .cursor,
+        snapshot: self.store.states[.cursor]?.snapshot,
+        scanned: nil) == self.store.states[.cursor]?.snapshot?.accountUsage
+      && UsageStore.usageAfterLocalScan(
+        provider: .openAI,
+        snapshot: self.store.states[.openAI]?.snapshot,
+        scanned: self.store.states[.openAI]?.localUsage)
+        == self.store.states[.openAI]?.localUsage
 
     // Progressive disclosure: one provider opens at a time and exposes limits and usage.
     let disclosuresPresent = ProviderID.allCases.allSatisfy {
@@ -566,11 +579,19 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let expanded = Self.descendants(of: dashboardController.view)
     let expandedIDs = Set(expanded.compactMap { $0.identifier?.rawValue })
     let expandedLabels = expanded.compactMap { ($0 as? NSTextField)?.stringValue }
+    let expandedAnthropic = expanded.compactMap { $0 as? ProviderDashboardCard }.first {
+      $0.identifier?.rawValue == "provider-card-anthropic"
+    }
+    let expandedAnthropicDescendants = expandedAnthropic.map { Self.descendants(of: $0) } ?? []
     let detailLayersPresent =
-      // Layer 1: every remaining window as a full component.
-      expanded.filter { ($0.identifier?.rawValue ?? "").hasPrefix("allowance-detail-") }.count == 2
+      // Secondary windows stay compact even when details are open.
+      expandedAnthropicDescendants.filter {
+        ($0.identifier?.rawValue ?? "").hasPrefix("secondary-")
+      }.count == 2
+      && expandedAnthropicDescendants.filter {
+        ($0.identifier?.rawValue ?? "").hasPrefix("allowance-detail-")
+      }.isEmpty
       && expandedLabels.contains { $0.hasSuffix("% left") }
-      && !expandedLabels.contains { $0.hasSuffix("% used") }
       // Activity and estimated value.
       && expandedIDs.contains("usage-detail-anthropic")
       && expandedLabels.contains("Estimated API value")
@@ -699,7 +720,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       firstClickSelectionWorks, footerButtonsArePadded, providerButtonsArePadded,
       refreshButtonIsPadded, dashboardTypographyIsReadable, oauthURLParsingIsSafe,
       outsideClickDismissalWorks, updateMigrationWorks,
-      scheduledRefreshWorks,
+      scheduledRefreshWorks, cursorAccountUsageSurvivesLocalScan,
       staleFreshnessIsVisible, freshWithoutForecastDoesNotLookStale,
       automaticSourceWorks,
       pinnedModelWorks, aggregateCopyWorks, deficitForecastUsesRenewalGap,

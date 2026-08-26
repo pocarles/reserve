@@ -96,9 +96,10 @@ repeat the migration checks on a Mac with valid legacy UsageBar data.
 - [ ] OpenAI, Claude, Grok, and Cursor each refresh successfully with a real
       authorized test account; disconnected/login handoff is checked without
       recording credentials or raw provider output.
-- [ ] Cursor starts disabled, one-time Keychain approval is explicit, both
-      allowance pools and on-demand spending match Cursor, detailed usage falls
-      back honestly when unavailable, and sign-out plus reauthentication work.
+- [ ] Cursor starts disabled, one-time Keychain approval is explicit, aggregate
+      account usage, reported percentage pools, and on-demand spending match
+      Cursor; daily history either matches or fails honestly; and sign-out plus
+      reauthentication work.
 - [ ] The draft release starts with the one-time 0.9.1-or-earlier installation
       steps before the generated changelog, including Download, Applications,
       Replace, and reopen.

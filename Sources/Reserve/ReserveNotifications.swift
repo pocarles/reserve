@@ -93,15 +93,16 @@ final class ReserveNotifications {
       let deficit = Int(deficitPercent.rounded())
       let body: String
       if let runsOutAt {
-        body = String(deficit) + "% in deficit. At the current pace, capacity is projected to be "
-          + "exhausted " + Self.moment(runsOutAt, now: now) + ", "
+        body = String(deficit) + " points over pace. At the current pace, capacity may run out "
+          + Self.moment(runsOutAt, now: now) + ", "
           + Self.gap(from: runsOutAt, to: resetsAt) + " before reset."
       } else {
-        body = String(deficit) + "% in deficit for the current " + label.lowercased() + " window."
+        body = String(deficit) + " points over pace for the current "
+          + label.lowercased() + " window."
       }
       self.deliver(
         identifier: "reserve.deficit.\(provider.rawValue).\(Self.safeID(windowID)).\(cycle)",
-        title: "\(provider.displayName) forecast entered deficit",
+        title: "\(provider.displayName) may run out early",
         body: body)
     case .dataStale(let provider, let lastUpdated):
       self.deliver(
