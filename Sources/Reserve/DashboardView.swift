@@ -76,7 +76,7 @@ final class DashboardViewController: NSViewController {
       parts.append(String(reflecting: summary.localUsage))
       for allowance in summary.allowances {
         parts.append(allowance.id)
-        parts.append(String(Int(allowance.remainingPercent.rounded())))
+        parts.append(String(allowance.usedPercent))
         parts.append(DashboardFormat.limitLine(allowance, now: now))
         parts.append(
           DashboardFormat.forecast(
@@ -355,10 +355,18 @@ private final class DashboardHeaderView: NSView {
     now: Date
   ) -> String {
     if isRefreshing { return "Updating…" }
-    guard let latest = summaries.compactMap(\.lastUpdated).max() else {
+    if summaries.contains(where: { $0.error != nil || $0.paceState == .stale }) {
+      return "Some data unavailable"
+    }
+    if summaries.contains(where: \.detailedUsageUnavailable) {
+      return "Some details unavailable"
+    }
+    guard summaries.allSatisfy({ $0.lastUpdated != nil }),
+      let oldest = summaries.compactMap(\.lastUpdated).min()
+    else {
       return "Waiting for the first update"
     }
-    return DashboardFormat.updated(latest, now: now)
+    return DashboardFormat.updated(oldest, now: now)
   }
 }
 
@@ -473,23 +481,14 @@ final class ProviderDashboardCard: NSView {
     if summary.serviceIsExceptional, let service = summary.serviceStatus {
       rows.append(ServiceBanner(provider: summary.provider, status: service))
     }
+    if !summary.secondary.isEmpty {
+      rows.append(
+        SecondaryAllowanceRow(
+          allowances: summary.secondary, primaryReset: summary.primary?.resetsAt, now: now))
+    }
     if isExpanded {
-      // Layer 1: every remaining limit gets the same full component.
-      for allowance in summary.secondary {
-        rows.append(
-          AllowanceView(
-            allowance: allowance,
-            paceState: AllowanceBuilder.paceState(
-              primary: allowance, hasSnapshot: true, isStale: false, hasError: false),
-            lastUpdated: summary.lastUpdated,
-            now: now,
-            isDetail: true))
-      }
       rows.append(ReserveHairline(width: DashboardMetrics.cardContentWidth))
-      // Activity and estimated value.
       rows.append(UsageDetailGrid(summary: summary))
-    } else if !summary.secondary.isEmpty {
-      rows.append(SecondaryAllowanceRow(allowances: summary.secondary, now: now))
     }
 
     let stack = NSStackView.column(rows, spacing: DashboardMetrics.cardRowGap)
@@ -518,14 +517,14 @@ final class ProviderDashboardCard: NSView {
       roundedRect: self.bounds, xRadius: ReserveRadius.section, yRadius: ReserveRadius.section)
     (self.hasUnavailableLiveData
       ? ReserveColor.staleSurface
-      : self.isSelectedForMenuBar
-        ? ReserveColor.selected
-        : self.isHovered ? ReserveColor.hover : ReserveColor.section
+      : self.isHovered ? ReserveColor.hover : ReserveColor.section
     ).setFill()
     path.fill()
-    (self.hasUnavailableLiveData ? ReserveColor.staleBorder : ReserveColor.hairline).setStroke()
-    path.lineWidth = 1
-    path.stroke()
+    if self.hasUnavailableLiveData {
+      ReserveColor.staleBorder.setStroke()
+      path.lineWidth = 1
+      path.stroke()
+    }
   }
 
   override func hitTest(_ point: NSPoint) -> NSView? {
@@ -597,10 +596,15 @@ final class ProviderDashboardCard: NSView {
   /// the order someone would ask for them.
   static func spokenState(summary: ProviderSummary, now: Date) -> String {
     guard let primary = summary.primary else {
+      if let usage = summary.localUsage, usage.origin == .providerAccount {
+        let today = DashboardFormat.tokens(usage.todayTokens)
+        let cycle = DashboardFormat.tokens(usage.cycleTokens)
+        return "\(today) account tokens today, \(cycle) this billing cycle, plan percentage unavailable"
+      }
       return summary.error ?? "Not connected"
     }
     var parts = [
-      "\(Int(primary.remainingPercent.rounded())) percent left",
+      "\(DashboardFormat.remainingPercent(primary.remainingPercent)) percent left",
       summary.paceState.label,
     ]
     if let reset = primary.resetsAt, reset > now {
@@ -637,7 +641,7 @@ final class ProviderDashboardCard: NSView {
   ) -> NSView {
     let logo = ProviderLogo(provider: summary.provider)
     let providerName = [summary.provider.displayName, summary.planName]
-      .filter { !$0.isEmpty }.joined(separator: " ")
+      .filter { !$0.isEmpty }.joined(separator: " · ")
     let name = ReserveLabel(
       providerName,
       font: ReserveFont.sans(ReserveType.providerName, .semibold),
@@ -679,6 +683,15 @@ final class ProviderDashboardCard: NSView {
       trailing = connect
     } else if let primary = summary.primary {
       trailing = RemainingValueView(allowance: primary, paceState: summary.paceState)
+    } else if let usage = summary.localUsage, usage.origin == .providerAccount {
+      let today = DashboardFormat.tokens(usage.todayTokens)
+      let value = ReserveLabel(
+        "\(today) today",
+        font: ReserveFont.sans(ReserveType.body, .semibold), color: ReserveColor.text
+      ).fitted()
+      value.toolTip = "Provider-reported account tokens today"
+      value.setAccessibilityLabel("\(today) account tokens today")
+      trailing = value
     } else {
       trailing = HealthBadge(paceState: summary.paceState)
     }
@@ -703,6 +716,8 @@ final class ProviderDashboardCard: NSView {
       message = setupAction.message(for: summary.provider)
     } else if summary.needsConnection && summary.localUsage != nil {
       message = "Plan limits unavailable · local activity available"
+    } else if let usage = summary.localUsage, usage.origin == .providerAccount {
+      message = "\(DashboardFormat.tokens(usage.cycleTokens)) this billing cycle · percentage unavailable"
     } else {
       message = summary.error ?? "Sign in to read plan limits"
     }
@@ -792,16 +807,18 @@ private final class ProviderFreshnessBanner: NSView {
 private final class RemainingValueView: NSView {
   init(allowance: Allowance, paceState: UsagePaceState) {
     super.init(frame: .zero)
+    let percentage = DashboardFormat.remainingPercent(allowance.remainingPercent)
     let value = ReserveLabel(
-      String(format: "%.0f%%", allowance.remainingPercent),
+      "\(percentage)%",
       font: ReserveFont.digits(ReserveType.remaining, .semibold),
       color: paceState == .stale ? ReserveColor.muted : ReserveColor.text
     ).fitted()
     let unit = ReserveLabel(
-      "left", font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+      "left",
+      font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
     ).fitted()
     value.setAccessibilityLabel(
-      "\(Int(allowance.remainingPercent.rounded())) percent left, \(paceState.label)")
+      "\(percentage) percent left, \(paceState.label)")
     let row = NSStackView.row([value, unit], spacing: 5)
     row.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(row)
@@ -917,7 +934,7 @@ private final class AllowanceView: NSView {
         color: ReserveColor.text
       ).flexible()
       let left = ReserveLabel(
-        "\(Int(allowance.remainingPercent.rounded()))% left",
+        "\(DashboardFormat.remainingPercent(allowance.remainingPercent))% left",
         font: ReserveFont.digits(ReserveType.body, .semibold), color: ReserveColor.text
       ).fitted()
       header = [NSStackView.row([title, NSStackView.spacer(), left], spacing: 8)]
@@ -946,7 +963,8 @@ private final class AllowanceView: NSView {
       DashboardFormat.forecast(
         allowance, paceState: paceState, lastUpdated: lastUpdated, now: now),
       font: ReserveFont.sans(ReserveType.body),
-      color: paceState.color
+      color: paceState == .exhausted || paceState.deficitPercent != nil
+        ? paceState.color : ReserveColor.muted
     ).flexible()
     forecast.identifier = NSUserInterfaceItemIdentifier("forecast")
     forecast.toolTip = DashboardFormat.forecast(
@@ -972,24 +990,31 @@ private final class AllowanceView: NSView {
 /// Additional windows, compacted to one line each.
 @MainActor
 private final class SecondaryAllowanceRow: NSView {
-  init(allowances: [Allowance], now: Date) {
+  init(allowances: [Allowance], primaryReset: Date?, now: Date) {
     super.init(frame: .zero)
     let lines = allowances.map { allowance -> NSView in
       let title = ReserveLabel(
         allowance.title, font: ReserveFont.sans(ReserveType.metadata, .medium),
         color: ReserveColor.muted)
       let value = ReserveLabel(
-        "\(Int(allowance.remainingPercent.rounded()))% left",
+        "\(DashboardFormat.remainingPercent(allowance.remainingPercent))% left",
         font: ReserveFont.digits(ReserveType.metadata, .medium),
         color: ReserveColor.text
       ).fitted()
-      let detail = ReserveLabel(
-        DashboardFormat.secondaryDetail(allowance, now: now),
-        font: ReserveFont.sans(ReserveType.metadata),
-        color: ReserveColor.subtle
-      ).fitted()
       title.flexible()
-      let information = NSStackView.row([title, value, detail], spacing: 7)
+      var informationViews: [NSView] = [title, value]
+      let sharesPrimaryReset =
+        allowance.resetsAt.flatMap { reset in primaryReset.map { abs($0.timeIntervalSince(reset)) < 1 } }
+        ?? false
+      if !sharesPrimaryReset {
+        let detail = ReserveLabel(
+          DashboardFormat.secondaryDetail(allowance, now: now),
+          font: ReserveFont.sans(ReserveType.metadata),
+          color: ReserveColor.muted
+        ).fitted()
+        informationViews.append(detail)
+      }
+      let information = NSStackView.row(informationViews, spacing: 7)
       information.setContentHuggingPriority(.required, for: .horizontal)
       let row = NSStackView.row(
         [information, NSStackView.spacer()], spacing: 0)
@@ -1028,7 +1053,7 @@ final class DetailDisclosureButton: NSButton {
       systemSymbolName: isExpanded ? "chevron.up" : "chevron.down",
       accessibilityDescription: isExpanded ? "Hide details" : "Show details")
     self.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
-    self.contentTintColor = ReserveColor.subtle
+    self.contentTintColor = ReserveColor.muted
     self.isBordered = false
     self.toolTip = isExpanded ? "Hide details" : "Show limits and usage"
     self.setAccessibilityLabel(
@@ -1058,43 +1083,40 @@ private final class UsageDetailGrid: NSView {
     self.identifier = NSUserInterfaceItemIdentifier("usage-detail-\(summary.provider.rawValue)")
     let usage = summary.localUsage
     let accountData = usage?.origin == .providerAccount
-    let cells: [NSView] = [
-      Self.cell(
-        accountData ? "Account tokens today" : "Local tokens today",
-        usage.map { DashboardFormat.tokens($0.todayTokens) } ?? "—"),
-      Self.cell(
-        accountData ? "Account · last 30 days" : "Local · last 30 days",
-        usage.map { DashboardFormat.tokens($0.totalTokens) } ?? "—"),
-      Self.cell(
-        accountData ? "Provider-reported usage value" : "Estimated API value",
-        usage.map { DashboardFormat.money($0.apiEquivalentCostUSD) } ?? "—"),
-      Self.cell(
-        "Monthly cost",
-        summary.subscriptionCostUSD.map { "\(DashboardFormat.money($0))/mo" } ?? "Not set"),
-    ]
-    let top = NSStackView.row([cells[0], NSStackView.spacer(), cells[1]], spacing: 8)
-    let bottom = NSStackView.row([cells[2], NSStackView.spacer(), cells[3]], spacing: 8)
-    for row in [top, bottom] {
-      row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+    var rows: [NSView] = []
+    if let usage {
+      rows.append(
+        Self.cell(
+          accountData ? "Tokens today" : "Local tokens today",
+          DashboardFormat.tokens(usage.todayTokens)))
+      rows.append(
+        Self.cell(
+          accountData ? "Tokens, last 30 days" : "Local tokens, last 30 days",
+          DashboardFormat.tokens(usage.totalTokens)))
+      rows.append(
+        Self.cell(
+          accountData ? "Usage value" : "Estimated API value",
+          DashboardFormat.money(usage.apiEquivalentCostUSD)))
+    } else {
+      rows.append(
+        Self.cell(
+          summary.provider == .cursor ? "Account totals" : "Usage details",
+          summary.detailedUsageUnavailable ? "Unavailable" : "No data"))
     }
-    var rows: [NSView] = [top, bottom]
+    rows.append(
+      Self.cell(
+        "Subscription",
+        summary.subscriptionCostUSD.map { "\(DashboardFormat.money($0))/month" } ?? "Not set"))
     if let spend = summary.includedSpend {
       let value: String =
         switch spend.limitState {
-        case .disabled: "Disabled"
+        case .disabled: "Off"
         case .unlimited:
           "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) used · unlimited"
         case .capped:
           "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) of \(DashboardFormat.money(Double(spend.limitMinorUnits) / 100)) · \(DashboardFormat.money(Double(spend.remainingMinorUnits ?? 0) / 100)) left"
         }
       rows.append(Self.cell(spend.label, value))
-    }
-    if summary.detailedUsageUnavailable {
-      rows.append(
-        ReserveLabel(
-          "Detailed usage unavailable for this account.",
-          font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
-        ).flexible())
     }
     if let models = usage?.modelCosts.prefix(3), !models.isEmpty {
       let text = models.map {
@@ -1118,7 +1140,6 @@ private final class UsageDetailGrid: NSView {
       rows.append(contentsOf: [chart, caption])
     }
     let stack = NSStackView.column(rows, spacing: 8)
-    if rows.count > 2 { stack.setCustomSpacing(11, after: bottom) }
     stack.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(stack)
     NSLayoutConstraint.activate([
@@ -1139,7 +1160,9 @@ private final class UsageDetailGrid: NSView {
     let value = ReserveLabel(
       value, font: ReserveFont.digits(ReserveType.metadata, .semibold), color: ReserveColor.text
     ).fitted()
-    return NSStackView.row([caption, value], spacing: 7)
+    let row = NSStackView.row([caption, NSStackView.spacer(), value], spacing: 7)
+    row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+    return row
   }
 }
 
@@ -1230,7 +1253,7 @@ private final class DashboardFooterView: NSView {
 }
 
 enum DashboardMetrics {
-  static let width: CGFloat = 490
+  static let width: CGFloat = 440
   static let minimumHeight: CGFloat = 320
   /// The fallback ceiling, used only when no screen is known — offscreen
   /// rendering and tests. On a real screen `availableHeight` governs.
@@ -1261,16 +1284,24 @@ enum DashboardMetrics {
     return max(self.minimumHeight, usable)
   }
 
-  static let rowGap: CGFloat = 12
-  static let headerGap: CGFloat = 16
-  static let footerGap: CGFloat = 14
-  static let cardRowGap: CGFloat = 10
-  static let identityGap: CGFloat = 12
+  static let rowGap: CGFloat = 10
+  static let headerGap: CGFloat = 14
+  static let footerGap: CGFloat = 12
+  static let cardRowGap: CGFloat = 8
+  static let identityGap: CGFloat = 10
   static let meterHeight: CGFloat = 6
 }
 
 @MainActor
 enum DashboardFormat {
+  /// Quotas use whole percentages. A partially used allowance never claims to
+  /// be completely full just because ordinary rounding would produce 100.
+  static func remainingPercent(_ value: Double) -> String {
+    let bounded = min(100, max(0, value))
+    if bounded < 100, bounded > 99 { return "99" }
+    return String(Int(bounded.rounded()))
+  }
+
   static func localizedDateFormatter(
     template: String,
     locale: Locale = .autoupdatingCurrent
@@ -1314,10 +1345,11 @@ enum DashboardFormat {
   /// "Weekly limit · resets Wed at 1:02 AM"
   @MainActor
   static func limitLine(_ allowance: Allowance, now: Date) -> String {
+    let prefix = allowance.title
     guard let reset = allowance.resetsAt, reset > now else {
-      return "\(allowance.title) · next reset unknown"
+      return "\(prefix) · next reset unknown"
     }
-    return "\(allowance.title) · resets \(self.moment(reset, now: now))"
+    return "\(prefix) · resets \(self.moment(reset, now: now))"
   }
 
   /// "Resets Wednesday at 1:02 AM" — the reset alone, for detail rows whose
@@ -1336,8 +1368,12 @@ enum DashboardFormat {
     lastUpdated: Date?,
     now: Date
   ) -> String {
+    if allowance.usedPercent == 0 { return "No usage yet" }
+    if allowance.usedPercent < 1 || (allowance.expectedPercent ?? 0) < 10 {
+      return "Too early to forecast"
+    }
     let projected = allowance.projectedRemainingAtResetPercent.map {
-      "\(Int($0.rounded()))% projected left at reset"
+      "about \(Int($0.rounded()))% left at reset"
     }
     switch paceState {
     case .exhausted:
@@ -1348,18 +1384,18 @@ enum DashboardFormat {
     case .unknown:
       return "Forecast unavailable"
     case .reserve(let percent):
-      let pace = "\(Int(percent.rounded()))% in reserve"
+      let pace = "\(Int(percent.rounded())) points under pace"
       return projected.map { "\(pace) · \($0)" } ?? pace
     case .onPace:
       return projected.map { "On pace · \($0)" } ?? "On pace"
     case .deficit(let percent):
-      let pace = "\(Int(percent.rounded()))% deficit"
+      let pace = "\(Int(percent.rounded())) points over pace"
       if let runsOut = allowance.runsOutAt,
         let renewal = allowance.resetsAt,
         runsOut < renewal
       {
         let timeBeforeRenewal = self.gap(from: runsOut, to: renewal)
-        return "\(pace) · runs out \(timeBeforeRenewal) early"
+        return "\(pace) · may run out \(timeBeforeRenewal) before reset"
       }
       return projected.map { "\(pace) · \($0)" } ?? pace
     }
@@ -1368,7 +1404,7 @@ enum DashboardFormat {
   /// Compact right-hand detail for a secondary window.
   @MainActor
   static func secondaryDetail(_ allowance: Allowance, now: Date) -> String {
-    if allowance.usedPercent <= 0.5 { return "ready" }
+    if allowance.usedPercent == 0 { return "no usage yet" }
     guard let reset = allowance.resetsAt, reset > now else { return "reset unknown" }
     return "resets \(self.moment(reset, now: now))"
   }

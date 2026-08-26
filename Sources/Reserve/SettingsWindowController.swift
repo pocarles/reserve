@@ -284,7 +284,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   private func notificationsPane() -> NSView {
     let smart = [
-      ("Notify when a forecast enters deficit", "deficit"),
+      ("Notify when a plan may run out early", "deficit"),
       ("Limit exhausted", "exhausted"),
       ("Capacity available again", "weeklyRenewal"),
       ("Data stale or provider disconnected", "stale"),
@@ -340,6 +340,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let states = ProviderID.allCases.compactMap { self.store.states[$0] }
       .filter { self.store.isEnabled($0.provider) }
     let measured = states.filter { $0.localUsage != nil }
+    let origins = Set(measured.compactMap { $0.localUsage?.origin })
     let apiValue = measured.reduce(0.0) { $0 + ($1.localUsage?.apiEquivalentCostUSD ?? 0) }
     let plans = measured.compactMap { self.store.monthlySubscriptionCost(for: $0.provider) }
     let planTotal = plans.reduce(0, +)
@@ -353,11 +354,26 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       size: 13, weight: .medium, color: .labelColor)
     total.identifier = NSUserInterfaceItemIdentifier("insights-total")
 
-    let charts = ProviderID.allCases.compactMap { provider -> NSView? in
-      guard let series = self.store.states[provider]?.localUsage?.dailyTokens,
-        series.contains(where: { $0.tokens > 0 })
-      else { return nil }
-      return self.chartRow(provider: provider, series: series)
+    let charts = states.compactMap { state -> NSView? in
+      guard let usage = state.localUsage else { return nil }
+      if usage.dailyTokens.contains(where: { $0.tokens > 0 }) {
+        return self.chartRow(provider: state.provider, series: usage.dailyTokens)
+      }
+      let reason = usage.origin == .providerAccount
+        ? "Daily history unavailable"
+        : "No daily activity"
+      return self.chartUnavailableRow(provider: state.provider, reason: reason)
+    }
+
+    let activityFooter: String
+    if origins.contains(.localDevice), origins.contains(.providerAccount) {
+      activityFooter = "OpenAI, Claude, and Grok use session logs on this Mac. Cursor uses "
+        + "provider-reported account totals, which can include other devices."
+    } else if origins.contains(.providerAccount) {
+      activityFooter = "Provider-reported account totals can include activity from other devices."
+    } else {
+      activityFooter = "Measured from session logs on this Mac. Activity from other devices is "
+        + "not included."
     }
 
     return self.pane(
@@ -365,15 +381,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       sections: [
         self.section(
           title: "Activity",
-          footer: "Measured from session logs on this Mac. Activity from other devices is not "
-            + "included.",
+          footer: activityFooter,
           rows: rows),
         self.section(
           title: "Daily tokens",
           footer: charts.isEmpty
             ? "No local activity has been recorded yet."
             : "One bar per day, newest on the right. A compressed square-root scale keeps "
-              + "ordinary days visible beside outliers. Each provider uses its own peak.",
+              + "ordinary days visible beside outliers. Each provider uses its own peak. "
+              + "Daily history unavailable means the provider supplied totals without a "
+              + "per-day breakdown.",
           rows: charts.isEmpty ? [SettingsLabel("—", size: 12, color: .tertiaryLabelColor)] : charts),
         self.section(
           title: "Estimated plan value",
@@ -799,8 +816,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   private func sourceLabels(_ provider: ProviderID) -> NSView {
     let state = self.store.states[provider]
     let quotaSource = state?.snapshot?.source ?? "not connected"
+    let quotaPrefix = state?.snapshot?.windows.isEmpty == true ? "Usage" : "Limits"
     let quota = SettingsLabel(
-      "Limits · provider reported · \(quotaSource)", size: 12, color: .secondaryLabelColor)
+      "\(quotaPrefix) · provider reported · \(quotaSource)",
+      size: 12, color: .secondaryLabelColor)
     let tokens = SettingsLabel(
       state?.localUsage == nil
         ? (state?.snapshot?.detailedUsageUnavailable == true
@@ -879,6 +898,22 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     peakLabel.widthAnchor.constraint(equalToConstant: 90).isActive = true
     peakLabel.alignment = .right
     let row = NSStackView(views: [name, chart, peakLabel])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 8
+    row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+    return row
+  }
+
+  private func chartUnavailableRow(provider: ProviderID, reason: String) -> NSView {
+    let name = SettingsLabel(provider.displayName, size: 12, color: .secondaryLabelColor)
+    name.widthAnchor.constraint(equalToConstant: 92).isActive = true
+    let message = SettingsLabel(reason, size: 11, color: .tertiaryLabelColor)
+    message.identifier = NSUserInterfaceItemIdentifier(
+      "insights-chart-unavailable-\(provider.rawValue)")
+    message.widthAnchor.constraint(
+      equalToConstant: SettingsLayout.contentWidth - 100).isActive = true
+    let row = NSStackView(views: [name, message])
     row.orientation = .horizontal
     row.alignment = .centerY
     row.spacing = 8
@@ -1370,7 +1405,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && keychainAccessIsHiddenUntilExpanded
       && expandedIDs.contains("settings-keychain-anthropic")
       && expandedIDs.contains("settings-keychain-cursor")
-      && expandedButtonTitles.contains("Allow access to my Anthropic usage")
+      && expandedButtonTitles.contains("Allow access to my Claude usage")
       && expandedButtonTitles.contains("Allow access to my Cursor usage")
       && expandedIDs.contains("subscription.anthropic")
       && expandedIDs.contains("renewal.anthropic")
@@ -1442,7 +1477,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let insightsSuccess =
       ProviderID.allCases.allSatisfy { insightIDs.contains("insight-\($0.rawValue)") }
       && insightIDs.contains("insights-total")
+      && insightIDs.contains("insights-chart-cursor")
       && insightLabels.contains { $0.contains("compressed square-root scale") }
+      && insightLabels.contains { $0.contains("Cursor uses provider-reported account totals") }
 
     self.pane = .privacy
     self.applyPane(animated: false)
@@ -1572,7 +1609,8 @@ private final class ThemePreview: NSView {
     ).fill()
 
     let labels: [(String, NSColor)] = [
-      ("Reserve", .systemGreen), ("On pace", .systemGreen), ("Deficit", .systemOrange),
+      ("Under pace", .systemGreen), ("On pace", .systemGreen),
+      ("May run out early", .systemOrange),
     ]
     var x = track.maxX + 20
     for (text, color) in labels {

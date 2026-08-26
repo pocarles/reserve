@@ -689,10 +689,10 @@ enum LifecycleSelfTest {
       "the Claude recovery action does not lead with its benefit")
     let copy = descendants.compactMap { $0 as? NSTextField }.map(\.stringValue)
     result.expect(
-      copy.contains("Anthropic is ready · allow usage access"),
+      copy.contains("Claude is ready · allow usage access"),
       "Claude access does not explain the benefit in plain language")
     result.expect(
-      copy.contains("Monthly cost") && copy.contains("Not set")
+      copy.contains("Subscription") && copy.contains("Not set")
         && !copy.contains("$20.00/mo") && !copy.contains("Anthropic Plan"),
       "an unknown provider plan is still presented as a detected $20 plan")
 
@@ -725,7 +725,7 @@ enum LifecycleSelfTest {
     let setupCopy = setupDescendants.compactMap { ($0 as? NSTextField)?.stringValue }
     result.expect(
       setupButton?.title == "Set up"
-        && setupCopy.contains("Set up Anthropic to show plan limits"),
+        && setupCopy.contains("Set up Claude to show plan limits"),
       "a missing provider helper still looks broken instead of offering setup")
     result.expect(
       ProviderID.allCases.allSatisfy {

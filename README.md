@@ -1,8 +1,8 @@
 # Reserve
 
-Reserve is a native macOS menu-bar app that shows how much subscription
-capacity remains in OpenAI Codex, Anthropic Claude, Grok, and Cursor, when each
-window resets, and whether the current pace is likely to last.
+Reserve is a native macOS menu-bar app that shows reported subscription
+capacity for OpenAI Codex, Anthropic Claude, Grok, and Cursor, along with
+authenticated Cursor account usage.
 
 It is deliberately small: no Reserve account, browser automation, WebView,
 cookie extraction, telemetry, crash reporting, cloud service, or third-party
@@ -114,10 +114,11 @@ time, progress, pace marker, and a short projection. Five-hour windows stay
 secondary to plan-level allowances. Grok's Build and Chat shares are shown as
 components of its shared weekly pool, not as extra quota.
 
-Cursor shows Cursor Models and Other Models as separate monthly allowances with
-the same reported billing reset. The glance view follows whichever pool is more
-constrained. Hobby, Pro, Pro Plus, and Ultra default to $0, $20, $60, and $200
-per month; Cursor's reported plan price and renewal date take precedence when
+Cursor shows its reported Cursor Models and Other Models percentages as whole
+numbers. It also shows provider-reported tokens for today, the current billing
+cycle, and the last 30 days. Reserve does not derive a percentage from token
+totals. Hobby, Pro, Pro Plus, and Ultra default to $0, $20, $60, and $200 per
+month; Cursor's reported plan price and renewal date take precedence when
 available. On-demand spending is shown literally as disabled, unlimited, or a
 dollar amount used against its configured cap.
 
@@ -126,12 +127,13 @@ OpenAI and Anthropic use the observed input/cache/output mix when available;
 Grok exposes an aggregate token count, so its comparison is approximate.
 Subscription prices remain user-editable.
 
-Cursor's account insights come from provider-reported usage events. Reserve
+Cursor's account insights come from provider-reported aggregate usage. Reserve
 labels their dollar total **Provider-reported usage value** rather than estimated
-API savings. It aggregates input, output, cache-read, and cache-write tokens by
-day and model without reading prompts or transcripts. If Cursor does not expose
-detailed events for an individual account, the plan allowances keep working and
-Reserve says **Detailed usage unavailable for this account.**
+API savings. It aggregates input, output, cache-read, and cache-write tokens and
+model totals without reading prompts or transcripts. It requests bounded daily
+history separately. If Cursor supplies totals without daily events, Reserve
+keeps the totals and says **Daily history unavailable** instead of inventing a
+chart.
 
 Service-health labels come from the providers' official status sources. The
 default notification stream reports state transitions such as deficit,

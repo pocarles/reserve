@@ -617,7 +617,7 @@ final class UsageStore {
     switch self.states[provider]?.snapshot?.planName?.lowercased() {
     case "hobby": return 0
     case "pro": return 20
-    case "pro plus": return 60
+    case "pro plus", "pro+": return 60
     case "ultra": return 200
     default: return nil
     }
@@ -837,7 +837,7 @@ final class UsageStore {
       provider: .cursor,
       snapshot: UsageSnapshot(
         provider: .cursor,
-        planName: "Pro Plus",
+        planName: "Pro+",
         windows: [
           UsageWindow(
             id: "cursor-models", label: "Cursor Models", usedPercent: usage.cursor,
@@ -1028,6 +1028,9 @@ final class UsageStore {
     let cached = await self.cache.load()
     for (provider, snapshot) in cached {
       self.states[provider]?.snapshot = snapshot
+      if provider == .cursor {
+        self.states[provider]?.localUsage = snapshot.accountUsage
+      }
     }
     self.changed()
     self.startScheduler()
@@ -1107,12 +1110,27 @@ final class UsageStore {
     let result = try? await self.localUsageScanner.scan(periodDays: 30, now: now)
     if let result {
       for provider in ProviderID.allCases {
-        self.states[provider]?.localUsage = result[provider]
+        let snapshot = self.states[provider]?.snapshot
+        self.states[provider]?.localUsage = Self.usageAfterLocalScan(
+          provider: provider,
+          snapshot: snapshot,
+          scanned: result[provider])
       }
     }
     self.lastLocalUsageScanAt = now
     self.isScanningLocalUsage = false
     if notify { self.changed() }
+  }
+
+  /// Cursor usage comes from its account API, not this Mac's session logs.
+  /// A local scan must not erase the account totals that the provider refresh
+  /// just fetched and saved.
+  static func usageAfterLocalScan(
+    provider: ProviderID,
+    snapshot: UsageSnapshot?,
+    scanned: LocalUsageSummary?
+  ) -> LocalUsageSummary? {
+    provider == .cursor ? snapshot?.accountUsage : scanned
   }
 
   private func beginRefresh(_ provider: ProviderID) -> Bool {

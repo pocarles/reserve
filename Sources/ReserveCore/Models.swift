@@ -11,7 +11,7 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   public var displayName: String {
     switch self {
     case .openAI: "OpenAI"
-    case .anthropic: "Anthropic"
+    case .anthropic: "Claude"
     case .grok: "Grok"
     case .cursor: "Cursor"
     }

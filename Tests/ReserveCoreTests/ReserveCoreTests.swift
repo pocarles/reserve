@@ -98,7 +98,7 @@ struct ReserveCoreTests {
       #"{"billingCycleStart":"1787616000000","billingCycleEnd":"1790294400000","planUsage":{"autoSpend":1800,"autoLimit":4000,"apiPercentUsed":72.5}}"#.utf8)
     let response = try JSONDecoder().decode(CursorCurrentPeriodUsageResponse.self, from: data)
     let reset = Date(timeIntervalSince1970: 1_790_294_400)
-    let windows = try CursorProvider.windows(
+    let windows = try CursorProvider.planWindows(
       usage: response.planUsage, resetsAt: reset, windowMinutes: 44_640)
 
     XCTAssertEqual(windows.map(\.id), ["cursor-models", "other-models"])
@@ -111,11 +111,11 @@ struct ReserveCoreTests {
 
   @Test
   func testCursorPlanNamesPricesAndMalformedValues() throws {
-    XCTAssertEqual(CursorPlanFormatter.plan(from: "pro_plus"), "Pro Plus")
+    XCTAssertEqual(CursorPlanFormatter.plan(from: "pro_plus"), "Pro+")
     XCTAssertEqual(CursorPlanFormatter.plan(from: "ultra"), "Ultra")
     XCTAssertEqual(CursorPlanFormatter.plan(from: "free"), "Hobby")
     XCTAssertEqual(
-      CursorPlanFormatter.plan(from: "pro", monthlyPriceMinorUnits: 6_000), "Pro Plus")
+      CursorPlanFormatter.plan(from: "pro", monthlyPriceMinorUnits: 6_000), "Pro+")
     XCTAssertEqual(CursorProvider.monthlyPriceMinorUnits("$60 / month"), 6_000)
     XCTAssertEqual(CursorProvider.monthlyPriceMinorUnits("200.00"), 20_000)
     XCTAssertNil(CursorProvider.monthlyPriceMinorUnits("custom"))
@@ -223,13 +223,23 @@ struct ReserveCoreTests {
         case "GetCurrentPeriodUsage":
           payload = #"{"billingCycleStart":"1787616000000","billingCycleEnd":"1790294400000","planUsage":{"autoSpend":1800,"autoLimit":4000,"apiPercentUsed":72.5},"spendLimitUsage":{"individualLimit":5000,"individualUsed":1250,"limitType":"individual"},"enabled":true}"#
         case "GetPlanInfo":
-          payload = #"{"planInfo":{"planName":"pro_plus","price":"$60 / month","billingCycleEnd":"1790294400000"}}"#
+          payload = #"{"planInfo":{"planName":"pro_plus","includedAmountCents":6000,"price":"$60 / month","billingCycleEnd":"1790294400000"}}"#
         case "GetHardLimit":
           payload = #"{"hardLimit":50}"#
         case "GetMe":
           payload = #"{"userId":7}"#
         case "GetTeams":
-          payload = #"{"teams":[]}"#
+          payload = "{}"
+        case "GetAggregatedUsageEvents":
+          let body = try JSONSerialization.jsonObject(
+            with: request.httpBody ?? Data()) as? [String: Any]
+          XCTAssertNil(body?["teamId"])
+          payload = #"{"aggregations":[{"modelIntent":"claude-opus","inputTokens":100,"outputTokens":20,"totalCents":600}],"totalInputTokens":100,"totalOutputTokens":20,"totalCostCents":600}"#
+        case "GetFilteredUsageEvents":
+          let body = try JSONSerialization.jsonObject(
+            with: request.httpBody ?? Data()) as? [String: Any]
+          XCTAssertNil(body?["teamId"])
+          payload = #"{"totalUsageEventsCount":0,"usageEventsDisplay":[]}"#
         default:
           throw TestFailure(description: "unexpected Cursor RPC")
         }
@@ -241,10 +251,13 @@ struct ReserveCoreTests {
       })
     let snapshot = try await scheduled.fetch()
     XCTAssertEqual(snapshot.provider, .cursor)
-    XCTAssertEqual(snapshot.planName, "Pro Plus")
+    XCTAssertEqual(snapshot.planName, "Pro+")
     XCTAssertEqual(snapshot.monthlyPriceMinorUnits, 6_000)
-    XCTAssertEqual(snapshot.windows.count, 2)
-    XCTAssertTrue(snapshot.detailedUsageUnavailable)
+    XCTAssertEqual(snapshot.windows.map(\.id), ["cursor-models", "other-models"])
+    XCTAssertEqual(snapshot.windows.map(\.usedPercent), [45, 72.5])
+    XCTAssertEqual(snapshot.accountUsage?.totalTokens, 120)
+    XCTAssertEqual(snapshot.accountUsage?.dailyTokens.count, 30)
+    XCTAssertFalse(snapshot.detailedUsageUnavailable)
   }
 
   @Test
@@ -375,7 +388,7 @@ struct ReserveCoreTests {
   }
 
   @Test
-  func testCursorMissingAllowanceFieldsUseLimitsOnlyFailure() async throws {
+  func testCursorMissingAllowanceFieldsDoNotInventCapacity() async throws {
     let provider = CursorProvider(
       environment: [:], allowKeychainRead: true,
       statusRunner: { _, _, _ in #"{"isAuthenticated":true,"hasAccessToken":true}"# },
@@ -386,12 +399,10 @@ struct ReserveCoreTests {
           Data(payload.utf8),
           HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
       })
-    do {
-      _ = try await provider.fetch()
-      XCTFail("Cursor accepted a response without either usage pool")
-    } catch UsageProviderError.unavailable {
-      // Expected. Missing optional fields do not crash or invent an allowance.
-    }
+    let snapshot = try await provider.fetch()
+    XCTAssertTrue(snapshot.windows.isEmpty)
+    XCTAssertNil(snapshot.accountUsage)
+    XCTAssertTrue(snapshot.detailedUsageUnavailable)
   }
 
   @Test
@@ -460,13 +471,16 @@ struct ReserveCoreTests {
   func testCursorUsageEventsDeduplicateAndBuildDailyTotals() async throws {
     let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
     let client = CursorRPCClient(accessToken: "test") { request in
+      let body = try JSONSerialization.jsonObject(
+        with: request.httpBody ?? Data()) as? [String: Any]
+      XCTAssertNil(body?["teamId"])
       let event = #"{"timestamp":"\#(timestamp)","model":"claude-4","conversationId":"c1","tokenUsage":{"inputTokens":100,"outputTokens":20,"cacheWriteTokens":5,"cacheReadTokens":50,"totalCents":1.25}}"#
       return (
         Data(#"{"totalUsageEventsCount":2,"usageEventsDisplay":[\#(event)]}"#.utf8),
         HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
     }
     let events = try await CursorProvider.events(
-      client: client, teamID: 1, userID: 2,
+      client: client, teamID: nil, userID: 2,
       start: Date().addingTimeInterval(-86_400), end: Date().addingTimeInterval(1))
     XCTAssertEqual(events.count, 1)
     let series = CursorUsageAggregator.dailySeries(

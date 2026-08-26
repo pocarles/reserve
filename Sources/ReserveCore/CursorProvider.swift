@@ -117,19 +117,16 @@ public struct CursorProvider: UsageProvider {
     let billingStart = try Self.date(milliseconds: current.billingCycleStart)
     let billingEnd = try Self.date(
       milliseconds: plan.planInfo?.billingCycleEnd ?? current.billingCycleEnd)
-    let windowMinutes = Self.windowMinutes(start: billingStart, end: billingEnd)
-    let windows = try Self.windows(
-      usage: current.planUsage, resetsAt: billingEnd, windowMinutes: windowMinutes)
-    guard !windows.isEmpty else {
-      throw UsageProviderError.unavailable("Cursor did not return individual plan usage pools.")
-    }
-
+    let windows = try Self.planWindows(
+      usage: current.planUsage,
+      resetsAt: billingEnd,
+      windowMinutes: Self.windowMinutes(start: billingStart, end: billingEnd))
     let accountUsage: LocalUsageSummary?
     let detailedUsageUnavailable: Bool
     do {
       accountUsage = try await Self.fetchAccountUsage(
         client: client, billingStart: billingStart, now: Date())
-      detailedUsageUnavailable = accountUsage == nil
+      detailedUsageUnavailable = false
     } catch let error as CursorDetailedUsageUnavailable {
       _ = error
       accountUsage = nil
@@ -188,7 +185,7 @@ public struct CursorProvider: UsageProvider {
     }
   }
 
-  static func windows(
+  static func planWindows(
     usage: CursorPlanUsage?,
     resetsAt: Date?,
     windowMinutes: Int?
@@ -314,21 +311,18 @@ public struct CursorProvider: UsageProvider {
     client: CursorRPCClient,
     billingStart: Date?,
     now: Date
-  ) async throws -> LocalUsageSummary? {
+  ) async throws -> LocalUsageSummary {
     let me = try await client.call(.me, body: Data("{}".utf8), as: CursorMeResponse.self)
     guard me.userID > 0 else {
       throw CursorDetailedUsageUnavailable()
     }
-    let teamID: Int
+    let teamID: Int?
     if let reportedTeamID = me.teamID, reportedTeamID > 0 {
       teamID = reportedTeamID
     } else {
       let teams = try await client.call(
         .teams, body: Data(#"{"activeOnly":true}"#.utf8), as: CursorTeamsResponse.self)
-      guard let individualTeamID = teams.individualTeamID else {
-        throw CursorDetailedUsageUnavailable()
-      }
-      teamID = individualTeamID
+      teamID = teams.individualTeamID
     }
     let calendar = Calendar.current
     let start30 = calendar.date(byAdding: .day, value: -29, to: calendar.startOfDay(for: now)) ?? now
@@ -342,12 +336,10 @@ public struct CursorProvider: UsageProvider {
       client: client, teamID: teamID, userID: me.userID, start: cycleStart, end: end)
     async let today = Self.aggregate(
       client: client, teamID: teamID, userID: me.userID, start: startToday, end: end)
-    async let events = Self.events(
-      client: client, teamID: teamID, userID: me.userID, start: start30, end: end)
-
-    let (thirtyValue, cycleValue, todayValue, eventValues) = try await (
-      thirty, cycle, today, events)
-    let daily = CursorUsageAggregator.dailySeries(events: eventValues, start: start30, now: now)
+    async let daily = Self.dailyUsage(
+      client: client, teamID: teamID, userID: me.userID, start: start30, now: now)
+    let (thirtyValue, cycleValue, todayValue, dailyValue) = try await (
+      thirty, cycle, today, daily)
     return LocalUsageSummary(
       provider: .cursor,
       periodDays: 30,
@@ -368,28 +360,49 @@ public struct CursorProvider: UsageProvider {
       modelCosts: thirtyValue.aggregations.map(\.modelUsageCost).sorted {
         $0.costUSD > $1.costUSD
       },
-      dailyTokens: daily)
+      dailyTokens: dailyValue)
+  }
+
+  /// Daily history is useful but not required for truthful plan totals. Some
+  /// individual accounts do not expose the event endpoint, so a failure here
+  /// leaves the aggregate totals intact and the interface says history is unavailable.
+  private static func dailyUsage(
+    client: CursorRPCClient,
+    teamID: Int?,
+    userID: Int,
+    start: Date,
+    now: Date
+  ) async -> [DailyUsage] {
+    do {
+      let eventValues = try await Self.events(
+        client: client, teamID: teamID, userID: userID,
+        start: start, end: now.addingTimeInterval(1))
+      return CursorUsageAggregator.dailySeries(events: eventValues, start: start, now: now)
+    } catch {
+      return []
+    }
   }
 
   private static func aggregate(
     client: CursorRPCClient,
-    teamID: Int,
+    teamID: Int?,
     userID: Int,
     start: Date,
     end: Date
   ) async throws -> CursorAggregatedUsageResponse {
-    let body = try JSONSerialization.data(withJSONObject: [
-      "teamId": teamID,
+    var parameters: [String: Any] = [
       "userId": userID,
       "startDate": String(Int64(start.timeIntervalSince1970 * 1_000)),
       "endDate": String(Int64(end.timeIntervalSince1970 * 1_000)),
-    ])
+    ]
+    if let teamID { parameters["teamId"] = teamID }
+    let body = try JSONSerialization.data(withJSONObject: parameters)
     return try await client.call(.aggregatedUsageEvents, body: body)
   }
 
   static func events(
     client: CursorRPCClient,
-    teamID: Int,
+    teamID: Int?,
     userID: Int,
     start: Date,
     end: Date
@@ -399,14 +412,15 @@ public struct CursorProvider: UsageProvider {
     var rawCount = 0
     var expectedCount: Int?
     for page in 1...Self.maximumPaginationCount {
-      let body = try JSONSerialization.data(withJSONObject: [
-        "teamId": teamID,
+      var parameters: [String: Any] = [
         "userId": userID,
         "startDate": String(Int64(start.timeIntervalSince1970 * 1_000)),
         "endDate": String(Int64(end.timeIntervalSince1970 * 1_000)),
         "page": page,
         "pageSize": Self.eventPageSize,
-      ])
+      ]
+      if let teamID { parameters["teamId"] = teamID }
+      let body = try JSONSerialization.data(withJSONObject: parameters)
       let response: CursorFilteredUsageResponse = try await client.call(
         .filteredUsageEvents, body: body)
       guard let reportedCount = response.totalUsageEventsCount,
@@ -631,12 +645,12 @@ enum CursorPlanFormatter {
       .replacingOccurrences(of: "_", with: "")
       .replacingOccurrences(of: "-", with: "")
       .replacingOccurrences(of: " ", with: "")
-    if normalized.contains("proplus") { return "Pro Plus" }
+    if normalized.contains("proplus") { return "Pro+" }
     if normalized.contains("ultra") { return "Ultra" }
     if normalized.contains("hobby") || normalized.contains("free") { return "Hobby" }
     if normalized.contains("pro") {
       switch monthlyPriceMinorUnits {
-      case 6_000: return "Pro Plus"
+      case 6_000: return "Pro+"
       case 20_000: return "Ultra"
       default: return "Pro"
       }
@@ -660,6 +674,13 @@ struct CursorMeResponse: Decodable, Sendable {
 
 struct CursorTeamsResponse: Decodable, Sendable {
   let teams: [CursorTeam]
+
+  enum CodingKeys: String, CodingKey { case teams }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.teams = try container.decodeIfPresent([CursorTeam].self, forKey: .teams) ?? []
+  }
 
   var individualTeamID: Int? {
     let eligible = self.teams.filter(\.isIndividualCandidate)
