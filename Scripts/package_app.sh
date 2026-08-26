@@ -185,7 +185,7 @@ smoke_test_packaged_app() {
   local stderr_log="$temp_root/package-smoke.stderr"
   local app_pid
 
-  "$app/Contents/MacOS/Reserve" -SUEnableAutomaticChecks NO \
+  "$app/Contents/MacOS/Reserve" --package-smoke-test -SUEnableAutomaticChecks NO \
     >"$stdout_log" 2>"$stderr_log" &
   app_pid=$!
   for _ in {1..20}; do

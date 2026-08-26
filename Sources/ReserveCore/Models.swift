@@ -354,6 +354,7 @@ public enum UsageProviderError: LocalizedError, Sendable, Equatable {
   case credentialsNotFound(String)
   case keychainConsentRequired(ProviderID)
   case unauthorized(String)
+  case updateRequired(String)
   case rateLimited(retryAt: Date?)
   case timedOut(String)
   case invalidResponse(String)
@@ -378,6 +379,7 @@ public enum UsageProviderError: LocalizedError, Sendable, Equatable {
     case .keychainConsentRequired(let provider):
       "\(provider.displayName) is ready. Choose Allow access to add your plan limits."
     case .unauthorized(let message): message
+    case .updateRequired(let message): message
     case .rateLimited(let retryAt):
       if let retryAt {
         "Rate limited until \(retryAt.formatted(date: .omitted, time: .shortened))."

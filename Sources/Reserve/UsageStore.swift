@@ -16,6 +16,8 @@ struct ProviderViewState: Identifiable {
   var serviceStatus: ProviderServiceStatus?
   var requiresConnection = false
   var requiresKeychainAccess = false
+  var requiresInstallation = false
+  var requiresUpdate = false
 }
 
 enum PreviewScenario: String, CaseIterable {
@@ -477,16 +479,11 @@ final class UsageStore {
     let generation = (self.loginGenerations[provider] ?? 0) + 1
     self.loginGenerations[provider] = generation
     guard let executable = BinaryLocator.find(configuration.executable) else {
-      if provider == .anthropic {
-        let openedClaude = URL(string: "claude://code/new").map(NSWorkspace.shared.open) ?? false
-        if !openedClaude, let download = URL(string: "https://claude.com/download") {
-          NSWorkspace.shared.open(download)
-        }
-        self.states[provider]?.error =
-          "Finish the one-time setup in Claude, then return to Reserve."
-      } else {
-        self.states[provider]?.error = "\(configuration.displayName) is not installed."
-      }
+      self.states[provider]?.error =
+        "\(ProviderHelperCatalog.definition(for: provider).displayName) needs setup."
+      self.states[provider]?.requiresInstallation = true
+      self.states[provider]?.requiresUpdate = false
+      self.states[provider]?.requiresConnection = false
       self.changed()
       return
     }
@@ -554,6 +551,9 @@ final class UsageStore {
       }
       self.states[provider]?.isConnecting = true
       self.states[provider]?.error = nil
+      self.states[provider]?.requiresInstallation = false
+      self.states[provider]?.requiresUpdate = false
+      self.states[provider]?.requiresConnection = false
       self.changed()
       self.loginTimeoutTasks[provider]?.cancel()
       self.loginTimeoutTasks[provider] = Task { [weak self, weak process] in
@@ -944,6 +944,8 @@ final class UsageStore {
       if !self.refresh(provider, queueIfBusy: true) { self.changed() }
     } else {
       self.states[provider]?.requiresConnection = true
+      self.states[provider]?.requiresInstallation = false
+      self.states[provider]?.requiresUpdate = false
       if self.states[provider]?.error == nil {
         self.states[provider]?.error =
           "\(provider.displayName) sign-in was not completed. Use Sign in to retry."
@@ -1181,6 +1183,8 @@ final class UsageStore {
       self.states[provider]?.error = nil
       self.states[provider]?.requiresConnection = false
       self.states[provider]?.requiresKeychainAccess = false
+      self.states[provider]?.requiresInstallation = false
+      self.states[provider]?.requiresUpdate = false
       if provider == .cursor {
         self.states[provider]?.localUsage = snapshot.accountUsage
       }
@@ -1197,6 +1201,16 @@ final class UsageStore {
       self.states[provider]?.error = String(error.localizedDescription.prefix(500))
       self.states[provider]?.requiresConnection =
         (error as? UsageProviderError)?.requiresConnection == true
+      if case .executableNotFound = error as? UsageProviderError {
+        self.states[provider]?.requiresInstallation = true
+      } else {
+        self.states[provider]?.requiresInstallation = false
+      }
+      if case .updateRequired = error as? UsageProviderError {
+        self.states[provider]?.requiresUpdate = true
+      } else {
+        self.states[provider]?.requiresUpdate = false
+      }
       let requiresKeychainAccess: Bool
       if case .keychainConsentRequired(let consentProvider) = error as? UsageProviderError {
         requiresKeychainAccess = consentProvider == provider

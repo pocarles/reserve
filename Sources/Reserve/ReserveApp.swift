@@ -9,7 +9,7 @@ enum ReserveApp {
     _ = signal(SIGPIPE, SIG_IGN)
     let instanceLock: SingleInstanceLock
     do {
-      guard let acquired = try SingleInstanceLock.acquire(at: SingleInstanceLock.reserveLockURL())
+      guard let acquired = try SingleInstanceLock.acquire(at: self.instanceLockURL())
       else {
         self.activateExistingInstance()
         return
@@ -25,6 +25,28 @@ enum ReserveApp {
     withExtendedLifetime((delegate, instanceLock)) {
       application.run()
     }
+  }
+
+  private static func instanceLockURL() throws -> URL {
+    if CommandLine.arguments.contains("--package-smoke-test") {
+      return FileManager.default.temporaryDirectory.appendingPathComponent(
+        "Reserve.package-smoke-\(ProcessInfo.processInfo.processIdentifier).lock")
+    }
+    #if RESERVE_DEV_AUTOMATION
+      let automatedArguments = [
+        "--self-test-ui", "--self-test-lifecycle", "--stress-ui",
+        "--render-dashboard", "--render-settings", "--render-appearance",
+        "--render-about", "--render-alerts", "--render-insights",
+        "--render-providers", "--render-menu-bar", "--render-provider-setup",
+        "--capture-lifecycle",
+        "--verify-notifications", "--show-claude-prompt", "--show-cursor-prompt",
+      ]
+      if CommandLine.arguments.contains(where: automatedArguments.contains) {
+        return FileManager.default.temporaryDirectory.appendingPathComponent(
+          "Reserve.dev-automation-\(ProcessInfo.processInfo.processIdentifier).lock")
+      }
+    #endif
+    return try SingleInstanceLock.reserveLockURL()
   }
 
   private static func activateExistingInstance() {
@@ -74,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var store: UsageStore?
   private var statusController: StatusItemController?
   private var settingsController: SettingsWindowController?
+  private var providerSetupCoordinator: ProviderSetupCoordinator?
   private var updater: ReserveUpdater?
 
   private static let uiSelfTestDefaultsSuite = "Reserve.UISelfTest"
@@ -90,6 +113,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let insightsRenderIndex = CommandLine.arguments.firstIndex(of: "--render-insights")
     let providersRenderIndex = CommandLine.arguments.firstIndex(of: "--render-providers")
     let menuBarRenderIndex = CommandLine.arguments.firstIndex(of: "--render-menu-bar")
+    let providerSetupRenderIndex = CommandLine.arguments.firstIndex(
+      of: "--render-provider-setup")
     let isUIStressTest = CommandLine.arguments.contains("--stress-ui")
     let isLifecycleSelfTest = CommandLine.arguments.contains("--self-test-lifecycle")
     let isClaudePromptPreview = CommandLine.arguments.contains("--show-claude-prompt")
@@ -99,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let isAutomatedRun = isUISelfTest || renderIndex != nil || settingsRenderIndex != nil
       || appearanceRenderIndex != nil || aboutRenderIndex != nil || alertsRenderIndex != nil
       || insightsRenderIndex != nil || providersRenderIndex != nil || menuBarRenderIndex != nil
+      || providerSetupRenderIndex != nil
       || isUIStressTest || isLifecycleSelfTest || lifecycleCaptureIndex != nil
       || isNotificationVerification || isClaudePromptPreview || isCursorPromptPreview
     let store: UsageStore
@@ -150,6 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let store = UsageStore()
 #endif
     self.store = store
+    self.providerSetupCoordinator = ProviderSetupCoordinator(store: store)
     if Bundle.main.bundleURL.pathExtension == "app", !isAutomatedRun {
       self.updater = ReserveUpdater()
     }
@@ -163,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       store: store,
       openSettings: { [weak self] in self?.showSettings() },
       openInsights: { [weak self] in self?.showInsights() },
+      setupProvider: { [weak self] provider in self?.setupProvider(provider) },
       isSettingsWindow: { [weak self] window in
         guard let window else { return false }
         return self?.settingsController?.window === window
@@ -200,6 +228,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       CommandLine.arguments.indices.contains(menuBarRenderIndex + 1)
     {
       self.renderMenuBar(path: CommandLine.arguments[menuBarRenderIndex + 1])
+    } else if let providerSetupRenderIndex,
+      CommandLine.arguments.indices.contains(providerSetupRenderIndex + 1)
+    {
+      self.renderProviderSetup(path: CommandLine.arguments[providerSetupRenderIndex + 1])
     } else if isNotificationVerification {
       self.verifyNotifications()
     } else if isUIStressTest {
@@ -253,6 +285,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       Self.finishUISelfTest(success: true, details: "menu bar rendered to \(path)")
     } catch {
       Self.finishUISelfTest(success: false, details: "menu bar render failed: \(error)")
+    }
+  }
+
+  private func renderProviderSetup(path: String) {
+    let provider = CommandLine.arguments.firstIndex(of: "--provider").flatMap { index in
+      CommandLine.arguments.indices.contains(index + 1)
+        ? ProviderID(rawValue: CommandLine.arguments[index + 1]) : nil
+    } ?? .cursor
+    let action: ProviderSetupAction =
+      CommandLine.arguments.firstIndex(of: "--setup-action").flatMap { index in
+        CommandLine.arguments.indices.contains(index + 1)
+          ? CommandLine.arguments[index + 1] : nil
+      } == "update" ? .update : .install
+    do {
+      let prompt = ProviderHelperSetupPrompt(provider: provider, action: action)
+      try prompt.render(to: URL(fileURLWithPath: path))
+      Self.finishUISelfTest(
+        success: true, details: "provider setup rendered to \(path)")
+    } catch {
+      Self.finishUISelfTest(success: false, details: "provider setup render failed: \(error)")
     }
   }
 
@@ -852,10 +904,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     controller?.showInsights()
   }
 
+  private func setupProvider(_ provider: ProviderID) {
+    self.providerSetupCoordinator?.start(provider)
+  }
+
   private func settingsControllerForUse() -> SettingsWindowController? {
     if let settingsController { return settingsController }
     guard let store else { return nil }
-    let controller = SettingsWindowController(store: store, updater: self.updater)
+    let controller = SettingsWindowController(
+      store: store,
+      updater: self.updater,
+      setupProvider: { [weak self] provider in self?.setupProvider(provider) })
     self.settingsController = controller
     return controller
   }

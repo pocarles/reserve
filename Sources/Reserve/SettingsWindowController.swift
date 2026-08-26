@@ -48,6 +48,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   private let store: UsageStore
   private let updater: ReserveUpdater?
+  private let setupProvider: (ProviderID) -> Void
   private(set) var pane = Pane.general
   private weak var updateStatusLabel: NSTextField?
   private weak var updateButton: NSButton?
@@ -61,9 +62,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   private var isApplyingPane = false
   private var restoreAfterUpdatePresentation = false
 
-  init(store: UsageStore, updater: ReserveUpdater?) {
+  init(
+    store: UsageStore,
+    updater: ReserveUpdater?,
+    setupProvider: @escaping (ProviderID) -> Void
+  ) {
     self.store = store
     self.updater = updater
+    self.setupProvider = setupProvider
     let window = NSWindow(
       contentRect: NSRect(origin: .zero, size: SettingsLayout.defaultSize),
       styleMask: [.titled, .closable, .resizable],
@@ -712,6 +718,18 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
       rows.append(self.formRow("\(provider.displayName):", checkbox, labelWidth: 92))
     }
+    if let setupAction = AllowanceBuilder.setupAction(
+      for: self.store.states[provider] ?? ProviderViewState(provider: provider))
+    {
+      let setup = NSButton(
+        title: setupAction.buttonTitle,
+        target: self,
+        action: #selector(self.setupProviderClicked(_:)))
+      setup.identifier = NSUserInterfaceItemIdentifier("provider-setup-\(provider.rawValue)")
+      setup.bezelStyle = .rounded
+      setup.toolTip = setupAction.toolTip(for: provider)
+      rows.append(self.formRow("", setup, labelWidth: 92))
+    }
     let refresh = NSButton(
       title: "Refresh Now", target: self, action: #selector(self.refreshProvider(_:)))
     refresh.identifier = NSUserInterfaceItemIdentifier("provider-refresh-\(provider.rawValue)")
@@ -996,6 +1014,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.store.refresh(provider)
   }
 
+  @objc private func setupProviderClicked(_ sender: NSButton) {
+    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(
+      of: "provider-setup-", with: "")
+    guard let provider = ProviderID(rawValue: raw) else { return }
+    self.setupProvider(provider)
+  }
+
   @objc private func keychainChanged(_ sender: NSButton) {
     let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(
       of: "settings-keychain-", with: "")
@@ -1205,10 +1230,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     if toolDetected {
       return ("Detected, not signed in", .systemOrange)
     }
-    if provider == .anthropic {
-      return ("Claude setup needed", .systemOrange)
-    }
-    return ("Tool not found", .systemRed)
+    return ("Setup needed", .systemOrange)
   }
 
   private static func descendants(of view: NSView) -> [NSView] {
@@ -1317,7 +1339,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && Self.providerStatus(
         provider: .anthropic, hasSnapshot: false, hasError: false, toolDetected: false
       ).text
-        == "Claude setup needed"
+        == "Setup needed"
     let keychainAccessIsHiddenUntilExpanded =
       !providerIDs.contains("settings-keychain-anthropic")
       && !providerIDs.contains("settings-keychain-cursor")

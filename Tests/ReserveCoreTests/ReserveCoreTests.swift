@@ -44,6 +44,46 @@ private func cleanTestDefaults(suiteName: String) {
 @Suite
 struct ReserveCoreTests {
   @Test
+  func testProviderHelperCatalogUsesOnlyFixedOfficialHTTPSInstallers() throws {
+    let definitions = ProviderID.allCases.map(ProviderHelperCatalog.definition)
+    XCTAssertEqual(definitions.map(\.provider), ProviderID.allCases)
+    XCTAssertEqual(
+      Set(definitions.compactMap(\.installerURL.host)),
+      Set(["chatgpt.com", "claude.ai", "x.ai", "cursor.com"]))
+    XCTAssertTrue(definitions.allSatisfy { definition in
+      definition.installerURL.scheme == "https"
+        && !definition.executable.isEmpty
+    })
+    for provider in ProviderID.allCases {
+      XCTAssertEqual(
+        ProviderHelperCatalog.definition(for: provider).updateArguments,
+        ["update"])
+    }
+
+    try ProviderHelperInstaller.validateInstallerFormat(
+      Data("#!/bin/bash\nset -e\necho setup\n".utf8))
+    for invalid in [
+      Data(),
+      Data("<html>not an installer</html>".utf8),
+      Data([0x23, 0x21, 0x00, 0x62, 0x61, 0x73, 0x68]),
+    ] {
+      do {
+        try ProviderHelperInstaller.validateInstallerFormat(invalid)
+        XCTFail("an invalid provider installer was accepted")
+      } catch is ProviderHelperInstallerError {
+        // Expected.
+      }
+    }
+  }
+
+  @Test
+  func testProviderUpdateFailureKeepsUpdateRecoveryDistinctFromSignIn() {
+    let error = UsageProviderError.updateRequired("Grok needs an update.")
+    XCTAssertEqual(error.localizedDescription, "Grok needs an update.")
+    XCTAssertFalse(error.requiresConnection)
+  }
+
+  @Test
   func testOpenAIUsesApprovalFlagSupportedByCurrentCodexHelpers() {
     XCTAssertEqual(
       OpenAIProvider.appServerArguments,
