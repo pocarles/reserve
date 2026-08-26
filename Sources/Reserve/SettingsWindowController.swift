@@ -7,7 +7,9 @@ import ReserveCore
 /// titles, no introductory copy, no themed canvas — the toolbar already says
 /// where you are.
 @MainActor
-final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, NSToolbarDelegate {
+final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, NSToolbarDelegate,
+  NSWindowDelegate
+{
   enum Pane: String, CaseIterable {
     case general
     case providers
@@ -82,6 +84,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     window.hidesOnDeactivate = false
     window.center()
     super.init(window: window)
+    window.delegate = self
 
     let toolbar = NSToolbar(identifier: "settings-toolbar")
     toolbar.delegate = self
@@ -124,6 +127,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     super.showWindow(sender)
     self.window?.makeKeyAndOrderFront(nil)
     self.window?.orderFrontRegardless()
+  }
+
+  func windowWillClose(_ notification: Notification) {
+    guard notification.object as? NSWindow === self.window else { return }
+    // A closed Settings window can hold every Insights chart and provider row
+    // for the rest of the app session. Release that hidden control tree; the
+    // next show rebuilds the current pane through the existing lazy path.
+    self.renewalStatusLabels.removeAll()
+    self.window?.contentView = nil
   }
 
   func show(_ pane: Pane) {
@@ -1517,14 +1529,20 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.pane = originalPane
     self.applyPane(animated: false)
 
+    window.close()
+    let closeReleasesHiddenPane = window.contentView == nil
+    self.showWindow(nil)
+    let reopenRebuildsPane = window.contentView != nil
+    window.orderOut(nil)
+
     let success =
       isNative && usesMenuBarWindowLevel && allPanesFit && allPanesReadable && generalSuccess
       && providersSuccess && notificationsSuccess && appearanceSuccess && insightsSuccess
-      && privacySuccess && aboutSuccess
+      && privacySuccess && aboutSuccess && closeReleasesHiddenPane && reopenRebuildsPane
     let details =
       success
       ? "settings is a native toolbar window with \(Pane.allCases.count) resizable panes, one General menu-bar model, adaptive full-surface themes with fixed quota semantics, deficit transition alerts, provider detail behind disclosure, and an About pane carrying identity, updates and links"
-      : "settings native=\(isNative), floating=\(usesMenuBarWindowLevel), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess), about=\(aboutSuccess)"
+      : "settings native=\(isNative), floating=\(usesMenuBarWindowLevel), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess), about=\(aboutSuccess), closeReleases=\(closeReleasesHiddenPane), reopenRebuilds=\(reopenRebuildsPane)"
     return (success, details)
   }
 
