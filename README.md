@@ -175,8 +175,12 @@ retained. Reserve never scans Cursor transcripts or prompt text. It may read
 `~/.claude/.credentials.json` and
 `~/.grok/auth.json` when present. Claude Code can instead keep its sign-in in
 Keychain; Reserve reads it only after the user chooses **Allow access**, through
-Security.framework, and retains it in memory only. A current protected sign-in
-takes precedence over legacy credential files left behind by Claude Code.
+the signed macOS `security` tool, and retains it in memory only. Reserve starts
+that tool directly, captures bounded output through a private pipe, and never
+prints or saves the credential. This avoids repeated approval prompts because
+Claude Code restores its Keychain access list after each browser sign-in. A
+current protected sign-in takes precedence over legacy credential files left
+behind by Claude Code.
 
 For Cursor, Reserve first runs the official
 `cursor-agent status --format json` command with strict time and output limits
@@ -236,8 +240,9 @@ own update command and checks the limits again.
 
 **Claude is connected in the CLI but not Reserve.** If Claude Code stores its
 credential with macOS, choose **Allow access** on the Claude card. Reserve
-explains the one-time approval before macOS asks. You can turn it off later
-under Settings > Providers.
+explains the access before reading the credential. You can turn it off later
+under Settings > Providers. Claude sign-ins do not require another macOS
+approval.
 
 **Cursor is signed in but not visible.** Enable Cursor under Settings >
 Providers. Choose **Allow access** to reuse the existing Cursor Agent sign-in,

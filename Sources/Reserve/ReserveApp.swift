@@ -83,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   static let claudeSetupReassurance = "Your sign-in stays protected by macOS"
   static let claudeSetupPrivacy = "Reserve never sees your password or saves your sign-in."
   static let claudeSetupFootnote =
-    "macOS may ask once. Choose Always Allow to keep future checks automatic."
+    "You can turn this access off at any time in Settings > Providers."
 
   static func confirmClaudeLimitAccess() -> Bool {
     self.confirmLimitAccess(for: .anthropic)

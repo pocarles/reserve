@@ -241,15 +241,13 @@ enum ClaudeCredentialLoader {
   static func load(
     environment: [String: String],
     allowKeychainRead: Bool,
-    allowKeychainInteraction: Bool = false
+    allowKeychainInteraction _: Bool = false
   ) async throws -> ClaudeCredentials {
     #if canImport(Security)
       var keychainError: Error?
       if allowKeychainRead {
         do {
-          if let credentials = try await self.keychainCredentials(
-            allowInteraction: allowKeychainInteraction)
-          {
+          if let credentials = try await self.keychainCredentials() {
             // Claude Code writes a completed browser sign-in to Keychain. Prefer
             // it over legacy credential files that may remain after reauthenticating.
             return credentials
@@ -328,41 +326,35 @@ enum ClaudeCredentialLoader {
       return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
     }
 
-    /// Reads the secret through Security.framework rather than by shelling out
-    /// to `/usr/bin/security -w`.
-    ///
-    /// The old path spawned a child process that printed another application's
-    /// OAuth token on its stdout on every refresh, and attributed the access to
-    /// `security` rather than to Reserve. `SecItemCopyMatching` keeps the secret
-    /// in this process's memory and lets macOS attribute the access honestly.
-    private static func keychainCredentials(allowInteraction: Bool) async throws
-      -> ClaudeCredentials?
-    {
-      let context = LAContext()
-      context.interactionNotAllowed = !allowInteraction
-      if allowInteraction {
-        context.localizedReason = "Show your Claude plan limits in Reserve."
+    /// Claude Code resets this item's access list to Apple's command-line tools
+    /// after each browser sign-in. Reading it directly would therefore ask the
+    /// user for the same Keychain approval after every login. The system
+    /// `security` executable remains on that access list. Reserve launches it
+    /// without a shell and captures its bounded output through a private pipe.
+    static func keychainCredentials(
+      itemExists: @Sendable () -> Bool = {
+        ClaudeCredentialLoader.keychainItemExistsWithoutPrompt()
+      },
+      securityToolRunner: @escaping @Sendable (
+        String, [String], [String: String], Duration
+      ) async throws -> String = { executable, arguments, environment, timeout in
+        try await ProcessRunner.output(
+          executable: executable, arguments: arguments, environment: environment,
+          timeout: timeout)
       }
-      let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "Claude Code-credentials",
-        kSecMatchLimit as String: kSecMatchLimitOne,
-        kSecReturnData as String: true,
-        kSecUseAuthenticationContext as String: context,
-      ]
-      var result: CFTypeRef?
-      let status = SecItemCopyMatching(query as CFDictionary, &result)
-      if status == errSecItemNotFound { return nil }
-      if status == errSecInteractionNotAllowed || status == errSecUserCanceled
-        || status == errSecAuthFailed
-      {
-        throw UsageProviderError.keychainConsentRequired(.anthropic)
-      }
-      guard status == errSecSuccess, let data = result as? Data else {
+    ) async throws -> ClaudeCredentials? {
+      guard itemExists() else { return nil }
+      let output: String
+      do {
+        output = try await securityToolRunner(
+          "/usr/bin/security",
+          ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+          [:], .seconds(3))
+      } catch {
         throw UsageProviderError.credentialsNotFound(
           "Reserve could not read the Claude sign-in from Keychain.")
       }
-      guard data.count <= 1_048_576 else {
+      guard let data = output.data(using: .utf8), !data.isEmpty, data.count <= 65_536 else {
         throw UsageProviderError.credentialsNotFound(
           "The Claude Keychain item is larger than Reserve can safely read.")
       }

@@ -654,7 +654,7 @@ enum LifecycleSelfTest {
         && AppDelegate.claudeSetupPrivacy
           == "Reserve never sees your password or saves your sign-in."
         && AppDelegate.claudeSetupFootnote
-          == "macOS may ask once. Choose Always Allow to keep future checks automatic.",
+          == "You can turn this access off at any time in Settings > Providers.",
       "the Claude access explanation is no longer short and reassuring")
     let summary = ProviderSummary(
       provider: .anthropic,

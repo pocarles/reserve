@@ -1,9 +1,8 @@
 import AppKit
 import ReserveCore
 
-/// A calm, wide confirmation shown before macOS asks for a provider's protected
-/// sign-in. The system alert made this short explanation look like an error by
-/// squeezing it into a tall warning-shaped column.
+/// A calm, wide confirmation shown before Reserve reads a provider's protected
+/// sign-in.
 @MainActor
 final class ProviderLimitAccessPrompt: NSPanel {
   static let size = NSSize(width: 520, height: 270)

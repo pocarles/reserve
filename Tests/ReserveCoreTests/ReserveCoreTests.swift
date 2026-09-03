@@ -618,6 +618,35 @@ struct ReserveCoreTests {
   }
 
   @Test
+  func testClaudeKeychainReadUsesBoundedMacOSSecurityTool() async throws {
+    let credential = try await ClaudeCredentialLoader.keychainCredentials(
+      itemExists: { true },
+      securityToolRunner: { executable, arguments, environment, timeout in
+        XCTAssertEqual(executable, "/usr/bin/security")
+        XCTAssertEqual(
+          arguments,
+          ["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        XCTAssertTrue(environment.isEmpty)
+        XCTAssertEqual(timeout, .seconds(3))
+        return #"{"claudeAiOauth":{"accessToken":"current-token","expiresAt":1900000000000}}"#
+      })
+
+    XCTAssertEqual(credential?.accessToken, "current-token")
+    XCTAssertEqual(credential?.source, "Claude Keychain")
+  }
+
+  @Test
+  func testClaudeKeychainReadSkipsSecurityToolWhenItemIsMissing() async throws {
+    let credential = try await ClaudeCredentialLoader.keychainCredentials(
+      itemExists: { false },
+      securityToolRunner: { _, _, _, _ in
+        throw TestFailure(description: "security tool ran without a Keychain item")
+      })
+
+    XCTAssertNil(credential)
+  }
+
+  @Test
   func testLegacyMigrationCleanInstallStartsWithEmptyReserveState() throws {
     let root = try TemporaryRoot()
     defer { root.remove() }
