@@ -136,9 +136,12 @@ public struct GrokProvider: UsageProvider {
     }
     switch http.statusCode {
     case 200: break
-    case 401, 403:
+    case 401:
       throw UsageProviderError.unauthorized(
         "Grok authentication expired. Run `grok login` and refresh.")
+    case 403:
+      throw UsageProviderError.accessDenied(
+        "Grok denied access to billing data. Check your Grok account permissions.")
     default:
       throw UsageProviderError.unavailable("Grok billing request returned HTTP \(http.statusCode).")
     }

@@ -329,7 +329,7 @@ enum LifecycleSelfTest {
     }
     let original = Dictionary(
       uniqueKeysWithValues: ProviderID.allCases.map { ($0, store.isEnabled($0)) })
-    defer { for (provider, value) in original { store.setEnabled(provider, enabled: value) } }
+    defer { for (provider, value) in original { store.setEnabled(provider, enabled: value, refreshImmediately: false) } }
 
     for target in ProviderID.allCases {
       store.setEnabled(target, enabled: false)
@@ -342,7 +342,7 @@ enum LifecycleSelfTest {
       result.expect(
         present == expected,
         "disabling \(target.rawValue): visible \(present.sorted()) expected \(expected.sorted())")
-      store.setEnabled(target, enabled: true)
+      store.setEnabled(target, enabled: true, refreshImmediately: false)
       self.settle()
       let restored = Set(self.visibleCards(in: window).map(self.providerIdentifier))
       result.expect(
@@ -685,12 +685,12 @@ enum LifecycleSelfTest {
     let signIn = descendants.compactMap { $0 as? NSButton }
       .first { $0.identifier?.rawValue == "connect-anthropic" }
     result.expect(
-      signIn?.title == "Allow access",
-      "the Claude recovery action does not lead with its benefit")
+      signIn?.title == "Connect",
+      "the Claude recovery action does not open the shared connection flow")
     let copy = descendants.compactMap { $0 as? NSTextField }.map(\.stringValue)
     result.expect(
-      copy.contains("Claude is ready · allow usage access"),
-      "Claude access does not explain the benefit in plain language")
+      copy.contains("Waiting for permission to read usage"),
+      "Claude access is not clearly distinguished from sign-in")
     result.expect(
       copy.contains("Subscription") && copy.contains("Not set")
         && !copy.contains("$20.00/mo") && !copy.contains("Anthropic Plan"),
@@ -724,26 +724,9 @@ enum LifecycleSelfTest {
       .first { $0.identifier?.rawValue == "connect-anthropic" }
     let setupCopy = setupDescendants.compactMap { ($0 as? NSTextField)?.stringValue }
     result.expect(
-      setupButton?.title == "Set up"
-        && setupCopy.contains("Set up Claude to show plan limits"),
+      setupButton?.title == "Connect"
+        && setupCopy.contains("Connect Claude to show plan limits"),
       "a missing provider helper still looks broken instead of offering setup")
-    result.expect(
-      ProviderID.allCases.allSatisfy {
-        ProviderHelperSetupPrompt(provider: $0, action: .install).validateForSelfTest()
-      },
-      "the no-Terminal setup confirmation is incomplete for one or more providers")
-    var setupGate = ProviderSetupGate()
-    let firstSetupStarted = setupGate.begin(.openAI)
-    let overlappingSetupWasBlocked = !setupGate.begin(.cursor)
-    setupGate.finish(.cursor)
-    let wrongProviderCouldNotClearGate = !setupGate.begin(.grok)
-    setupGate.finish(.openAI)
-    let nextSetupStartedAfterFinish = setupGate.begin(.anthropic)
-    result.expect(
-      firstSetupStarted && overlappingSetupWasBlocked && wrongProviderCouldNotClearGate
-        && nextSetupStartedAfterFinish,
-      "provider setup work can overlap or the active setup gate clears for the wrong provider")
-
     let domain = "com.pocarles.reserve.cost-selftest"
     guard let defaults = UserDefaults(suiteName: domain) else {
       result.failures.append("could not create isolated defaults for monthly-cost checks")

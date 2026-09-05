@@ -34,7 +34,7 @@ enum ReserveApp {
     }
     #if RESERVE_DEV_AUTOMATION
       let automatedArguments = [
-        "--self-test-ui", "--self-test-lifecycle", "--stress-ui",
+        "--self-test-ui", "--self-test-lifecycle", "--self-test-connections", "--stress-ui",
         "--render-dashboard", "--render-settings", "--render-appearance",
         "--render-about", "--render-alerts", "--render-insights",
         "--render-providers", "--render-menu-bar", "--render-provider-setup",
@@ -104,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_: Notification) {
     NSApplication.shared.setActivationPolicy(.accessory)
 #if RESERVE_DEV_AUTOMATION
+    let isConnectionSelfTest = CommandLine.arguments.contains("--self-test-connections")
     let isUISelfTest = CommandLine.arguments.contains("--self-test-ui")
     let renderIndex = CommandLine.arguments.firstIndex(of: "--render-dashboard")
     let settingsRenderIndex = CommandLine.arguments.firstIndex(of: "--render-settings")
@@ -121,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let isCursorPromptPreview = CommandLine.arguments.contains("--show-cursor-prompt")
     let lifecycleCaptureIndex = CommandLine.arguments.firstIndex(of: "--capture-lifecycle")
     let isNotificationVerification = CommandLine.arguments.contains("--verify-notifications")
-    let isAutomatedRun = isUISelfTest || renderIndex != nil || settingsRenderIndex != nil
+    let isAutomatedRun = isConnectionSelfTest || isUISelfTest || renderIndex != nil || settingsRenderIndex != nil
       || appearanceRenderIndex != nil || aboutRenderIndex != nil || alertsRenderIndex != nil
       || insightsRenderIndex != nil || providersRenderIndex != nil || menuBarRenderIndex != nil
       || providerSetupRenderIndex != nil
@@ -242,6 +243,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       self.runLifecycleCapture(directory: CommandLine.arguments[lifecycleCaptureIndex + 1])
     } else if isLifecycleSelfTest {
       self.runLifecycleSelfTest()
+    } else if isConnectionSelfTest {
+      Task { @MainActor in
+        let failures = await ConnectionFlowSelfTest.run()
+        Self.finishUISelfTest(success: failures.isEmpty,
+          details: failures.isEmpty
+            ? "connection recovery, permission, cancellation, disconnect and native windows passed"
+            : failures.joined(separator: " | "))
+      }
     } else if isUISelfTest {
       self.runUISelfTest()
     } else if isClaudePromptPreview {
@@ -299,7 +308,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           ? CommandLine.arguments[index + 1] : nil
       } == "update" ? .update : .install
     do {
-      let prompt = ProviderHelperSetupPrompt(provider: provider, action: action)
+      let prompt = ProviderConnectionPanel(provider: provider)
+      prompt.update(phase: action == .install ? .needsInstall : .needsUpdate)
       try prompt.render(to: URL(fileURLWithPath: path))
       Self.finishUISelfTest(
         success: true, details: "provider setup rendered to \(path)")
@@ -524,6 +534,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @objc private func applicationBecameActive() {
     self.store?.refreshAfterResumeIfNeeded()
+  }
+
+  func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows: Bool) -> Bool {
+    if !hasVisibleWindows { self.statusController?.showMenu() }
+    return true
   }
 
   @objc private func computerDidWake() {

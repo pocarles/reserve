@@ -671,7 +671,7 @@ final class ProviderDashboardCard: NSView {
 
     let trailing: NSView
     if let setupAction = summary.setupAction,
-      !summary.isConnecting, !summary.isRefreshing
+      !summary.isConnecting
     {
       let connect = ReserveTextButton(
         title: setupAction.buttonTitle,
@@ -709,7 +709,7 @@ final class ProviderDashboardCard: NSView {
   private static func unavailableRow(summary: ProviderSummary) -> NSView {
     let message: String
     if summary.isConnecting && summary.requiresKeychainAccess {
-      message = "One-time macOS approval…"
+      message = "Waiting for macOS permission…"
     } else if summary.isConnecting {
       message = "Complete the sign-in in your browser"
     } else if let setupAction = summary.setupAction {
@@ -747,17 +747,25 @@ private final class ProviderFreshnessBanner: NSView {
     } else if summary.setupAction == .update {
       state = "Update needed"
       fullState = state
+    } else if summary.usageAccessDenied {
+      state = "Usage access denied"
+      fullState = state
+    } else if summary.requiresKeychainAccess {
+      state = "Waiting for permission"
+      fullState = state
     } else if summary.needsConnection {
-      state = "Disconnected"
+      state = "Sign-in needed"
       fullState = state
     } else if summary.error != nil {
-      state = "Unavailable"
-      fullState = "Live data unavailable"
+      state = "Usage unavailable"
+      fullState = "Usage temporarily unavailable"
     } else {
       state = "Cached"
       fullState = "Cached data"
     }
-    let age = summary.lastUpdated.map { Self.compactAge(since: $0, now: now) } ?? "never updated"
+    let age = summary.lastUpdated.map {
+      "last checked \(Self.compactAge(since: $0, now: now))"
+    } ?? "not checked yet"
     let fullAge = summary.lastUpdated.map {
       DashboardFormat.updated($0, now: now).replacingOccurrences(
         of: "Updated", with: "last updated")
@@ -796,9 +804,9 @@ private final class ProviderFreshnessBanner: NSView {
 
   private static func compactAge(since date: Date, now: Date) -> String {
     let seconds = max(0, now.timeIntervalSince(date))
-    if seconds < 60 { return "updated just now" }
-    if seconds < 3_600 { return "updated \(Int(seconds / 60))m ago" }
-    return "updated \(Int(seconds / 3_600))h ago"
+    if seconds < 60 { return "just now" }
+    if seconds < 3_600 { return "\(Int(seconds / 60))m ago" }
+    return "\(Int(seconds / 3_600))h ago"
   }
 }
 

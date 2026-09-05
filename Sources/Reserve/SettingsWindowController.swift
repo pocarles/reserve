@@ -289,7 +289,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         self.section(
           title: nil,
           footer: "Reserve reuses your existing provider sign-ins. It never asks for passwords "
-            + "or saves sign-ins. Claude and Cursor need one-time macOS approval before Reserve reads their protected access tokens.",
+            + "or saves sign-ins. Claude and Cursor need your permission before Reserve can read their usage. macOS may also ask you to approve access.",
           rows: rows)
       ])
   }
@@ -759,6 +759,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       setup.toolTip = setupAction.toolTip(for: provider)
       rows.append(self.formRow("", setup, labelWidth: 92))
     }
+    if self.store.isEnabled(provider) || self.store.states[provider]?.snapshot != nil {
+      let disconnect = NSButton(
+        title: "Disconnect from Reserve", target: self,
+        action: #selector(self.disconnectProvider(_:)))
+      disconnect.identifier = NSUserInterfaceItemIdentifier("provider-disconnect-\(provider.rawValue)")
+      disconnect.bezelStyle = .rounded
+      disconnect.toolTip = "Stops Reserve checks and clears its cached usage. Your provider app stays signed in."
+      rows.append(self.formRow("", disconnect, labelWidth: 92))
+    }
     let refresh = NSButton(
       title: "Refresh Now", target: self, action: #selector(self.refreshProvider(_:)))
     refresh.identifier = NSUserInterfaceItemIdentifier("provider-refresh-\(provider.rawValue)")
@@ -1039,7 +1048,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let raw = sender.identifier?.rawValue, let provider = ProviderID(rawValue: raw) else {
       return
     }
-    self.store.setEnabled(provider, enabled: sender.state == .on)
+    if sender.state == .on {
+      self.setupProvider(provider)
+    } else {
+      self.store.setEnabled(provider, enabled: false)
+    }
   }
 
   @objc private func toggleProviderDetail(_ sender: NSButton) {
@@ -1068,6 +1081,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.setupProvider(provider)
   }
 
+  @objc private func disconnectProvider(_ sender: NSButton) {
+    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(
+      of: "provider-disconnect-", with: "")
+    guard let provider = ProviderID(rawValue: raw) else { return }
+    self.store.disconnect(provider)
+  }
+
   @objc private func keychainChanged(_ sender: NSButton) {
     let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(
       of: "settings-keychain-", with: "")
@@ -1075,11 +1095,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       provider == .anthropic || provider == .cursor
     else { return }
     if sender.state == .on {
-      guard AppDelegate.confirmLimitAccess(for: provider) else {
-        sender.state = .off
-        return
-      }
-      self.store.allowKeychainAccess(for: provider)
+      sender.state = .off
+      self.setupProvider(provider)
     } else {
       self.store.setKeychainReadAllowed(false, for: provider)
     }
@@ -1256,6 +1273,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       case .cursor: "cursor-agent"
       }
     let state = self.store.states[provider]
+    if !self.store.isEnabled(provider) { return ("Off", .secondaryLabelColor) }
+    if state?.requiresKeychainAccess == true { return ("Permission needed", .systemOrange) }
+    if state?.usageAccessDenied == true { return ("Usage access denied", .systemOrange) }
+    if state?.isConnecting == true { return ("Connecting", .secondaryLabelColor) }
+    if state?.requiresConnection == true { return ("Sign-in needed", .systemOrange) }
     return Self.providerStatus(
       provider: provider,
       hasSnapshot: state?.snapshot != nil,

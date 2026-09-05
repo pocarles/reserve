@@ -221,7 +221,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       singleSummary.primary == "1 plan may run out early"
       && pluralSummary.primary == "2 plans may run out early"
       && pluralSummary.secondary.contains("8 points over pace")
-      && staleSummary.primary == "1 plan needs an update"
+      && staleSummary.primary == "1 plan needs fresh data"
       && staleSummary.secondary.contains("2 other plans have reserve")
       && oneHealthyStale.secondary.contains("1 other plan has reserve")
       && !oneHealthyStale.secondary.contains("have reserve")
@@ -468,7 +468,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         $0.identifier?.rawValue == "freshness-\(previewSummaries[0].provider.rawValue)"
       }
       && staleDescendants.compactMap { ($0 as? NSTextField)?.stringValue }.contains {
-        $0.contains("Cached") && $0.contains("updated")
+        $0.contains("Cached") && $0.contains("last checked")
       }
     let unknownCard = ProviderDashboardCard(
       summary: withState(previewSummaries[0], .unknown), now: Date(),

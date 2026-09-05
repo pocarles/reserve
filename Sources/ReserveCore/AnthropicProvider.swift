@@ -158,6 +158,9 @@ public struct AnthropicProvider: UsageProvider {
     case 401:
       throw UsageProviderError.unauthorized(
         "Claude authentication expired. Use Sign in to authenticate again.")
+    case 403:
+      throw UsageProviderError.accessDenied(
+        "Anthropic denied access to usage data. Check your Claude account permissions.")
     case 429:
       let retryAt = Self.conservativeRetryDate(
         retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
@@ -241,13 +244,15 @@ enum ClaudeCredentialLoader {
   static func load(
     environment: [String: String],
     allowKeychainRead: Bool,
-    allowKeychainInteraction _: Bool = false
+    allowKeychainInteraction: Bool = false
   ) async throws -> ClaudeCredentials {
     #if canImport(Security)
       var keychainError: Error?
       if allowKeychainRead {
         do {
-          if let credentials = try await self.keychainCredentials() {
+          if let credentials = try await self.keychainCredentials(
+            allowInteraction: allowKeychainInteraction)
+          {
             // Claude Code writes a completed browser sign-in to Keychain. Prefer
             // it over legacy credential files that may remain after reauthenticating.
             return credentials
@@ -313,6 +318,28 @@ enum ClaudeCredentialLoader {
 
   #if canImport(Security)
     static func keychainItemExistsWithoutPrompt() -> Bool {
+      switch self.keychainProbeStatus() {
+      case errSecSuccess, errSecInteractionNotAllowed, errSecInteractionRequired,
+        errSecUserCanceled, errSecAuthFailed, errSecNoAccessForItem,
+        errSecMissingEntitlement, errSecRestrictedAPI:
+        // A protected item can reject this no-prompt probe even though it is
+        // present. Treat that as a consent path instead of asking the user to
+        // sign in again.
+        return true
+      default:
+        return false
+      }
+    }
+
+    /// The trusted-tool path is only safe to launch after the metadata probe
+    /// itself succeeded without interaction. A locked item still counts as
+    /// present for the consent UI but must not start `security -w` in a
+    /// background refresh.
+    private static func keychainItemIsReadableWithoutPrompt() -> Bool {
+      self.keychainProbeStatus() == errSecSuccess
+    }
+
+    private static func keychainProbeStatus() -> OSStatus {
       let context = LAContext()
       context.interactionNotAllowed = true
       let query: [String: Any] = [
@@ -323,7 +350,7 @@ enum ClaudeCredentialLoader {
         kSecUseAuthenticationContext as String: context,
       ]
       var result: CFTypeRef?
-      return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
+      return SecItemCopyMatching(query as CFDictionary, &result)
     }
 
     /// Claude Code resets this item's access list to Apple's command-line tools
@@ -332,9 +359,8 @@ enum ClaudeCredentialLoader {
     /// `security` executable remains on that access list. Reserve launches it
     /// without a shell and captures its bounded output through a private pipe.
     static func keychainCredentials(
-      itemExists: @Sendable () -> Bool = {
-        ClaudeCredentialLoader.keychainItemExistsWithoutPrompt()
-      },
+      allowInteraction: Bool = false,
+      itemExists: (@Sendable () -> Bool)? = nil,
       securityToolRunner: @escaping @Sendable (
         String, [String], [String: String], Duration
       ) async throws -> String = { executable, arguments, environment, timeout in
@@ -343,16 +369,26 @@ enum ClaudeCredentialLoader {
           timeout: timeout)
       }
     ) async throws -> ClaudeCredentials? {
-      guard itemExists() else { return nil }
+      let itemIsPresent = itemExists?()
+        ?? (allowInteraction
+          ? self.keychainItemExistsWithoutPrompt()
+          : self.keychainItemIsReadableWithoutPrompt())
+      guard itemIsPresent else { return nil }
       let output: String
       do {
+        let timeout: Duration = allowInteraction ? .seconds(120) : .seconds(3)
         output = try await securityToolRunner(
           "/usr/bin/security",
           ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
-          [:], .seconds(3))
+          [:], timeout)
+      } catch let error as UsageProviderError {
+        if case .timedOut = error {
+          throw UsageProviderError.unavailable(
+            "Reserve could not read the Claude sign-in from Keychain before the request timed out.")
+        }
+        throw UsageProviderError.keychainConsentRequired(.anthropic)
       } catch {
-        throw UsageProviderError.credentialsNotFound(
-          "Reserve could not read the Claude sign-in from Keychain.")
+        throw UsageProviderError.keychainConsentRequired(.anthropic)
       }
       guard let data = output.data(using: .utf8), !data.isEmpty, data.count <= 65_536 else {
         throw UsageProviderError.credentialsNotFound(

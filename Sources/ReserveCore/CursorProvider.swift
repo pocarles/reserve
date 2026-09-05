@@ -87,32 +87,51 @@ public struct CursorProvider: UsageProvider {
       throw UsageProviderError.credentialsNotFound(
         "Cursor is not connected to Reserve. Use Sign in or Allow access.")
     }
-    let credential = try await self.credentialSession.credential {
+    let loadCredential: @Sendable () async throws -> CursorCredential = {
       guard let executable = self.agentLocator(self.environment) else {
         throw UsageProviderError.executableNotFound("Cursor Agent")
       }
       let status = try await self.statusRunner(
         executable, ["status", "--format", "json"],
         BinaryLocator.childEnvironment(self.environment))
+      try Task.checkCancellation()
       try Self.validateStatusOutput(status)
       return try await self.credentialLoader(self.allowKeychainInteraction)
     }
+    let credential = try await self.credentialSession.credential(loader: loadCredential)
+    do {
+      return try await self.fetch(credential: credential)
+    } catch let error as UsageProviderError {
+      guard case .unauthorized = error else { throw error }
+
+      // A cached access token can outlive the provider's session. Clear it and
+      // run the same official status check before making one bounded retry.
+      try Task.checkCancellation()
+      await self.credentialSession.clear()
+      let refreshedCredential = try await self.credentialSession.credential(loader: loadCredential)
+      do {
+        return try await self.fetch(credential: refreshedCredential)
+      } catch let retryError as UsageProviderError {
+        if case .unauthorized = retryError {
+          await self.credentialSession.clear()
+        }
+        throw retryError
+      }
+    }
+  }
+
+  private func fetch(credential: CursorCredential) async throws -> UsageSnapshot {
     let client = CursorRPCClient(accessToken: credential.accessToken, handler: self.requestHandler)
     let current: CursorCurrentPeriodUsageResponse
     let plan: CursorPlanInfoResponse
     let hardLimit: CursorHardLimitResponse?
-    do {
-      current = try await client.call(
-        .currentPeriodUsage, body: Data(#"{"includePooledUsage":false}"#.utf8),
-        as: CursorCurrentPeriodUsageResponse.self)
-      plan = try await client.call(
-        .planInfo, body: Data("{}".utf8), as: CursorPlanInfoResponse.self)
-      hardLimit = try? await client.call(
-        .hardLimit, body: Data("{}".utf8), as: CursorHardLimitResponse.self)
-    } catch let error as UsageProviderError {
-      if case .unauthorized = error { await self.credentialSession.clear() }
-      throw error
-    }
+    current = try await client.call(
+      .currentPeriodUsage, body: Data(#"{"includePooledUsage":false}"#.utf8),
+      as: CursorCurrentPeriodUsageResponse.self)
+    plan = try await client.call(
+      .planInfo, body: Data("{}".utf8), as: CursorPlanInfoResponse.self)
+    hardLimit = try? await client.call(
+      .hardLimit, body: Data("{}".utf8), as: CursorHardLimitResponse.self)
 
     let billingStart = try Self.date(milliseconds: current.billingCycleStart)
     let billingEnd = try Self.date(
@@ -133,7 +152,7 @@ public struct CursorProvider: UsageProvider {
       detailedUsageUnavailable = true
     } catch let error as UsageProviderError {
       switch error {
-      case .unauthorized, .rateLimited, .timedOut, .unavailable, .invalidResponse:
+      case .unauthorized, .accessDenied, .rateLimited, .timedOut, .unavailable, .invalidResponse:
         accountUsage = nil
         detailedUsageUnavailable = true
       default:
@@ -511,8 +530,10 @@ enum CursorCredentialLoader {
       ]
       var result: CFTypeRef?
       let status = SecItemCopyMatching(query as CFDictionary, &result)
-      if status == errSecInteractionNotAllowed || status == errSecUserCanceled
-        || status == errSecAuthFailed
+      if status == errSecInteractionNotAllowed || status == errSecInteractionRequired
+        || status == errSecUserCanceled || status == errSecAuthFailed
+        || status == errSecNoAccessForItem || status == errSecMissingEntitlement
+        || status == errSecRestrictedAPI
       {
         throw UsageProviderError.keychainConsentRequired(.cursor)
       }
@@ -520,14 +541,17 @@ enum CursorCredentialLoader {
         throw UsageProviderError.credentialsNotFound(
           "Cursor Agent is not signed in. Use Sign in to authenticate.")
       }
-      guard status == errSecSuccess, let data = result as? Data,
+      guard status == errSecSuccess else {
+        throw Self.keychainReadError(for: status)
+      }
+      guard let data = result as? Data,
         data.count <= 65_536,
         let token = String(data: data, encoding: .utf8)?
           .trimmingCharacters(in: .whitespacesAndNewlines),
         !token.isEmpty
       else {
         throw UsageProviderError.credentialsNotFound(
-          "Reserve could not read a usable Cursor access token from Keychain.")
+          "Cursor Keychain does not contain a usable access token.")
       }
       return CursorCredential(accessToken: token)
     #else
@@ -548,11 +572,33 @@ enum CursorCredentialLoader {
         kSecUseAuthenticationContext as String: context,
       ]
       var result: CFTypeRef?
-      return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
+      let status = SecItemCopyMatching(query as CFDictionary, &result)
+      switch status {
+      case errSecSuccess, errSecInteractionNotAllowed, errSecInteractionRequired,
+        errSecUserCanceled, errSecAuthFailed, errSecNoAccessForItem,
+        errSecMissingEntitlement, errSecRestrictedAPI:
+        // An item that exists but cannot be inspected without prompting still
+        // needs consent; treating it as absent would send the user to Sign in.
+        return true
+      default:
+        return false
+      }
     #else
       false
     #endif
   }
+
+  #if canImport(Security)
+    static func keychainReadError(for status: OSStatus) -> UsageProviderError {
+      if status == errSecInteractionNotAllowed || status == errSecUserCanceled
+        || status == errSecAuthFailed
+      {
+        return .keychainConsentRequired(.cursor)
+      }
+      return .unavailable(
+        "Reserve could not read the Cursor access token from Keychain. Choose Allow access and try again.")
+    }
+  #endif
 }
 
 enum CursorRPCMethod: String, Sendable {
@@ -610,9 +656,12 @@ struct CursorRPCClient: Sendable {
     }
     switch http.statusCode {
     case 200: break
-    case 401, 403:
+    case 401:
       throw UsageProviderError.unauthorized(
         "Cursor authentication expired. Use Sign in to authenticate again.")
+    case 403:
+      throw UsageProviderError.accessDenied(
+        "Cursor denied access to usage data. Check your Cursor account permissions.")
     case 429:
       throw UsageProviderError.rateLimited(
         retryAt: Self.retryDate(http.value(forHTTPHeaderField: "Retry-After")))

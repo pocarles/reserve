@@ -18,6 +18,7 @@ struct ProviderViewState: Identifiable {
   var requiresKeychainAccess = false
   var requiresInstallation = false
   var requiresUpdate = false
+  var usageAccessDenied = false
 }
 
 enum PreviewScenario: String, CaseIterable {
@@ -66,7 +67,10 @@ final class UsageStore {
     self.observers.removeAll { $0.token == token }
   }
 
-  private let cache = SnapshotCache()
+  private let cache: SnapshotCache
+  private let fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)?
+  private let loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))?
+  private let openLoginURL: (URL) -> Bool
   private let localUsageScanner = LocalUsageScanner()
   private let serviceStatusClient = ServiceStatusClient()
   private let defaults: UserDefaults
@@ -78,10 +82,18 @@ final class UsageStore {
   private var loginTimeoutTasks: [ProviderID: Task<Void, Never>] = [:]
   private var loginInputs: [ProviderID: Pipe] = [:]
   private var loginOutputs: [ProviderID: Pipe] = [:]
+  private var claudeBrowserPipe: ClaudeLoginBrowserPipe?
+  private var loginStorageFailures: Set<ProviderID> = []
   private var loginOutputBuffers: [ProviderID: Data] = [:]
   private var loginOutputGates: [ProviderID: BoundedOutputGate] = [:]
   private var loginGenerations: [ProviderID: Int] = [:]
   private var openedLoginURLs: Set<ProviderID> = []
+  private var loginURLs: [ProviderID: URL] = [:]
+  private var failedBrowserOpens: Set<ProviderID> = []
+  private var loginCompletions: [ProviderID: () -> Void] = [:]
+  private var refreshCompletions: [ProviderID: [() -> Void]] = [:]
+  private var cancellationGenerations: [ProviderID: Int] = [:]
+  private var refreshTasks: [ProviderID: Task<Void, Never>] = [:]
   private var lastLocalUsageScanAt: Date?
   /// The newest refresh request per provider. Results from any older request are
   /// discarded rather than applied.
@@ -102,8 +114,16 @@ final class UsageStore {
   init(
     defaults: UserDefaults = .standard,
     startAutomatically: Bool = true,
-    notificationsActive: Bool? = nil
+    notificationsActive: Bool? = nil,
+    cache: SnapshotCache = SnapshotCache(),
+    fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)? = nil,
+    loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
+    openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) }
   ) {
+    self.cache = cache
+    self.fetchOverride = fetchOverride
+    self.loginCommandOverride = loginCommandOverride
+    self.openLoginURL = openLoginURL
     self.defaults = defaults
     self.automaticRefreshEnabled = startAutomatically
     self.notifications = ReserveNotifications(
@@ -126,6 +146,7 @@ final class UsageStore {
   deinit {
     self.schedulerTask?.cancel()
     self.startupTask?.cancel()
+    for task in self.refreshTasks.values { task.cancel() }
     for task in self.loginTimeoutTasks.values { task.cancel() }
     for process in self.loginProcesses.values where process.isRunning { process.terminate() }
   }
@@ -158,6 +179,7 @@ final class UsageStore {
     guard provider == .anthropic || provider == .cursor else { return }
     self.defaults.set(allowed, forKey: "\(provider.rawValue).keychainReadAllowed")
     if !allowed {
+      self.cancelConnection(provider)
       if provider == .cursor {
         Task { await CursorProvider.clearCachedCredential() }
       }
@@ -186,11 +208,11 @@ final class UsageStore {
 
   func allowKeychainAccess(for provider: ProviderID, onFinished: (() -> Void)? = nil) {
     guard provider == .anthropic || provider == .cursor else { return }
-    if let onFinished { self.keychainAccessCompletions[provider, default: []].append(onFinished) }
     self.defaults.set(true, forKey: "\(provider.rawValue).keychainReadAllowed")
     self.states[provider]?.requiresKeychainAccess = true
     self.pendingKeychainInteractions.insert(provider)
-    if !self.refresh(provider, allowKeychainInteraction: true) { self.changed() }
+    if !self.refresh(provider, queueIfBusy: true, allowKeychainInteraction: true,
+      onFinished: onFinished) { self.changed() }
   }
 
   var refreshIntervalMinutes: Int {
@@ -409,6 +431,7 @@ final class UsageStore {
       states: self.orderedStates.filter { self.isEnabled($0.provider) },
       intervalMinutes: self.refreshIntervalMinutes,
       isRefreshingAll: self.isRefreshingAll,
+      lastCompletedAt: self.lastRefreshCompletedAt,
       now: now)
   }
 
@@ -416,9 +439,16 @@ final class UsageStore {
     states: [ProviderViewState],
     intervalMinutes: Int,
     isRefreshingAll: Bool,
+    lastCompletedAt: Date? = nil,
     now: Date
   ) -> Bool {
     guard !isRefreshingAll else { return false }
+    // An expired sign-in stays stale until the user connects it. Changing
+    // windows must not repeatedly restart checks and rebuild the controls.
+    if let lastCompletedAt {
+      let elapsed = now.timeIntervalSince(lastCompletedAt)
+      if elapsed >= 0 && elapsed < 60 { return false }
+    }
     let staleAfter = TimeInterval(max(1, intervalMinutes) * 60)
     return states.contains { state in
       guard !state.isRefreshing else { return false }
@@ -449,8 +479,11 @@ final class UsageStore {
   func refresh(
     _ provider: ProviderID,
     queueIfBusy: Bool = false,
-    allowKeychainInteraction: Bool = false
+    allowKeychainInteraction: Bool = false,
+    onFinished: (() -> Void)? = nil
   ) -> Bool {
+    guard self.isEnabled(provider) else { return false }
+    if let onFinished { self.refreshCompletions[provider, default: []].append(onFinished) }
     guard self.beginRefresh(provider) else {
       if queueIfBusy { self.pendingRefreshes.insert(provider) }
       return false
@@ -460,38 +493,53 @@ final class UsageStore {
       self.states[provider]?.isConnecting = true
       self.changed()
     }
-    Task {
+    let cancellationGeneration = self.cancellationGenerations[provider] ?? 0
+    self.refreshTasks[provider] = Task {
       if provider == .anthropic { await AnthropicProvider.clearPersistedRateLimitBlock() }
+      guard (self.cancellationGenerations[provider] ?? 0) == cancellationGeneration else { return }
       await self.performRefresh(
         provider, allowKeychainInteraction: allowKeychainInteraction)
     }
     return true
   }
 
-  func connect(_ provider: ProviderID) {
-    if self.states[provider]?.requiresKeychainAccess == true
+  func connect(_ provider: ProviderID, forceSignIn: Bool = false, onFinished: (() -> Void)? = nil) {
+    if !forceSignIn, self.states[provider]?.requiresKeychainAccess == true
     {
-      self.allowKeychainAccess(for: provider)
+      self.allowKeychainAccess(for: provider, onFinished: onFinished)
       return
     }
     guard self.loginProcesses[provider]?.isRunning != true else { return }
+    self.loginStorageFailures.remove(provider)
+    if forceSignIn {
+      // A protected but unusable old item must not trap an explicit fresh login
+      // in the permission path. Fresh credentials still need usage consent.
+      self.states[provider]?.requiresKeychainAccess = false
+    }
+    self.loginCompletions[provider] = onFinished
     let configuration = Self.loginConfiguration(for: provider)
     let generation = (self.loginGenerations[provider] ?? 0) + 1
     self.loginGenerations[provider] = generation
-    guard let executable = BinaryLocator.find(configuration.executable) else {
+    let commandOverride = self.loginCommandOverride?(provider)
+    guard let executable = commandOverride?.executable ?? BinaryLocator.find(configuration.executable) else {
       self.states[provider]?.error =
         "\(ProviderHelperCatalog.definition(for: provider).displayName) needs setup."
       self.states[provider]?.requiresInstallation = true
       self.states[provider]?.requiresUpdate = false
       self.states[provider]?.requiresConnection = false
       self.changed()
+      self.loginCompletions.removeValue(forKey: provider)?()
       return
     }
 
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
-    process.arguments = configuration.arguments
+    process.arguments = commandOverride?.arguments ?? configuration.arguments
     process.environment = BinaryLocator.childEnvironment()
+    if provider == .cursor {
+      // Cursor documents this switch so the host app owns the browser handoff.
+      process.environment?["NO_OPEN_BROWSER"] = "1"
+    }
     process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
     let input = Pipe()
     let output = Pipe()
@@ -506,6 +554,18 @@ final class UsageStore {
     }
 
     do {
+      if provider == .anthropic {
+        let browserPipe = try ClaudeLoginBrowserPipe { [weak self] data in
+          guard let self, self.loginGenerations[provider] == generation else { return }
+          self.consumeLoginOutput(data, for: provider, fromBrowser: true)
+        }
+        self.claudeBrowserPipe = browserPipe
+        process.environment?["BROWSER"] = browserPipe.browserExecutable
+        process.environment?["RESERVE_LOGIN_PIPE"] = browserPipe.path
+      }
+      // Supply the optional welcome confirmation before launching. A delayed
+      // write can otherwise reach a cancelled or already-exited login process.
+      try input.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
       try process.run()
       self.loginProcesses[provider] = process
       self.loginInputs[provider] = input
@@ -514,6 +574,7 @@ final class UsageStore {
       let outputGate = BoundedOutputGate(maximumBytes: 65_536)
       self.loginOutputGates[provider] = outputGate
       self.openedLoginURLs.remove(provider)
+      self.loginURLs.removeValue(forKey: provider)
       output.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
         let data = handle.availableData
         guard !data.isEmpty else {
@@ -530,13 +591,7 @@ final class UsageStore {
           break
         case .overflow:
           handle.readabilityHandler = nil
-          if process?.isRunning == true { process?.terminate() }
-          Task { [weak process] in
-            try? await Task.sleep(for: .seconds(2))
-            if process?.isRunning == true, let identifier = process?.processIdentifier {
-              kill(identifier, SIGKILL)
-            }
-          }
+          if let process { ProcessRunner.stop(process) }
           Task { @MainActor [weak self] in
             guard self?.loginGenerations[provider] == generation else { return }
             self?.states[provider]?.error =
@@ -559,12 +614,7 @@ final class UsageStore {
       self.loginTimeoutTasks[provider] = Task { [weak self, weak process] in
         try? await Task.sleep(for: .seconds(300))
         guard !Task.isCancelled, process?.isRunning == true else { return }
-        process?.terminate()
-        // A CLI that ignores SIGTERM must not outlive its own timeout.
-        try? await Task.sleep(for: .seconds(2))
-        if process?.isRunning == true, let identifier = process?.processIdentifier {
-          kill(identifier, SIGKILL)
-        }
+        if let process { ProcessRunner.stop(process) }
         await MainActor.run {
           guard self?.loginGenerations[provider] == generation else { return }
           self?.states[provider]?.error =
@@ -574,29 +624,86 @@ final class UsageStore {
           self?.changed()
         }
       }
-      Task { [weak input] in
-        try? await Task.sleep(for: .milliseconds(300))
-        try? input?.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
-      }
     } catch {
+      if provider == .anthropic {
+        self.claudeBrowserPipe?.close()
+        self.claudeBrowserPipe = nil
+      }
       self.states[provider]?.error =
         "Could not start \(configuration.displayName) sign-in: \(error.localizedDescription)"
       self.states[provider]?.requiresConnection = true
       self.states[provider]?.isConnecting = false
       self.changed()
+      self.loginCompletions.removeValue(forKey: provider)?()
     }
   }
 
-  func setEnabled(_ provider: ProviderID, enabled: Bool) {
-    self.defaults.set(enabled, forKey: "provider.\(provider.rawValue).enabled")
-    if !enabled {
-      self.pendingKeychainInteractions.remove(provider)
-      self.refreshTokens[provider] = (self.refreshTokens[provider] ?? 0) + 1
-      self.states[provider]?.isConnecting = false
-      self.states[provider]?.isRefreshing = false
+  func canReopenLoginBrowser(_ provider: ProviderID) -> Bool {
+    self.loginURLs[provider] != nil && self.loginProcesses[provider]?.isRunning == true
+  }
+
+  func loginFailedToSave(_ provider: ProviderID) -> Bool {
+    self.loginStorageFailures.contains(provider)
+  }
+
+  func loginBrowserFailedToOpen(_ provider: ProviderID) -> Bool {
+    self.failedBrowserOpens.contains(provider)
+  }
+
+  @discardableResult
+  func reopenLoginBrowser(_ provider: ProviderID) -> Bool {
+    guard self.canReopenLoginBrowser(provider), let url = self.loginURLs[provider] else {
+      return false
+    }
+    let opened = self.openLoginURL(url)
+    if opened { self.failedBrowserOpens.remove(provider) }
+    else { self.failedBrowserOpens.insert(provider) }
+    self.changed()
+    return opened
+  }
+
+  func cancelConnection(_ provider: ProviderID) {
+    self.cancellationGenerations[provider] = (self.cancellationGenerations[provider] ?? 0) + 1
+    self.loginGenerations[provider] = (self.loginGenerations[provider] ?? 0) + 1
+    self.loginCompletions.removeValue(forKey: provider)
+    self.refreshCompletions.removeValue(forKey: provider)
+    self.refreshTasks.removeValue(forKey: provider)?.cancel()
+    self.keychainAccessCompletions.removeValue(forKey: provider)
+    self.pendingRefreshes.remove(provider)
+    self.pendingKeychainInteractions.remove(provider)
+    self.refreshTokens[provider] = (self.refreshTokens[provider] ?? 0) + 1
+    let process = self.loginProcesses[provider]
+    if let process { ProcessRunner.stop(process) }
+    self.cleanUpLogin(provider)
+    self.states[provider]?.isConnecting = false
+    self.states[provider]?.isRefreshing = false
+    self.changed()
+  }
+
+  func disconnect(_ provider: ProviderID) {
+    self.defaults.set(false, forKey: "provider.\(provider.rawValue).enabled")
+    self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
+    self.cancelConnection(provider)
+    self.states[provider] = ProviderViewState(provider: provider)
+    self.staleProviders.remove(provider)
+    self.incidentProviders.remove(provider)
+    self.notifications.clearStale(provider)
+    self.notifications.clearIncident(provider)
+    self.rebuildNotificationSchedules()
+    Task {
+      if provider == .cursor { await CursorProvider.clearCachedCredential() }
+      await self.persistSnapshots()
     }
     self.changed()
-    if enabled { self.refresh(provider) }
+  }
+
+  func setEnabled(_ provider: ProviderID, enabled: Bool, refreshImmediately: Bool = true) {
+    self.defaults.set(enabled, forKey: "provider.\(provider.rawValue).enabled")
+    if !enabled {
+      self.cancelConnection(provider)
+    }
+    self.changed()
+    if enabled && refreshImmediately { self.refresh(provider) }
   }
 
   func isEnabled(_ provider: ProviderID) -> Bool {
@@ -926,6 +1033,47 @@ final class UsageStore {
 
   private func finishLogin(_ provider: ProviderID, status: Int32, generation: Int) {
     guard self.loginGenerations[provider] == generation else { return }
+    if let pending = self.loginOutputGates[provider]?.drain(), !pending.isEmpty {
+      self.consumeLoginOutput(pending, for: provider)
+    }
+    self.loginGenerations[provider] = generation + 1
+    let completion = self.loginCompletions.removeValue(forKey: provider)
+    self.cleanUpLogin(provider)
+    self.states[provider]?.isConnecting = false
+    if self.loginStorageFailures.contains(provider) {
+      self.states[provider]?.requiresConnection = true
+      self.states[provider]?.error = "Cursor could not save its sign-in in macOS Keychain."
+      self.changed()
+      completion?()
+    } else if status == 0 {
+      self.states[provider]?.error = nil
+      if !self.refresh(provider, queueIfBusy: true, onFinished: { [weak self] in
+        // Cursor can exit successfully even when secure storage failed. A
+        // fresh status check must confirm that a usable session survived.
+        if provider == .cursor, self?.states[provider]?.requiresConnection == true {
+          self?.loginStorageFailures.insert(provider)
+        }
+        completion?()
+      }) { self.changed() }
+    } else {
+      self.states[provider]?.requiresConnection = true
+      self.states[provider]?.requiresInstallation = false
+      self.states[provider]?.requiresUpdate = false
+      self.states[provider]?.usageAccessDenied = false
+      if self.states[provider]?.error == nil {
+        self.states[provider]?.error =
+          "\(provider.displayName) sign-in was not completed. Try again when you are ready."
+      }
+      self.changed()
+      completion?()
+    }
+  }
+
+  private func cleanUpLogin(_ provider: ProviderID) {
+    if provider == .anthropic {
+      self.claudeBrowserPipe?.close()
+      self.claudeBrowserPipe = nil
+    }
     self.loginTimeoutTasks[provider]?.cancel()
     self.loginTimeoutTasks[provider] = nil
     self.loginProcesses[provider] = nil
@@ -938,20 +1086,8 @@ final class UsageStore {
     self.loginOutputGates[provider]?.close()
     self.loginOutputGates[provider] = nil
     self.openedLoginURLs.remove(provider)
-    self.states[provider]?.isConnecting = false
-    if status == 0 {
-      self.states[provider]?.error = nil
-      if !self.refresh(provider, queueIfBusy: true) { self.changed() }
-    } else {
-      self.states[provider]?.requiresConnection = true
-      self.states[provider]?.requiresInstallation = false
-      self.states[provider]?.requiresUpdate = false
-      if self.states[provider]?.error == nil {
-        self.states[provider]?.error =
-          "\(provider.displayName) sign-in was not completed. Use Sign in to retry."
-      }
-      self.changed()
-    }
+    self.loginURLs.removeValue(forKey: provider)
+    self.failedBrowserOpens.remove(provider)
   }
 
   private func drainLoginOutput(
@@ -967,23 +1103,29 @@ final class UsageStore {
     let data = gate.drain()
     guard !data.isEmpty else { return }
     self.consumeLoginOutput(data, for: provider)
-    if self.openedLoginURLs.contains(provider) {
-      gate.close()
-      handle.readabilityHandler = nil
-    }
+    // Keep draining after the browser opens. A full pipe can prevent the
+    // provider from exiting and make a completed sign-in look stuck.
   }
 
-  private func consumeLoginOutput(_ data: Data, for provider: ProviderID) {
-    guard !self.openedLoginURLs.contains(provider) else { return }
+  private func consumeLoginOutput(_ data: Data, for provider: ProviderID, fromBrowser: Bool = false) {
+    // Claude prints a manual-code fallback to stdout. Its BROWSER handoff has
+    // the loopback callback that can actually finish sign-in inside this app.
+    if provider == .anthropic, self.claudeBrowserPipe != nil, !fromBrowser { return }
     let current = self.loginOutputBuffers[provider] ?? Data()
     let remainingCapacity = max(0, 65_536 - current.count)
     self.loginOutputBuffers[provider, default: Data()].append(data.prefix(remainingCapacity))
     guard let buffer = self.loginOutputBuffers[provider],
-      let output = String(data: buffer, encoding: .utf8),
+      let output = String(data: buffer, encoding: .utf8) else { return }
+    if provider == .cursor, output.contains("Failed to store authentication tokens") {
+      self.loginStorageFailures.insert(provider)
+    }
+    guard !self.openedLoginURLs.contains(provider),
       let url = Self.authorizationURL(in: output, for: provider)
     else { return }
     self.openedLoginURLs.insert(provider)
-    NSWorkspace.shared.open(url)
+    self.loginURLs[provider] = url
+    if !self.openLoginURL(url) { self.failedBrowserOpens.insert(provider) }
+    self.changed()
   }
 
   static func authorizationURL(in output: String, for provider: ProviderID) -> URL? {
@@ -1015,8 +1157,10 @@ final class UsageStore {
         trustedHosts: ["claude.com", "claude.ai", "platform.claude.com"])
     case .grok:
       LoginConfiguration(
-        executable: "grok", arguments: ["login", "--oauth"], displayName: "Grok Build",
-        trustedHosts: ["auth.x.ai", "x.ai", "grok.com"])
+        // Device login prints a complete link without independently launching
+        // Launch Services, which can choose an isolated Chrome instance.
+        executable: "grok", arguments: ["login", "--device-auth"], displayName: "Grok Build",
+        trustedHosts: ["auth.x.ai", "accounts.x.ai", "x.ai", "grok.com"])
     case .cursor:
       LoginConfiguration(
         executable: "cursor-agent", arguments: ["login"], displayName: "Cursor Agent",
@@ -1026,7 +1170,7 @@ final class UsageStore {
 
   private func loadCacheAndStart() async {
     let cached = await self.cache.load()
-    for (provider, snapshot) in cached {
+    for (provider, snapshot) in cached where self.isEnabled(provider) {
       self.states[provider]?.snapshot = snapshot
       if provider == .cursor {
         self.states[provider]?.localUsage = snapshot.accountUsage
@@ -1094,7 +1238,11 @@ final class UsageStore {
 
   private func performRefreshAll(scanLocalUsage: Bool) async {
     for provider in ProviderID.allCases where self.isEnabled(provider) {
-      await self.performRefresh(provider, persist: false, notify: false)
+      // Keep each provider cancellable without interrupting the others.
+      self.refreshTasks[provider]?.cancel()
+      let task = Task { await self.performRefresh(provider, persist: false, notify: false) }
+      self.refreshTasks[provider] = task
+      await task.value
     }
     await self.persistSnapshots()
     if scanLocalUsage {
@@ -1110,6 +1258,7 @@ final class UsageStore {
     let result = try? await self.localUsageScanner.scan(periodDays: 30, now: now)
     if let result {
       for provider in ProviderID.allCases {
+        guard self.isEnabled(provider) else { continue }
         let snapshot = self.states[provider]?.snapshot
         self.states[provider]?.localUsage = Self.usageAfterLocalScan(
           provider: provider,
@@ -1146,20 +1295,24 @@ final class UsageStore {
     notify: Bool = true,
     allowKeychainInteraction: Bool = false
   ) async {
+    guard self.isEnabled(provider), !Task.isCancelled else { return }
     // A manual refresh and the scheduled sweep can be in flight for the same
     // provider at once. Without a token the slower request wins simply by
     // finishing last, overwriting newer numbers with older ones.
     let token = (self.refreshTokens[provider] ?? 0) + 1
     self.refreshTokens[provider] = token
-    func isCurrent() -> Bool { self.refreshTokens[provider] == token }
+    func isCurrent() -> Bool {
+      self.refreshTokens[provider] == token && self.isEnabled(provider) && !Task.isCancelled
+    }
 
     defer {
       if isCurrent() {
+        self.refreshTasks.removeValue(forKey: provider)
         self.states[provider]?.isRefreshing = false
         if allowKeychainInteraction { self.states[provider]?.isConnecting = false }
-        if notify { self.changed() }
         var startedFollowUpKeychainInteraction = false
         if self.pendingKeychainInteractions.contains(provider) {
+          self.pendingRefreshes.remove(provider)
           startedFollowUpKeychainInteraction = self.refresh(
             provider, allowKeychainInteraction: true)
         } else if self.pendingRefreshes.remove(provider) != nil {
@@ -1168,6 +1321,11 @@ final class UsageStore {
         if allowKeychainInteraction, !startedFollowUpKeychainInteraction {
           self.completeKeychainInteraction(for: provider)
         }
+        if !self.states[provider, default: ProviderViewState(provider: provider)].isRefreshing {
+          let completions = self.refreshCompletions.removeValue(forKey: provider) ?? []
+          for completion in completions { completion() }
+        }
+        if notify { self.changed() }
       }
     }
 
@@ -1185,7 +1343,7 @@ final class UsageStore {
           allowKeychainInteraction: allowKeychainInteraction)
       }
     let previousHealth = self.states[provider]?.serviceStatus?.health
-    if !allowKeychainInteraction {
+    if !allowKeychainInteraction, self.fetchOverride == nil {
       let status = await self.serviceStatusClient.fetch(provider)
       guard isCurrent() else { return }
       self.states[provider]?.serviceStatus = status
@@ -1194,7 +1352,12 @@ final class UsageStore {
     var providerFetchSucceeded = false
     do {
       let previous = self.states[provider]?.snapshot
-      let fetched = try await fetcher.fetch()
+      let fetched: UsageSnapshot
+      if let fetchOverride {
+        fetched = try await fetchOverride(provider, allowKeychainInteraction)
+      } else {
+        fetched = try await fetcher.fetch()
+      }
       guard isCurrent() else { return }
       let snapshot = fetched.withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
@@ -1203,6 +1366,7 @@ final class UsageStore {
       self.states[provider]?.requiresKeychainAccess = false
       self.states[provider]?.requiresInstallation = false
       self.states[provider]?.requiresUpdate = false
+      self.states[provider]?.usageAccessDenied = false
       if provider == .cursor {
         self.states[provider]?.localUsage = snapshot.accountUsage
       }
@@ -1230,17 +1394,22 @@ final class UsageStore {
         self.states[provider]?.requiresUpdate = false
       }
       let requiresKeychainAccess: Bool
+      if case .accessDenied = error as? UsageProviderError {
+        self.states[provider]?.usageAccessDenied = true
+      } else {
+        self.states[provider]?.usageAccessDenied = false
+      }
       if case .keychainConsentRequired(let consentProvider) = error as? UsageProviderError {
         requiresKeychainAccess = consentProvider == provider
       } else {
         requiresKeychainAccess = false
       }
       self.states[provider]?.requiresKeychainAccess = requiresKeychainAccess
-      if requiresKeychainAccess {
+      if requiresKeychainAccess && !self.pendingKeychainInteractions.contains(provider) {
         self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
       }
     }
-    if allowKeychainInteraction, providerFetchSucceeded {
+    if allowKeychainInteraction, providerFetchSucceeded, self.fetchOverride == nil {
       let status = await self.serviceStatusClient.fetch(provider)
       guard isCurrent() else { return }
       self.states[provider]?.serviceStatus = status
