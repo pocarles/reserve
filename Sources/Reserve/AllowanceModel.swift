@@ -95,6 +95,7 @@ struct ProviderSummary {
   let quotaSource: String?
   let includedSpend: IncludedSpend?
   let detailedUsageUnavailable: Bool
+  var usageAccessDenied = false
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
   var secondary: [Allowance] { self.allowances.filter { !$0.isPrimary } }
@@ -114,19 +115,19 @@ enum ProviderSetupAction: String, Equatable {
 
   var buttonTitle: String {
     switch self {
-    case .install: "Set up"
-    case .update: "Update"
-    case .signIn: "Sign in"
-    case .allowAccess: "Allow access"
+    case .install: "Connect"
+    case .update: "Connect"
+    case .signIn: "Connect"
+    case .allowAccess: "Connect"
     }
   }
 
   func message(for provider: ProviderID) -> String {
     switch self {
-    case .install: "Set up \(provider.displayName) to show plan limits"
+    case .install: "Connect \(provider.displayName) to show plan limits"
     case .update: "Update \(provider.displayName) to resume plan limits"
     case .signIn: "Sign in to \(provider.displayName) to show plan limits"
-    case .allowAccess: "\(provider.displayName) is ready · allow usage access"
+    case .allowAccess: "Waiting for permission to read usage"
     }
   }
 
@@ -203,7 +204,8 @@ enum AllowanceBuilder {
       subscriptionCostUSD: state.subscriptionCostUSD,
       quotaSource: state.snapshot?.source,
       includedSpend: state.snapshot?.includedSpend,
-      detailedUsageUnavailable: state.snapshot?.detailedUsageUnavailable ?? false)
+      detailedUsageUnavailable: state.snapshot?.detailedUsageUnavailable ?? false,
+      usageAccessDenied: state.usageAccessDenied)
   }
 
   private static func connectionToolAvailable(for provider: ProviderID) -> Bool {
@@ -314,7 +316,7 @@ enum AllowanceBuilder {
       return (
         exhausted.count == 1 ? "1 plan exhausted" : "\(exhausted.count) plans exhausted",
         "\(first.provider.displayName) · limit exhausted"
-          + (stale.isEmpty ? "" : " · \(stale.count) also need an update"),
+          + (stale.isEmpty ? "" : " · \(stale.count) also need fresh data"),
         .exhausted)
     }
     if !deficits.isEmpty {
@@ -325,7 +327,7 @@ enum AllowanceBuilder {
       return (
         deficits.count == 1 ? "1 plan may run out early" : "\(deficits.count) plans may run out early",
         "\(worst.provider.displayName) · \(amount) points over pace"
-          + (stale.isEmpty ? "" : " · \(stale.count) also need an update"),
+          + (stale.isEmpty ? "" : " · \(stale.count) also need fresh data"),
         worst.paceState)
     }
     let reset = Self.nextReset(in: summaries, now: now)
@@ -341,7 +343,7 @@ enum AllowanceBuilder {
         nextReset,
       ].compactMap { $0 }
       return (
-        Self.plans(stale.count, singular: "needs an update", plural: "need an update"),
+        Self.plans(stale.count, singular: "needs fresh data", plural: "need fresh data"),
         context.joined(separator: " · "), .stale)
     }
     if !unknown.isEmpty {

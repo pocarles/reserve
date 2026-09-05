@@ -61,7 +61,8 @@ jobs:
               exit 1
             }
             version=${REF_NAME#v}
-            build_number=$GITHUB_RUN_NUMBER
+            # Keep public builds above the local 1.x test builds.
+            build_number=$((1000 + GITHUB_RUN_NUMBER))
           else
             [[ "$INPUT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
               echo "Version must use the stable X.Y.Z form" >&2
@@ -75,6 +76,7 @@ jobs:
             build_number=$INPUT_BUILD_NUMBER
           fi
 
+          test -s "docs/RELEASE_NOTES_${version}.md"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
 
@@ -186,6 +188,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Download verified artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -196,16 +201,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          RELEASE_PREAMBLE: |
-            ## Updating from Reserve 0.9.1 or earlier
-
-            This is the one update that must be installed manually:
-
-            1. Download **Reserve.dmg** below.
-            2. Open it and drag Reserve into **Applications**.
-            3. Choose **Replace**, then reopen Reserve.
-
-            After this, Reserve can install future updates for you.
         run: |
           set -euo pipefail
           cd release-assets
@@ -214,7 +209,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Reserve ${TAG#v}" \
-            --notes "$RELEASE_PREAMBLE" \
+            --notes-file "$GITHUB_WORKSPACE/docs/RELEASE_NOTES_${TAG#v}.md" \
             --generate-notes \
             --draft
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -1,4 +1,4 @@
-.PHONY: build warnings-as-errors swift-test selftest ui-test lifecycle-test check package package-dry verify-package run probe clean
+.PHONY: build warnings-as-errors swift-test selftest ui-test lifecycle-test connection-test check package package-dry verify-package run probe clean
 
 build:
 	swift build
@@ -20,7 +20,10 @@ ui-test:
 lifecycle-test:
 	swift run Reserve --self-test-lifecycle
 
-check: warnings-as-errors swift-test selftest ui-test lifecycle-test
+connection-test:
+	swift run Reserve --self-test-connections
+
+check: warnings-as-errors swift-test selftest ui-test lifecycle-test connection-test
 
 package:
 	./Scripts/package_app.sh --mode local

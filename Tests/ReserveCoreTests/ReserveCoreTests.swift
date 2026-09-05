@@ -318,17 +318,28 @@ struct ReserveCoreTests {
     _ = try await session.credential {
       CursorCredential(accessToken: "expired-memory-token")
     }
+    let statusRuns = AsyncCounter()
+    let credentialReads = AsyncCounter()
+    let requestCount = AsyncCounter()
     let provider = CursorProvider(
       environment: [:], allowKeychainRead: true,
-      statusRunner: { _, _, _ in
-        throw TestFailure(description: "status reran while a credential was cached")
+      statusRunner: { _, arguments, _ in
+        XCTAssertEqual(arguments, ["status", "--format", "json"])
+        await statusRuns.increment()
+        return #"{"isAuthenticated":true,"hasAccessToken":true}"#
       },
       credentialLoader: { _ in
-        throw TestFailure(description: "Keychain was read while a credential was cached")
+        await credentialReads.increment()
+        return CursorCredential(accessToken: "refreshed-memory-token")
       },
       credentialSession: session,
       requestHandler: { request in
-        (
+        await requestCount.increment()
+        let number = await requestCount.current()
+        let expectedToken = number == 1 ? "expired-memory-token" : "refreshed-memory-token"
+        XCTAssertEqual(
+          request.value(forHTTPHeaderField: "Authorization"), "Bearer \(expectedToken)")
+        return (
           Data(#"{"code":"unauthenticated"}"#.utf8),
           HTTPURLResponse(
             url: request.url!, statusCode: 401, httpVersion: nil,
@@ -342,13 +353,14 @@ struct ReserveCoreTests {
       // Expected. The next access must load a fresh credential.
     }
 
-    let reloads = AsyncCounter()
-    let refreshed = try await session.credential {
-      await reloads.increment()
-      return CursorCredential(accessToken: "refreshed-memory-token")
+    XCTAssertEqual(await statusRuns.current(), 1)
+    XCTAssertEqual(await credentialReads.current(), 1)
+    XCTAssertEqual(await requestCount.current(), 2)
+
+    let postRejection = try await session.credential {
+      CursorCredential(accessToken: "post-rejection-token")
     }
-    XCTAssertEqual(refreshed.accessToken, "refreshed-memory-token")
-    XCTAssertEqual(await reloads.current(), 1)
+    XCTAssertEqual(postRejection.accessToken, "post-rejection-token")
   }
 
   @Test
@@ -615,6 +627,35 @@ struct ReserveCoreTests {
     let decoded = try ClaudeCredentialLoader.decode(
       data: current, source: "current file", now: now)
     XCTAssertEqual(decoded.source, "current file")
+  }
+
+  @Test
+  func testClaudeKeychainReadUsesBoundedMacOSSecurityTool() async throws {
+    let credential = try await ClaudeCredentialLoader.keychainCredentials(
+      itemExists: { true },
+      securityToolRunner: { executable, arguments, environment, timeout in
+        XCTAssertEqual(executable, "/usr/bin/security")
+        XCTAssertEqual(
+          arguments,
+          ["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        XCTAssertTrue(environment.isEmpty)
+        XCTAssertEqual(timeout, .seconds(3))
+        return #"{"claudeAiOauth":{"accessToken":"current-token","expiresAt":1900000000000}}"#
+      })
+
+    XCTAssertEqual(credential?.accessToken, "current-token")
+    XCTAssertEqual(credential?.source, "Claude Keychain")
+  }
+
+  @Test
+  func testClaudeKeychainReadSkipsSecurityToolWhenItemIsMissing() async throws {
+    let credential = try await ClaudeCredentialLoader.keychainCredentials(
+      itemExists: { false },
+      securityToolRunner: { _, _, _, _ in
+        throw TestFailure(description: "security tool ran without a Keychain item")
+      })
+
+    XCTAssertNil(credential)
   }
 
   @Test

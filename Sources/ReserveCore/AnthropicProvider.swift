@@ -158,6 +158,9 @@ public struct AnthropicProvider: UsageProvider {
     case 401:
       throw UsageProviderError.unauthorized(
         "Claude authentication expired. Use Sign in to authenticate again.")
+    case 403:
+      throw UsageProviderError.accessDenied(
+        "Anthropic denied access to usage data. Check your Claude account permissions.")
     case 429:
       let retryAt = Self.conservativeRetryDate(
         retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
@@ -315,6 +318,28 @@ enum ClaudeCredentialLoader {
 
   #if canImport(Security)
     static func keychainItemExistsWithoutPrompt() -> Bool {
+      switch self.keychainProbeStatus() {
+      case errSecSuccess, errSecInteractionNotAllowed, errSecInteractionRequired,
+        errSecUserCanceled, errSecAuthFailed, errSecNoAccessForItem,
+        errSecMissingEntitlement, errSecRestrictedAPI:
+        // A protected item can reject this no-prompt probe even though it is
+        // present. Treat that as a consent path instead of asking the user to
+        // sign in again.
+        return true
+      default:
+        return false
+      }
+    }
+
+    /// The trusted-tool path is only safe to launch after the metadata probe
+    /// itself succeeded without interaction. A locked item still counts as
+    /// present for the consent UI but must not start `security -w` in a
+    /// background refresh.
+    private static func keychainItemIsReadableWithoutPrompt() -> Bool {
+      self.keychainProbeStatus() == errSecSuccess
+    }
+
+    private static func keychainProbeStatus() -> OSStatus {
       let context = LAContext()
       context.interactionNotAllowed = true
       let query: [String: Any] = [
@@ -325,44 +350,47 @@ enum ClaudeCredentialLoader {
         kSecUseAuthenticationContext as String: context,
       ]
       var result: CFTypeRef?
-      return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
+      return SecItemCopyMatching(query as CFDictionary, &result)
     }
 
-    /// Reads the secret through Security.framework rather than by shelling out
-    /// to `/usr/bin/security -w`.
-    ///
-    /// The old path spawned a child process that printed another application's
-    /// OAuth token on its stdout on every refresh, and attributed the access to
-    /// `security` rather than to Reserve. `SecItemCopyMatching` keeps the secret
-    /// in this process's memory and lets macOS attribute the access honestly.
-    private static func keychainCredentials(allowInteraction: Bool) async throws
-      -> ClaudeCredentials?
-    {
-      let context = LAContext()
-      context.interactionNotAllowed = !allowInteraction
-      if allowInteraction {
-        context.localizedReason = "Show your Claude plan limits in Reserve."
+    /// Claude Code resets this item's access list to Apple's command-line tools
+    /// after each browser sign-in. Reading it directly would therefore ask the
+    /// user for the same Keychain approval after every login. The system
+    /// `security` executable remains on that access list. Reserve launches it
+    /// without a shell and captures its bounded output through a private pipe.
+    static func keychainCredentials(
+      allowInteraction: Bool = false,
+      itemExists: (@Sendable () -> Bool)? = nil,
+      securityToolRunner: @escaping @Sendable (
+        String, [String], [String: String], Duration
+      ) async throws -> String = { executable, arguments, environment, timeout in
+        try await ProcessRunner.output(
+          executable: executable, arguments: arguments, environment: environment,
+          timeout: timeout)
       }
-      let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "Claude Code-credentials",
-        kSecMatchLimit as String: kSecMatchLimitOne,
-        kSecReturnData as String: true,
-        kSecUseAuthenticationContext as String: context,
-      ]
-      var result: CFTypeRef?
-      let status = SecItemCopyMatching(query as CFDictionary, &result)
-      if status == errSecItemNotFound { return nil }
-      if status == errSecInteractionNotAllowed || status == errSecUserCanceled
-        || status == errSecAuthFailed
-      {
+    ) async throws -> ClaudeCredentials? {
+      let itemIsPresent = itemExists?()
+        ?? (allowInteraction
+          ? self.keychainItemExistsWithoutPrompt()
+          : self.keychainItemIsReadableWithoutPrompt())
+      guard itemIsPresent else { return nil }
+      let output: String
+      do {
+        let timeout: Duration = allowInteraction ? .seconds(120) : .seconds(3)
+        output = try await securityToolRunner(
+          "/usr/bin/security",
+          ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+          [:], timeout)
+      } catch let error as UsageProviderError {
+        if case .timedOut = error {
+          throw UsageProviderError.unavailable(
+            "Reserve could not read the Claude sign-in from Keychain before the request timed out.")
+        }
+        throw UsageProviderError.keychainConsentRequired(.anthropic)
+      } catch {
         throw UsageProviderError.keychainConsentRequired(.anthropic)
       }
-      guard status == errSecSuccess, let data = result as? Data else {
-        throw UsageProviderError.credentialsNotFound(
-          "Reserve could not read the Claude sign-in from Keychain.")
-      }
-      guard data.count <= 1_048_576 else {
+      guard let data = output.data(using: .utf8), !data.isEmpty, data.count <= 65_536 else {
         throw UsageProviderError.credentialsNotFound(
           "The Claude Keychain item is larger than Reserve can safely read.")
       }

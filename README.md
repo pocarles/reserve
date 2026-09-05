@@ -31,17 +31,18 @@ source build is ad-hoc signed and is intended only for the Mac that built it.
 
 ## Provider requirements
 
-Reserve reuses sign-ins belonging to small official provider helpers. It does
-not create another account or copy credentials into its own storage. People do
-not need to use Terminal. If a helper is missing, choose **Set up**. Reserve
-explains the change, downloads the provider's official installer after
-approval, installs it for the current Mac user, and opens browser sign-in.
-An outdated helper offers **Update** instead.
+Choose **Connect** on a provider card. Reserve first checks for an existing
+sign-in, then guides you through only the steps that are needed in one window.
+If a helper needs installation or an update, Reserve explains the change and
+waits for your approval. Browser sign-in opens on the provider's website in
+your regular Chrome profile, with your existing sessions and saved passwords.
+If Chrome is not installed, Reserve uses your default browser.
+You can reopen that page or cancel the login from the connection window.
 
-Installation never asks for Claude or Cursor access. If a provider protects its
-sign-in with macOS, Reserve first shows an **Allow access** action and explains
-why access is needed. The macOS prompt appears only after that action is
-confirmed. Cursor also starts disabled after installation or upgrade.
+Claude and Cursor require explicit **Allow usage access** before Reserve reads
+their protected sign-in. macOS may also ask you to approve access. The window
+stays open until Reserve reads fresh usage, or explains why it could not.
+Cursor starts disabled after installation or upgrade.
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
@@ -49,8 +50,8 @@ confirmed. Cursor also starts disabled after installation or upgrade.
 - `cursor-agent`, authenticated with `cursor-agent login`, for an individual
   Cursor account. Teams and Enterprise Admin API keys are not supported.
 
-Reserve keeps installation, updates, sign-in, and usage access as separate
-states with one clear action for each. Provider installation and updates never
+The same connection window handles installation, updates, sign-in, permission,
+and the first usage check. Provider installation and updates never
 run silently. Installer downloads are bounded, remain on the provider's exact
 official HTTPS host, run with a minimal environment that excludes unrelated API
 keys, and are removed from temporary storage afterward. Sign-in browser
@@ -175,8 +176,13 @@ retained. Reserve never scans Cursor transcripts or prompt text. It may read
 `~/.claude/.credentials.json` and
 `~/.grok/auth.json` when present. Claude Code can instead keep its sign-in in
 Keychain; Reserve reads it only after the user chooses **Allow access**, through
-Security.framework, and retains it in memory only. A current protected sign-in
-takes precedence over legacy credential files left behind by Claude Code.
+the signed macOS `security` tool, and retains it in memory only. Reserve starts
+that tool directly, captures bounded output through a private pipe, and never
+prints or saves the credential. This addresses the repeated approval prompts caused by Claude Code restoring
+its Keychain access list after browser sign-in; macOS can still require access
+approval when its security settings change. A
+current protected sign-in takes precedence over legacy credential files left
+behind by Claude Code.
 
 For Cursor, Reserve first runs the official
 `cursor-agent status --format json` command with strict time and output limits
@@ -228,21 +234,30 @@ target.
 
 ## Troubleshooting
 
-**A provider needs setup.** Choose **Set up** on its card. Reserve installs the
-official helper and opens browser sign-in without requiring Terminal.
+**Connecting a provider.** Choose **Connect** on its card, or enable it in
+Settings > Providers. Follow the steps in the connection window. No Terminal
+commands or copied tokens are needed.
 
-**A provider needs an update.** Choose **Update**. Reserve uses the helper's
-own update command and checks the limits again.
+**Already signed in, but permission is needed.** Choose **Connect**, then
+**Allow usage access**. Approve macOS access if prompted. Denied access stays a
+permission problem and does not automatically send you through another login.
 
-**Claude is connected in the CLI but not Reserve.** If Claude Code stores its
-credential with macOS, choose **Allow access** on the Claude card. Reserve
-explains the one-time approval before macOS asks. You can turn it off later
-under Settings > Providers.
+**Saved sign-in cannot be used.** Choose **Sign in again** to reconnect in your
+browser. Reserve checks your usage after sign-in; macOS may still ask for access.
 
-**Cursor is signed in but not visible.** Enable Cursor under Settings >
-Providers. Choose **Allow access** to reuse the existing Cursor Agent sign-in,
-or **Sign in** to run `cursor-agent login`. Cursor remains off until you enable
-it.
+**The browser did not open.** Choose **Open browser again** in the connection
+window. **Cancel** stops Reserve's login attempt. You can start again later.
+
+**Cursor briefly loses access.** Reserve reloads its credential through the
+existing Cursor Agent status check and retries once before requesting sign-in.
+A provider rejecting account permissions does not automatically mean the
+session expired.
+
+**Disconnecting a provider.** In Settings > Providers, expand the provider and
+choose **Disconnect from Reserve**. This stops checks, removes Reserve's cached
+usage for that provider, and turns off its usage-access permission. It does not
+sign you out of the provider's own app or uninstall its helper. The tracking
+checkbox can pause checks without clearing cached usage.
 
 **Data is stale or rate limited.** Reserve keeps the last valid snapshot and
 retries after a bounded backoff. Check the provider's linked official status

@@ -21,7 +21,7 @@ let package = Package(
                 "ReserveCore",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
-            resources: [.copy("Resources/ProviderLogos")],
+            resources: [.copy("Resources/ProviderLogos"), .copy("Resources/ClaudeLoginBrowser.sh")],
             swiftSettings: [
                 .define("RESERVE_DEV_AUTOMATION", .when(configuration: .debug)),
             ],

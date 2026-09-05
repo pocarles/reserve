@@ -1,13 +1,30 @@
 import Darwin
 import Foundation
 
-enum ProcessRunner {
+public enum ProcessRunner {
+  /// Stop this launch, including a provider that ignores SIGTERM. The audit
+  /// token prevents the delayed signal from reaching a recycled process ID.
+  public static func stop(_ process: Process) {
+    guard process.isRunning else { return }
+    let token = Self.auditToken(for: process.processIdentifier)
+    guard process.isRunning else { return }
+    guard let token else {
+      process.terminate()
+      return
+    }
+    Self.signal(token, SIGTERM)
+    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(250)) {
+      Self.signal(token, SIGKILL)
+    }
+  }
+
   static func output(
     executable: String,
     arguments: [String],
     environment: [String: String],
     timeout: Duration = .seconds(3)
   ) async throws -> String {
+    try Task.checkCancellation()
     let process = Process()
     let stdout = Pipe()
     let stderr = Pipe()
@@ -25,6 +42,15 @@ enum ProcessRunner {
       events.continuation.yield(.terminated(terminatedProcess.terminationStatus))
     }
     try process.run()
+    defer {
+      // A cancelled refresh must not leave a provider or macOS permission
+      // helper waiting after its connection window has been dismissed.
+      if Task.isCancelled {
+        Self.stop(process)
+        try? stdout.fileHandleForReading.close()
+        try? stderr.fileHandleForReading.close()
+      }
+    }
     let processIdentifier = process.processIdentifier
     // A very short-lived command can exit before its audit token is available.
     // That remains a normal completion path. Without an immutable token we
@@ -35,11 +61,13 @@ enum ProcessRunner {
     // than retaining the replacement process's token.
     let processAuditToken = process.isRunning ? auditTokenCandidate : nil
 
-    Task.detached {
+    // Blocking pipe reads must not occupy Swift cooperative executor threads.
+    // Cancellation and deadlines need those threads even on a small Mac.
+    DispatchQueue.global().async {
       events.continuation.yield(
         .stdout(Self.capture(stdout.fileHandleForReading, maximumBytes: 65_536)))
     }
-    Task.detached {
+    DispatchQueue.global().async {
       events.continuation.yield(
         .stderr(Self.capture(stderr.fileHandleForReading, maximumBytes: 0)))
     }
