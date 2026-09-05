@@ -13,8 +13,7 @@ public enum ProcessRunner {
       return
     }
     Self.signal(token, SIGTERM)
-    Task.detached {
-      try? await Task.sleep(for: .milliseconds(250))
+    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(250)) {
       Self.signal(token, SIGKILL)
     }
   }
@@ -62,11 +61,13 @@ public enum ProcessRunner {
     // than retaining the replacement process's token.
     let processAuditToken = process.isRunning ? auditTokenCandidate : nil
 
-    Task.detached {
+    // Blocking pipe reads must not occupy Swift cooperative executor threads.
+    // Cancellation and deadlines need those threads even on a small Mac.
+    DispatchQueue.global().async {
       events.continuation.yield(
         .stdout(Self.capture(stdout.fileHandleForReading, maximumBytes: 65_536)))
     }
-    Task.detached {
+    DispatchQueue.global().async {
       events.continuation.yield(
         .stderr(Self.capture(stderr.fileHandleForReading, maximumBytes: 0)))
     }
