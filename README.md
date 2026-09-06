@@ -4,6 +4,8 @@ Reserve is a native macOS menu-bar app that shows reported subscription
 capacity for OpenAI Codex, Anthropic Claude, Grok, and Cursor, along with
 authenticated Cursor account usage.
 
+Learn more at [pocarles.com/reserve](https://pocarles.com/reserve/).
+
 It is deliberately small: no Reserve account, browser automation, WebView,
 cookie extraction, telemetry, crash reporting, cloud service, or third-party
 status aggregator. Reserve uses Sparkle only for signed, user-approved macOS
