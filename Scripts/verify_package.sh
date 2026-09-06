@@ -32,11 +32,13 @@ plist="$app/Contents/Info.plist"
 binary="$app/Contents/MacOS/Reserve"
 privacy="$app/Contents/Resources/PrivacyInfo.xcprivacy"
 provider_logos="$app/Contents/Resources/Reserve_Reserve.bundle/ProviderLogos"
+login_browser="$app/Contents/Resources/Reserve_Reserve.bundle/ClaudeLoginBrowser.sh"
 sparkle="$app/Contents/Frameworks/Sparkle.framework"
 [[ -f "$plist" && -x "$binary" && -f "$privacy" \
   && -d "$sparkle" && -x "$sparkle/Versions/B/Autoupdate" \
   && -d "$sparkle/Versions/B/Updater.app" \
   && -f "$app/Contents/Resources/Sparkle-LICENSE.txt" \
+  && -x "$login_browser" \
   && -f "$provider_logos/openAI.svg" \
   && -f "$provider_logos/anthropic.svg" \
   && -f "$provider_logos/grok.svg" \

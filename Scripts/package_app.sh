@@ -201,6 +201,20 @@ smoke_test_packaged_app() {
   wait "$app_pid" 2>/dev/null || true
 }
 
+# The timed smoke test above proves the app launches; it never touches
+# Bundle.module, so it can't tell whether SwiftPM's generated accessor can
+# still find Reserve_Reserve.bundle once nested under Contents/Resources.
+# Files existing on disk isn't proof of that either, so this asks the
+# staged binary itself to resolve the resource.
+verify_claude_login_resources() {
+  local app=$1
+  local output
+  if ! output=$("$app/Contents/MacOS/Reserve" --verify-claude-login-resources 2>&1); then
+    echo "error: Claude login resource did not resolve in the packaged app: $output" >&2
+    exit 65
+  fi
+}
+
 cd "$project_dir"
 mkdir -p "$macos_dir" "$resources_dir" "$frameworks_dir"
 
@@ -305,6 +319,8 @@ fi
 
 "$project_dir/Scripts/verify_package.sh" --mode "$mode" \
   --version "$version" --build "$build_number" "$stage_app"
+
+verify_claude_login_resources "$stage_app"
 
 if [[ "$mode" != local ]]; then
   smoke_test_packaged_app "$stage_app"

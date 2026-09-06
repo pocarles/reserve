@@ -7,6 +7,12 @@ import ReserveCore
 enum ReserveApp {
   static func main() {
     _ = signal(SIGPIPE, SIG_IGN)
+    // Unlike the RESERVE_DEV_AUTOMATION self tests, this runs in release
+    // builds, so packaging can catch a resource that stops resolving.
+    if CommandLine.arguments.contains("--verify-claude-login-resources") {
+      Self.verifyClaudeLoginResources()
+      return
+    }
     let instanceLock: SingleInstanceLock
     do {
       guard let acquired = try SingleInstanceLock.acquire(at: self.instanceLockURL())
@@ -25,6 +31,23 @@ enum ReserveApp {
     withExtendedLifetime((delegate, instanceLock)) {
       application.run()
     }
+  }
+
+  /// Looks up the same resource `ClaudeLoginBrowserPipe.init` needs.
+  /// Checking the bundle's files exist on disk (as verify_package.sh does)
+  /// isn't enough, because SwiftPM's generated `Bundle.module` accessor can
+  /// fail to find them anyway.
+  private static func verifyClaudeLoginResources() {
+    guard
+      PackagedResourceBundle.resolved.url(
+        forResource: "ClaudeLoginBrowser", withExtension: "sh") != nil
+    else {
+      FileHandle.standardError.write(
+        Data("FAIL: ClaudeLoginBrowser.sh did not resolve inside the packaged app\n".utf8))
+      exit(1)
+    }
+    FileHandle.standardOutput.write(Data("PASS: packaged Claude login resource resolved\n".utf8))
+    exit(0)
   }
 
   private static func instanceLockURL() throws -> URL {

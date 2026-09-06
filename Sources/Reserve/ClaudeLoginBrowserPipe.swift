@@ -11,7 +11,9 @@ final class ClaudeLoginBrowserPipe {
   private let gate = BoundedOutputGate(maximumBytes: 65_536)
 
   init(onURLData: @escaping @MainActor @Sendable (Data) -> Void) throws {
-    guard let script = Bundle.module.url(forResource: "ClaudeLoginBrowser", withExtension: "sh"),
+    guard
+      let script = PackagedResourceBundle.resolved.url(
+        forResource: "ClaudeLoginBrowser", withExtension: "sh"),
       FileManager.default.isExecutableFile(atPath: script.path)
     else { throw CocoaError(.fileNoSuchFile) }
     self.browserExecutable = script.path
