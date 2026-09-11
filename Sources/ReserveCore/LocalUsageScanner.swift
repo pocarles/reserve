@@ -999,7 +999,7 @@ private enum Pricing {
         return Rates(input: 1.25, cached: 0.2, cacheWrite: 1.25, output: 2.5)
       }
       return nil
-    case .cursor:
+    case .cursor, .windsurf:
       // Cursor supplies provider-reported costs. Reserve never estimates them
       // from local transcripts.
       return nil

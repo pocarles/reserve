@@ -43,7 +43,7 @@ because Reserve is not sandboxed.
 
 ## Provider names and marks
 
-OpenAI, Codex, Anthropic, Claude, xAI, Grok, Anysphere, Cursor, and their
+OpenAI, Codex, Anthropic, Claude, xAI, Grok, Anysphere, Cursor, Windsurf, Devin, Cognition, and their
 associated marks belong to their respective owners. Their appearance is
 descriptive and does not imply affiliation, sponsorship, or endorsement.
 
@@ -62,7 +62,10 @@ August 16 and August 25, 2026:
   first-party SVG uses `currentColor`, which Reserve resolves to the surrounding
   macOS label or menu-bar colour; and
 - the unmodified 2D Cursor mark from the official
-  [Cursor brand assets](https://cursor.com/brand).
+  [Cursor brand assets](https://cursor.com/brand); and
+- the unmodified Windsurf black symbol from the official
+  [Windsurf logo asset](https://windsurf.com/logo/windsurf-black-symbol.svg),
+  obtained September 11, 2026.
 
 An open-source software license covering code or artwork from another project
 does not grant permission to use a provider's trademarks. The previously
@@ -71,4 +74,4 @@ their corresponding services and must not imply affiliation or endorsement.
 
 Reserve is an independent open-source project and is not affiliated with,
 endorsed by, sponsored by, or an official product of OpenAI, Anthropic, xAI, or
-Anysphere.
+Anysphere or Cognition.

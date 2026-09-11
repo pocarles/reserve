@@ -49,7 +49,7 @@ struct ReserveCoreTests {
     XCTAssertEqual(definitions.map(\.provider), ProviderID.allCases)
     XCTAssertEqual(
       Set(definitions.compactMap(\.installerURL.host)),
-      Set(["chatgpt.com", "claude.ai", "x.ai", "cursor.com"]))
+      Set(["chatgpt.com", "claude.ai", "x.ai", "cursor.com", "windsurf.com"]))
     XCTAssertTrue(definitions.allSatisfy { definition in
       definition.installerURL.scheme == "https"
         && !definition.executable.isEmpty
@@ -57,7 +57,7 @@ struct ReserveCoreTests {
     for provider in ProviderID.allCases {
       XCTAssertEqual(
         ProviderHelperCatalog.definition(for: provider).updateArguments,
-        ["update"])
+        provider == .windsurf ? [] : ["update"])
     }
 
     try ProviderHelperInstaller.validateInstallerFormat(
@@ -92,7 +92,7 @@ struct ReserveCoreTests {
 
   @Test
   func testCursorIsFourthProviderAndStartsWithDistinctPools() throws {
-    XCTAssertEqual(ProviderID.allCases.count, 4)
+    XCTAssertEqual(ProviderID.allCases.count, 5)
     XCTAssertEqual(ProviderID.cursor.displayName, "Cursor")
     let data = Data(
       #"{"billingCycleStart":"1787616000000","billingCycleEnd":"1790294400000","planUsage":{"autoSpend":1800,"autoLimit":4000,"apiPercentUsed":72.5}}"#.utf8)

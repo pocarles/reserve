@@ -1,8 +1,9 @@
 # Reserve
 
 Reserve is a native macOS menu-bar app that shows reported subscription
-capacity for OpenAI Codex, Anthropic Claude, Grok, and Cursor, along with
-authenticated Cursor account usage.
+capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, and Windsurf, along
+with authenticated Cursor account usage. Windsurf uses usage saved by the
+official Devin Desktop app.
 
 It is deliberately small: no Reserve account, browser automation, WebView,
 cookie extraction, telemetry, crash reporting, cloud service, or third-party
@@ -42,13 +43,20 @@ You can reopen that page or cancel the login from the connection window.
 Claude and Cursor require explicit **Allow usage access** before Reserve reads
 their protected sign-in. macOS may also ask you to approve access. The window
 stays open until Reserve reads fresh usage, or explains why it could not.
-Cursor starts disabled after installation or upgrade.
+Cursor and Windsurf start disabled after installation or upgrade.
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
 - Grok Build 1.0.0 or newer, authenticated with `grok login`; and
 - `cursor-agent`, authenticated with `cursor-agent login`, for an individual
-  Cursor account. Teams and Enterprise Admin API keys are not supported.
+  Cursor account. Teams and Enterprise Admin API keys are not supported;
+- Devin Desktop or legacy Windsurf, signed in with its usage settings opened,
+  for cached Windsurf plan usage.
+
+Windsurf setup opens the installed desktop app. Sign in there, open its usage
+settings, then choose **Check again** in Reserve. Reserve reads only the saved
+plan metadata. It never reads Windsurf's protected sign-in or asks for Keychain
+access. If the desktop app is missing, setup opens its official download page.
 
 The same connection window handles installation, updates, sign-in, permission,
 and the first usage check. Provider installation and updates never
@@ -100,6 +108,7 @@ swift run reserve-probe openai
 swift run reserve-probe anthropic
 swift run reserve-probe grok
 swift run reserve-probe cursor
+swift run reserve-probe windsurf
 swift run reserve-probe local
 ```
 
@@ -122,6 +131,20 @@ totals. Hobby, Pro, Pro Plus, and Ultra default to $0, $20, $60, and $200 per
 month; Cursor's reported plan price and renewal date take precedence when
 available. On-demand spending is shown literally as disabled, unlimited, or a
 dollar amount used against its configured cap.
+
+Windsurf shows saved daily and weekly remaining allowances, their reset times,
+plan name, renewal date, and extra usage balance when present. Its source is
+labelled **Devin Desktop account cache**. Expired windows are omitted; expired
+billing periods and caches with no current windows produce an error while
+Reserve keeps the last valid snapshot visible. Multiple saved accounts are
+rejected rather than guessing which account is active.
+
+The desktop cache has no exact observation timestamp. Reserve conservatively
+uses the start of its newest quota window for age calculations, never the
+database modification time. This may mark cached usage stale even when the
+desktop app just updated it. These numbers can lag the Windsurf account page;
+this version does not make an authenticated live usage request. Windsurf token
+counts, transcript estimates, and subscription price guesses are not included.
 
 The optional savings view is an API-equivalent estimate, not a provider bill.
 OpenAI and Anthropic use the observed input/cache/output mix when available;
@@ -272,7 +295,7 @@ from the same GitHub Release. Do not open the DMG.
 
 ## Contributing and release process
 
-Focused contributions that improve the lightweight four-provider product are
+Focused contributions that improve the lightweight five-provider product are
 welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md). Maintainer release operations
 are documented in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 

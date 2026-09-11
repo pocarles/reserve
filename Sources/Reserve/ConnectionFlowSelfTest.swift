@@ -64,6 +64,7 @@ enum ConnectionFlowSelfTest {
     let responses = ConnectionTestResponses()
     var openedBrowserCount = 0
     var lastOpenedBrowserURL: URL?
+    var openedDesktopCount = 0
     let store = UsageStore(
       defaults: defaults, startAutomatically: false, cache: cache,
       fetchOverride: { provider, allowAccess in
@@ -72,9 +73,33 @@ enum ConnectionFlowSelfTest {
       loginCommandOverride: { _ in
         ("/bin/sh", [directory.appendingPathComponent("login.sh").path])
       },
-      openLoginURL: { url in openedBrowserCount += 1; lastOpenedBrowserURL = url; return true })
+      openLoginURL: { url in openedBrowserCount += 1; lastOpenedBrowserURL = url; return true },
+      openWindsurfApplication: { openedDesktopCount += 1; return true })
     let coordinator = ProviderSetupCoordinator(store: store)
     defer { coordinator.close() }
+
+    expect(!store.isEnabled(.windsurf), "Windsurf did not start disabled")
+    await responses.set(.signedOut)
+    coordinator.start(.windsurf)
+    await settle { coordinator.phase == .waitingForDesktop }
+    expect(coordinator.phase == .waitingForDesktop && openedDesktopCount == 1,
+      "Windsurf setup did not open the desktop app and wait for Check again")
+    expect(openedBrowserCount == 0 && !store.keychainReadAllowed(for: .windsurf),
+      "Windsurf cache setup opened browser sign-in or enabled Keychain access")
+    await responses.set(.success)
+    click("connection-primary", in: coordinator.panel)
+    await settle { coordinator.phase == .connected }
+    expect(coordinator.phase == .connected, "Windsurf Check again did not load usage")
+    let windsurfSnapshot = store.states[.windsurf]?.snapshot
+    coordinator.close()
+    await responses.set(.offline)
+    store.refresh(.windsurf)
+    await settle { store.states[.windsurf]?.isRefreshing == false }
+    expect(store.states[.windsurf]?.snapshot == windsurfSnapshot && store.states[.windsurf]?.error != nil,
+      "Failed Windsurf refresh discarded the last good snapshot")
+    store.disconnect(.windsurf)
+    expect(!store.isEnabled(.windsurf) && store.states[.windsurf]?.snapshot == nil,
+      "Windsurf disconnect did not clear the cached snapshot")
 
     await responses.set(.missingHelper)
     coordinator.start(.openAI)
@@ -299,6 +324,27 @@ enum ConnectionFlowSelfTest {
         }
       }
       do { try preview.render(to: evidence.appendingPathComponent("\(name).png")) }
+      catch { failures.append("\(name) screenshot could not be saved") }
+    }
+    let desktopPreview = ProviderConnectionPanel(provider: .windsurf)
+    defer { desktopPreview.close() }
+    for (name, phase) in [
+      ("windsurf-install", ProviderSetupCoordinator.Phase.needsInstall),
+      ("windsurf-desktop", .waitingForDesktop), ("windsurf-connected", .connected),
+      ("windsurf-unavailable", .unavailable),
+    ] {
+      desktopPreview.update(phase: phase)
+      desktopPreview.show()
+      try? await Task.sleep(for: .milliseconds(50))
+      if let root = desktopPreview.contentView {
+        for field in LifecycleSelfTest.descendants(of: root).compactMap({ $0 as? NSTextField }) {
+          let cellHeight = field.cell?.cellSize(forBounds:
+            NSRect(x: 0, y: 0, width: field.bounds.width, height: 1000)).height ?? 0
+          expect(cellHeight <= field.bounds.height + 1, "\(name) text is clipped")
+          expect(root.bounds.contains(field.convert(field.bounds, to: root)), "\(name) text exceeds window")
+        }
+      }
+      do { try desktopPreview.render(to: evidence.appendingPathComponent("\(name).png")) }
       catch { failures.append("\(name) screenshot could not be saved") }
     }
     return failures

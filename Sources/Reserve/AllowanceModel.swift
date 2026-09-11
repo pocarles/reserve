@@ -95,6 +95,7 @@ struct ProviderSummary {
   let quotaSource: String?
   let includedSpend: IncludedSpend?
   let detailedUsageUnavailable: Bool
+  var creditBalanceMinorUnits: Int? = nil
   var usageAccessDenied = false
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
@@ -112,6 +113,7 @@ enum ProviderSetupAction: String, Equatable {
   case update
   case signIn
   case allowAccess
+  case openDesktop
 
   var buttonTitle: String {
     switch self {
@@ -119,6 +121,7 @@ enum ProviderSetupAction: String, Equatable {
     case .update: "Connect"
     case .signIn: "Connect"
     case .allowAccess: "Connect"
+    case .openDesktop: "Open app"
     }
   }
 
@@ -128,11 +131,15 @@ enum ProviderSetupAction: String, Equatable {
     case .update: "Update \(provider.displayName) to resume plan limits"
     case .signIn: "Sign in to \(provider.displayName) to show plan limits"
     case .allowAccess: "Waiting for permission to read usage"
+    case .openDesktop: "Open Devin Desktop's usage settings, then check again"
     }
   }
 
   func toolTip(for provider: ProviderID) -> String {
-    switch self {
+    if provider == .windsurf {
+      return "Open Devin Desktop or Windsurf, view usage settings, then check again in Reserve"
+    }
+    return switch self {
     case .install:
       "Install \(ProviderHelperCatalog.definition(for: provider).displayName) without using Terminal"
     case .update:
@@ -141,6 +148,8 @@ enum ProviderSetupAction: String, Equatable {
       "Sign in with \(provider.displayName) in your browser"
     case .allowAccess:
       "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
+    case .openDesktop:
+      "Open the desktop app to update saved usage"
     }
   }
 }
@@ -205,15 +214,18 @@ enum AllowanceBuilder {
       quotaSource: state.snapshot?.source,
       includedSpend: state.snapshot?.includedSpend,
       detailedUsageUnavailable: state.snapshot?.detailedUsageUnavailable ?? false,
+      creditBalanceMinorUnits: state.snapshot?.creditBalanceMinorUnits,
       usageAccessDenied: state.usageAccessDenied)
   }
 
   private static func connectionToolAvailable(for provider: ProviderID) -> Bool {
+    if provider == .windsurf { return WindsurfProvider.installedApplicationURL() != nil }
     let executable = switch provider {
     case .openAI: "codex"
     case .anthropic: "claude"
     case .grok: "grok"
     case .cursor: "cursor-agent"
+    case .windsurf: "Devin"
     }
     return BinaryLocator.find(executable) != nil
   }
@@ -258,6 +270,7 @@ enum AllowanceBuilder {
     if state.requiresUpdate { return .update }
     if state.requiresInstallation { return .install }
     if state.requiresConnection { return .signIn }
+    if state.provider == .windsurf, state.error != nil { return .openDesktop }
     guard state.snapshot == nil, state.error == nil else { return nil }
     let available = connectionToolAvailable ?? Self.connectionToolAvailable(for: state.provider)
     return available ? .signIn : .install

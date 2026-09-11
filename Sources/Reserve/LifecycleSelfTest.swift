@@ -745,11 +745,13 @@ enum LifecycleSelfTest {
       store.monthlySubscriptionCost(for: .openAI) == nil
         && store.monthlySubscriptionCost(for: .anthropic) == nil
         && store.monthlySubscriptionCost(for: .grok) == nil
-        && store.monthlySubscriptionCost(for: .cursor) == nil,
+        && store.monthlySubscriptionCost(for: .cursor) == nil
+        && store.monthlySubscriptionCost(for: .windsurf) == nil,
       "Reserve still invents a monthly cost before a user enters one")
     result.expect(
       !store.isEnabled(.cursor) && !store.cursorKeychainReadAllowed,
       "Cursor no longer starts disabled with Keychain access off")
+    result.expect(!store.isEnabled(.windsurf), "Windsurf no longer starts disabled")
     result.expect(
       store.exerciseCursorAccessDisableForSelfTest(),
       "turning off Cursor access did not take effect immediately")

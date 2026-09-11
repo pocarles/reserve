@@ -705,7 +705,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let status = SettingsLabel(state.text, size: 12, color: state.color)
     status.widthAnchor.constraint(equalToConstant: 128).isActive = true
     let updated = SettingsLabel(
-      (self.store.states[provider]?.snapshot?.fetchedAt).map {
+      provider == .windsurf && self.store.states[provider]?.snapshot != nil
+        ? "cached" : (self.store.states[provider]?.snapshot?.fetchedAt).map {
         DashboardFormat.updated($0, now: Date()).replacingOccurrences(of: "Updated ", with: "")
       } ?? "never",
       size: 12, color: .tertiaryLabelColor)
@@ -851,8 +852,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           : "Tokens · from local logs on this Mac · value estimated",
       size: 12, color: .secondaryLabelColor)
     let freshness = SettingsLabel(
-      (state?.snapshot?.fetchedAt).map { DashboardFormat.updated($0, now: Date()) }
-        ?? "Never updated",
+      provider == .windsurf && state?.snapshot != nil
+        ? "Saved by the desktop app · exact update time unavailable"
+        : (state?.snapshot?.fetchedAt).map { DashboardFormat.updated($0, now: Date()) }
+          ?? "Never updated",
       size: 12, color: .tertiaryLabelColor)
     let stack = NSStackView(views: [quota, tokens, freshness])
     stack.orientation = .vertical
@@ -1271,6 +1274,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       case .anthropic: "claude"
       case .grok: "grok"
       case .cursor: "cursor-agent"
+      case .windsurf: "Devin"
       }
     let state = self.store.states[provider]
     if !self.store.isEnabled(provider) { return ("Off", .secondaryLabelColor) }
@@ -1282,7 +1286,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       provider: provider,
       hasSnapshot: state?.snapshot != nil,
       hasError: state?.error != nil,
-      toolDetected: BinaryLocator.find(executable) != nil)
+      toolDetected: provider == .windsurf
+        ? WindsurfProvider.installedApplicationURL() != nil
+        : BinaryLocator.find(executable) != nil)
   }
 
   private static func providerStatus(

@@ -5,6 +5,7 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   case anthropic
   case grok
   case cursor
+  case windsurf
 
   public var id: String { self.rawValue }
 
@@ -14,6 +15,7 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
     case .anthropic: "Claude"
     case .grok: "Grok"
     case .cursor: "Cursor"
+    case .windsurf: "Windsurf"
     }
   }
 
@@ -198,6 +200,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public let monthlyPriceMinorUnits: Int?
   public let accountUsage: LocalUsageSummary?
   public let detailedUsageUnavailable: Bool
+  public let creditBalanceMinorUnits: Int?
 
   public init(
     provider: ProviderID,
@@ -209,7 +212,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     billingRenewsAt: Date? = nil,
     monthlyPriceMinorUnits: Int? = nil,
     accountUsage: LocalUsageSummary? = nil,
-    detailedUsageUnavailable: Bool = false
+    detailedUsageUnavailable: Bool = false,
+    creditBalanceMinorUnits: Int? = nil
   ) {
     self.provider = provider
     self.planName = planName.map { String($0.prefix(Self.maximumPlanNameCharacters)) }
@@ -221,11 +225,13 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     self.monthlyPriceMinorUnits = monthlyPriceMinorUnits.map { max(0, $0) }
     self.accountUsage = accountUsage
     self.detailedUsageUnavailable = detailedUsageUnavailable
+    self.creditBalanceMinorUnits = creditBalanceMinorUnits.map { max(0, $0) }
   }
 
   private enum CodingKeys: String, CodingKey {
     case provider, planName, windows, fetchedAt, source, includedSpend, billingRenewsAt
     case monthlyPriceMinorUnits, accountUsage, detailedUsageUnavailable
+    case creditBalanceMinorUnits
   }
 
   public init(from decoder: Decoder) throws {
@@ -242,7 +248,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
         Int.self, forKey: .monthlyPriceMinorUnits),
       accountUsage: try container.decodeIfPresent(LocalUsageSummary.self, forKey: .accountUsage),
       detailedUsageUnavailable: try container.decodeIfPresent(
-        Bool.self, forKey: .detailedUsageUnavailable) ?? false)
+        Bool.self, forKey: .detailedUsageUnavailable) ?? false,
+      creditBalanceMinorUnits: try container.decodeIfPresent(Int.self, forKey: .creditBalanceMinorUnits))
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -256,6 +263,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     try container.encodeIfPresent(self.billingRenewsAt, forKey: .billingRenewsAt)
     try container.encodeIfPresent(self.monthlyPriceMinorUnits, forKey: .monthlyPriceMinorUnits)
     try container.encodeIfPresent(self.accountUsage, forKey: .accountUsage)
+    try container.encodeIfPresent(self.creditBalanceMinorUnits, forKey: .creditBalanceMinorUnits)
     if self.detailedUsageUnavailable {
       try container.encode(true, forKey: .detailedUsageUnavailable)
     }
@@ -280,7 +288,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
       billingRenewsAt: self.billingRenewsAt,
       monthlyPriceMinorUnits: self.monthlyPriceMinorUnits,
       accountUsage: self.accountUsage,
-      detailedUsageUnavailable: self.detailedUsageUnavailable)
+      detailedUsageUnavailable: self.detailedUsageUnavailable,
+      creditBalanceMinorUnits: self.creditBalanceMinorUnits)
   }
 }
 

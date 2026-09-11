@@ -50,6 +50,14 @@ the already-installed helper's fixed, provider-documented update command.
 Reserve's own app updates remain separately verified and installed through
 Sparkle.
 
+Windsurf reads only plan-cache values from the official Devin Desktop or legacy
+Windsurf `User/globalStorage/state.vscdb`. SQLite opens the database read-only,
+uses a fixed plan-key pattern, caps each value at 256 KB, and rejects ambiguous
+accounts. It never selects encrypted session rows or account keys, reads
+Keychain, or sends a Windsurf account request. Only normalized quota metadata
+and optional extra-usage balance enter Reserve's snapshot cache. A desktop
+app's file modification date cannot make expired usage current.
+
 Issues that require another local process already running as the same macOS
 user may still be worth hardening, but reports should describe that prerequisite
 so severity is calibrated accurately.

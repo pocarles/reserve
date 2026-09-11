@@ -71,6 +71,7 @@ final class UsageStore {
   private let fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)?
   private let loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))?
   private let openLoginURL: (URL) -> Bool
+  private let openWindsurfApplication: () -> Bool
   private let localUsageScanner = LocalUsageScanner()
   private let serviceStatusClient = ServiceStatusClient()
   private let defaults: UserDefaults
@@ -118,12 +119,17 @@ final class UsageStore {
     cache: SnapshotCache = SnapshotCache(),
     fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
-    openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) }
+    openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) },
+    openWindsurfApplication: @escaping () -> Bool = {
+      guard let app = WindsurfProvider.installedApplicationURL() else { return false }
+      return NSWorkspace.shared.open(app)
+    }
   ) {
     self.cache = cache
     self.fetchOverride = fetchOverride
     self.loginCommandOverride = loginCommandOverride
     self.openLoginURL = openLoginURL
+    self.openWindsurfApplication = openWindsurfApplication
     self.defaults = defaults
     self.automaticRefreshEnabled = startAutomatically
     self.notifications = ReserveNotifications(
@@ -504,6 +510,14 @@ final class UsageStore {
   }
 
   func connect(_ provider: ProviderID, forceSignIn: Bool = false, onFinished: (() -> Void)? = nil) {
+    if provider == .windsurf {
+      if !self.openWindsurfApplication() {
+        self.states[provider]?.error = "Devin Desktop could not open. Open it from Applications, then check again."
+        self.changed()
+      }
+      onFinished?()
+      return
+    }
     if !forceSignIn, self.states[provider]?.requiresKeychainAccess == true
     {
       self.allowKeychainAccess(for: provider, onFinished: onFinished)
@@ -844,7 +858,7 @@ final class UsageStore {
       }
     let openAIWindowMinutes: Int? = scenario == .unknown ? nil : 10_080
     let grokFetchedAt = now.addingTimeInterval(scenario == .stale ? -42 * 60 : -126)
-    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19, 24]) {
+    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19, 24, 27]) {
       self.defaults.set(day, forKey: "subscription.renewalDay.\(provider.rawValue)")
     }
     self.states[.openAI] = ProviderViewState(
@@ -974,6 +988,20 @@ final class UsageStore {
     self.states[.cursor]?.serviceStatus = ProviderServiceStatus(
       provider: .cursor, health: .operational, detail: "All systems operational",
       pageURL: URL(string: "https://status.cursor.com")!)
+    self.states[.windsurf] = ProviderViewState(
+      provider: .windsurf,
+      snapshot: UsageSnapshot(
+        provider: .windsurf, planName: "Pro",
+        windows: [
+          UsageWindow(id: "weekly", label: "Weekly", usedPercent: 32,
+            windowMinutes: 10_080, resetsAt: now.addingTimeInterval(3 * 86_400)),
+          UsageWindow(id: "daily", label: "Daily", usedPercent: 20,
+            windowMinutes: 1_440, resetsAt: now.addingTimeInterval(12 * 3_600)),
+        ], fetchedAt: now.addingTimeInterval(-120), source: "Devin Desktop account cache",
+        creditBalanceMinorUnits: 1_000))
+    self.states[.windsurf]?.serviceStatus = ProviderServiceStatus(
+      provider: .windsurf, health: .operational, detail: "All systems operational",
+      pageURL: URL(string: "https://status.windsurf.com")!)
     self.changed()
   }
 
@@ -983,6 +1011,7 @@ final class UsageStore {
       "provider.anthropic.enabled": true,
       "provider.grok.enabled": true,
       "provider.cursor.enabled": false,
+      "provider.windsurf.enabled": false,
       // Reading Claude Code's Keychain item is another application's OAuth
       // token, so it is opt-in and stays off until asked for.
       "anthropic.keychainReadAllowed": false,
@@ -1165,6 +1194,10 @@ final class UsageStore {
       LoginConfiguration(
         executable: "cursor-agent", arguments: ["login"], displayName: "Cursor Agent",
         trustedHosts: ["cursor.com", "auth.cursor.com", "www.cursor.com"])
+    case .windsurf:
+      LoginConfiguration(
+        executable: "Devin", arguments: [], displayName: "Devin Desktop",
+        trustedHosts: ["windsurf.com", "www.windsurf.com"])
     }
   }
 
@@ -1341,6 +1374,7 @@ final class UsageStore {
         CursorProvider(
           allowKeychainRead: self.cursorKeychainReadAllowed,
           allowKeychainInteraction: allowKeychainInteraction)
+      case .windsurf: WindsurfProvider()
       }
     let previousHealth = self.states[provider]?.serviceStatus?.health
     if !allowKeychainInteraction, self.fetchOverride == nil {

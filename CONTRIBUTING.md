@@ -1,7 +1,8 @@
 # Contributing to Reserve
 
 Reserve welcomes focused fixes and improvements that preserve its purpose: a
-small, local-first macOS capacity monitor for Codex, Claude, and Grok.
+small, local-first macOS capacity monitor for Codex, Claude, Grok, Cursor, and
+Windsurf.
 
 ## Before opening a pull request
 
