@@ -391,9 +391,31 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let dashboardFits =
       size.width == DashboardMetrics.width
       && size.height >= DashboardMetrics.minimumHeight
-      && size.height <= DashboardMetrics.maximumHeight
-      // A menu-bar popover has to clear the menu bar on the shortest current Mac.
-      && size.height <= 900
+      && size.height <= DashboardMetrics.availableHeight(on: NSScreen.main)
+    // Five cards exceed a small display's viewport. The document may be taller,
+    // but the viewport must fit and scrolling must reveal the whole fifth card.
+    let compactCeiling = DashboardMetrics.availableHeight(on: nil, visibleHeight: 700)
+    let compactDashboard = UsageDashboardView(
+      states: self.store.orderedStates, selectedMenuBarProvider: nil,
+      isRefreshing: false, now: Date(), maximumHeight: compactCeiling,
+      actions: DashboardActions(
+        refreshAll: {}, connectProvider: { _ in }, selectMenuBarProvider: { _ in },
+        openSettings: {}, openInsights: {}, dismiss: {}, toggleProviderDetail: { _ in }, quit: {}))
+    compactDashboard.layoutSubtreeIfNeeded()
+    let compactViews = Self.descendants(of: compactDashboard)
+    let fifthProviderReachable: Bool
+    if let scroll = compactViews.compactMap({ $0 as? NSScrollView }).first,
+      let document = scroll.documentView,
+      let fifth = compactViews.first(where: { $0.identifier?.rawValue == "provider-card-windsurf" })
+    {
+      document.layoutSubtreeIfNeeded()
+      let fifthRect = fifth.convert(fifth.bounds, to: document)
+      document.scrollToVisible(fifthRect)
+      fifthProviderReachable = compactDashboard.frame.height <= compactCeiling
+        && scroll.frame.height <= compactCeiling
+        && document.frame.height > scroll.contentView.bounds.height
+        && scroll.documentVisibleRect.insetBy(dx: -1, dy: -1).contains(fifthRect)
+    } else { fifthProviderReachable = false }
     // The glance view leads with one conclusion, not a strip of totals.
     let headlinePresent = identifiers.contains("dashboard-headline")
     let activityMetricsAreGone =
@@ -710,7 +732,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && self.shouldDismissDashboard(forClickedWindow: unrelatedWindow)
     guard providerCards == ProviderID.allCases.count, actionsPresent, quitRemainsReachable,
       logosPresent, bundledProviderArtworkPresent, scrollingMatchesAvailableSpace, contentFits,
-      dashboardFits, headlinePresent,
+      dashboardFits, fifthProviderReachable, headlinePresent,
       activityMetricsAreGone, percentagesAreLabelled, forecastsPresent, disclosuresPresent,
       detailLayersPresent, keyboardReachable, spaceSelectsProvider, returnOpensDetail,
       rowsAreSpoken, decorationIsSilent, metersAreSpoken, meterSemanticsWork, motionIsPurposeful,
@@ -730,7 +752,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     else {
       return (
         false,
-        "dashboard providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (

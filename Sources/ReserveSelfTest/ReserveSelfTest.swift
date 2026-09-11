@@ -35,6 +35,7 @@ struct ReserveSelfTest {
         contentsOf: fixtures.appendingPathComponent("cursor-missing-fields.json")),
       cursorMalformedData: try Data(
         contentsOf: fixtures.appendingPathComponent("cursor-malformed-values.json")),
+      windsurfCacheData: try Data(contentsOf: fixtures.appendingPathComponent("windsurf-cache.json")),
       helperExecutable: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path,
       progress: { name in
         print("PASS \(name)")

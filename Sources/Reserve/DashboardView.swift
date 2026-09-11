@@ -72,6 +72,7 @@ final class DashboardViewController: NSViewController {
       parts.append(summary.quotaSource ?? "-")
       parts.append(summary.subscriptionCostUSD.map { String($0) } ?? "-")
       parts.append(String(reflecting: summary.includedSpend))
+      parts.append(String(reflecting: summary.creditBalanceMinorUnits))
       parts.append(summary.detailedUsageUnavailable ? "usage-unavailable" : "-")
       parts.append(String(reflecting: summary.localUsage))
       for allowance in summary.allowances {
@@ -467,7 +468,7 @@ final class ProviderDashboardCard: NSView {
         summary: summary, isSelectedForMenuBar: isSelectedForMenuBar,
         isExpanded: isExpanded, connectProvider: connectProvider, toggleDetail: toggleDetail)
     ]
-    if self.hasUnavailableLiveData {
+    if self.hasUnavailableLiveData || summary.provider == .windsurf {
       rows.append(ProviderFreshnessBanner(summary: summary, now: now))
     }
     if let primary = summary.primary {
@@ -753,6 +754,9 @@ private final class ProviderFreshnessBanner: NSView {
     } else if summary.requiresKeychainAccess {
       state = "Waiting for permission"
       fullState = state
+    } else if summary.setupAction == .openDesktop {
+      state = "Cache unavailable"
+      fullState = state
     } else if summary.needsConnection {
       state = "Sign-in needed"
       fullState = state
@@ -763,10 +767,12 @@ private final class ProviderFreshnessBanner: NSView {
       state = "Cached"
       fullState = "Cached data"
     }
-    let age = summary.lastUpdated.map {
+    let age = summary.provider == .windsurf && summary.lastUpdated != nil
+      ? "update time unknown" : summary.lastUpdated.map {
       "last checked \(Self.compactAge(since: $0, now: now))"
     } ?? "not checked yet"
-    let fullAge = summary.lastUpdated.map {
+    let fullAge = summary.provider == .windsurf && summary.lastUpdated != nil
+      ? "saved by Devin Desktop; exact update time unknown" : summary.lastUpdated.map {
       DashboardFormat.updated($0, now: now).replacingOccurrences(
         of: "Updated", with: "last updated")
     } ?? "never updated"
@@ -1115,6 +1121,9 @@ private final class UsageDetailGrid: NSView {
       Self.cell(
         "Subscription",
         summary.subscriptionCostUSD.map { "\(DashboardFormat.money($0))/month" } ?? "Not set"))
+    if let balance = summary.creditBalanceMinorUnits {
+      rows.append(Self.cell("Extra usage balance", DashboardFormat.money(Double(balance) / 100)))
+    }
     if let spend = summary.includedSpend {
       let value: String =
         switch spend.limitState {

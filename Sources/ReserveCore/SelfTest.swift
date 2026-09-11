@@ -9,6 +9,7 @@ public enum ReserveSelfTests {
     cursorDisabledSpendData: Data,
     cursorMissingFieldsData: Data,
     cursorMalformedData: Data,
+    windsurfCacheData: Data,
     helperExecutable: String? = nil,
     progress: @Sendable (String) -> Void = { _ in }
   ) async throws -> [String] {
@@ -33,6 +34,14 @@ public enum ReserveSelfTests {
       ).withFallbackPlanName("X Premium+").planName == "SuperGrok"
     else { throw Failure("snapshot plan-name fallback") }
     record("snapshot plan-name fallback")
+    let windsurf = try WindsurfProvider.decodeCache(
+      windsurfCacheData, now: Date(timeIntervalSince1970: 1_800_000_000))
+    guard windsurf.windows.map(\.usedPercent) == [24.5, 60],
+      windsurf.creditBalanceMinorUnits == 1_250,
+      windsurf.source == "Devin Desktop account cache",
+      windsurf.fetchedAt == Date(timeIntervalSince1970: 1_799_956_800)
+    else { throw Failure("Windsurf cached quotas and conservative age") }
+    record("Windsurf cached quotas and conservative age")
 
     let saturated = LocalUsageSummary(
       provider: .anthropic, periodDays: 30,

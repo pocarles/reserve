@@ -8,6 +8,7 @@ final class ProviderSetupCoordinator {
     case checking, needsInstall, needsUpdate, installing, updating
     case needsSignIn, signingIn, needsAccess, grantingAccess, accessNotGranted, signInNotSaved
     case connected, unavailable, accessDenied, failed
+    case waitingForDesktop
   }
 
   private let store: UsageStore
@@ -100,6 +101,11 @@ final class ProviderSetupCoordinator {
     let generation = self.generation
     switch self.phase {
     case .needsInstall, .needsUpdate:
+      if provider == .windsurf {
+        _ = LoginBrowser.open(ProviderHelperCatalog.definition(for: provider).installerURL)
+        self.present(.waitingForDesktop)
+        return
+      }
       let installing = self.phase == .needsInstall
       self.present(installing ? .installing : .updating)
       Task { [weak self] in
@@ -121,6 +127,12 @@ final class ProviderSetupCoordinator {
         }
       }
     case .needsSignIn, .accessNotGranted:
+      if provider == .windsurf {
+        self.loginAttempted = true
+        self.store.connect(provider)
+        self.present(.waitingForDesktop)
+        return
+      }
       let forceSignIn = self.phase == .accessNotGranted
       self.loginAttempted = true
       self.present(.signingIn)
@@ -144,6 +156,11 @@ final class ProviderSetupCoordinator {
         self.didCheck()
       }
     case .failed, .unavailable, .accessDenied:
+      if provider == .windsurf {
+        self.store.connect(provider)
+        self.present(.waitingForDesktop)
+      } else { self.check() }
+    case .waitingForDesktop:
       self.check()
     case .connected:
       self.close()
@@ -161,7 +178,8 @@ final class ProviderSetupCoordinator {
     guard self.phase != .installing, self.phase != .updating else { return }
     let provider = self.activeProvider
     let cancelledSetup = !self.wasEnabled && [Phase.checking, .needsInstall, .needsUpdate,
-      .needsSignIn, .signingIn, .needsAccess, .grantingAccess, .accessNotGranted].contains(self.phase)
+      .needsSignIn, .signingIn, .needsAccess, .grantingAccess, .accessNotGranted,
+      .waitingForDesktop].contains(self.phase)
     self.activeProvider = nil
     self.generation += 1
     if let observer { self.store.removeObserver(observer) }
@@ -334,6 +352,27 @@ final class ProviderConnectionPanel: NSPanel {
       self.message.stringValue = "Reserve could not finish setting up \(name). Check your connection, then try again."
       action = "Try again"
       self.closeButton.title = "Close"
+    case .waitingForDesktop:
+      self.heading.stringValue = "Open your Windsurf usage"
+      self.message.stringValue = "In Devin Desktop or Windsurf, sign in and open your usage settings. Then return here and choose Check again."
+      self.privacy.stringValue = "Reserve reads only the plan usage saved by the desktop app. It does not access your password or protected sign-in."
+      action = "Check again"
+    }
+    if self.provider == .windsurf {
+      switch phase {
+      case .needsInstall, .needsUpdate:
+        self.message.stringValue = "Install or update Devin Desktop, then sign in and open its usage settings."
+        self.privacy.stringValue = "Opens the official download page. Return here after setup."
+        action = "Open download page"
+      case .connected:
+        self.heading.stringValue = "Windsurf cache connected"
+        self.message.stringValue = "Reserve can read usage saved by Devin Desktop. Refresh your usage in the desktop app to update these numbers."
+        self.privacy.stringValue = "Cached usage can be older than your account page. Reserve marks old observations as stale."
+      case .unavailable:
+        self.message.stringValue = "The saved usage is missing or expired. Open usage settings in Devin Desktop, then check again here."
+        action = "Open Devin Desktop"
+      default: break
+      }
     }
     self.spinner.isHidden = !busy
     if busy { self.spinner.startAnimation(nil) } else { self.spinner.stopAnimation(nil) }

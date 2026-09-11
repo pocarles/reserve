@@ -53,6 +53,10 @@ public enum ProviderHelperCatalog {
         displayName: "Cursor helper",
         installerURL: URL(string: "https://cursor.com/install")!,
         updateArguments: ["update"])
+    case .windsurf:
+      ProviderHelperDefinition(
+        provider: provider, executable: "Devin", displayName: "Devin Desktop",
+        installerURL: URL(string: "https://windsurf.com/download")!, updateArguments: [])
     }
   }
 }
@@ -86,6 +90,9 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
   }
 
   public func install(_ provider: ProviderID) async throws {
+    guard provider != .windsurf else {
+      throw ProviderHelperInstallerError.installFailed("Install Devin Desktop from windsurf.com, then return to Reserve.")
+    }
     let definition = ProviderHelperCatalog.definition(for: provider)
     var request = URLRequest(url: definition.installerURL)
     request.timeoutInterval = 30
@@ -137,6 +144,9 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
   }
 
   public func update(_ provider: ProviderID) async throws {
+    guard provider != .windsurf else {
+      throw ProviderHelperInstallerError.installFailed("Update Devin Desktop from its application menu, then return to Reserve.")
+    }
     let definition = ProviderHelperCatalog.definition(for: provider)
     guard let executable = BinaryLocator.find(definition.executable) else {
       throw ProviderHelperInstallerError.helperNotFound(definition.displayName)

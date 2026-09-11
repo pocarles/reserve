@@ -52,6 +52,7 @@ enum ProviderArtwork {
       case .anthropic: "A"
       case .grok: "G"
       case .cursor: "C"
+      case .windsurf: "W"
       }
     let size = NSSize(width: 18, height: 18)
     let image = NSImage(size: size, flipped: false) { rect in
