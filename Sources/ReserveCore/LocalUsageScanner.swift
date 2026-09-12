@@ -163,6 +163,7 @@ public actor LocalUsageScanner {
   private let maximumLinesPerFile = 100_000
   private let maximumScanDuration: TimeInterval = 8
   private var fileKeys: [ProviderID: [String: String]] = [:]
+  private var lastScanDates: [ProviderID: Date] = [:]
 
   public init(
     roots: Roots = .defaults(),
@@ -184,8 +185,13 @@ public actor LocalUsageScanner {
   public func scan(
     periodDays: Int = 30,
     cycleStarts: [ProviderID: Date] = [:],
-    now: Date = Date()
+    now: Date = Date(),
+    providers: Set<ProviderID> = [.openAI, .anthropic, .grok],
+    dirtyProviders: Set<ProviderID>? = nil
   ) throws -> [ProviderID: LocalUsageSummary] {
+    let selected = providers.intersection([.openAI, .anthropic, .grok])
+    guard !selected.isEmpty else { return [:] }
+    let dirty = dirtyProviders.map { selected.intersection($0) } ?? selected
     let deadline = Date().addingTimeInterval(self.maximumScanDuration)
     let days = min(90, max(1, periodDays))
     let cutoff = Calendar.current.date(byAdding: .day, value: -days + 1, to: now) ?? now
@@ -195,19 +201,27 @@ public actor LocalUsageScanner {
     var retainedKeys: Set<String> = []
     var indexChanged = false
 
-    let codex = try self.scanCodex(
-      cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys,
-      indexChanged: &indexChanged, deadline: deadline)
-    let claude = try self.scanClaude(
-      cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys,
-      indexChanged: &indexChanged, deadline: deadline)
-    let grok = try self.scanGrok(
-      cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys,
-      indexChanged: &indexChanged, deadline: deadline)
+    if dirty.contains(.openAI) {
+      _ = try self.scanCodex(
+        cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys,
+        indexChanged: &indexChanged, deadline: deadline)
+    }
+    if dirty.contains(.anthropic) {
+      _ = try self.scanClaude(
+        cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys,
+        indexChanged: &indexChanged, deadline: deadline)
+    }
+    if dirty.contains(.grok) {
+      _ = try self.scanGrok(
+        cutoff: cutoff, cutoffKey: cutoffKey, index: &index, retainedKeys: &retainedKeys,
+        indexChanged: &indexChanged, deadline: deadline)
+    }
 
     try Self.checkDeadline(deadline)
     let previousRecordCount = index.records.count
-    index.records = index.records.filter { retainedKeys.contains($0.key) }
+    index.records = index.records.filter {
+      !dirty.contains($0.value.provider) || retainedKeys.contains($0.key)
+    }
     try Self.checkDeadline(deadline)
     if index.records.count != previousRecordCount { indexChanged = true }
     if indexChanged {
@@ -215,8 +229,12 @@ public actor LocalUsageScanner {
       try self.saveIndex(index, deadline: deadline)
     }
 
+    for provider in dirty { self.lastScanDates[provider] = now }
     let todayKey = Self.dayKey(now)
-    let series = try Self.dailySeries(index: index, days: days, now: now, deadline: deadline)
+    var selectedIndex = index
+    selectedIndex.records = index.records.filter { selected.contains($0.value.provider) }
+    let series = try Self.dailySeries(
+      index: selectedIndex, days: days, now: now, deadline: deadline)
     func summary(_ provider: ProviderID, fallback: UsageTotals) throws -> LocalUsageSummary {
       try Self.checkDeadline(deadline)
       let cycleStart = cycleStarts[provider] ?? cutoff
@@ -230,14 +248,14 @@ public actor LocalUsageScanner {
         today: today,
         cycle: cycle,
         cycleStartedAt: cycleStart,
-        now: now,
+        now: self.lastScanDates[provider] ?? index.updatedAt,
         dailyTokens: series[provider] ?? [])
     }
-    return [
-      .openAI: try summary(.openAI, fallback: codex),
-      .anthropic: try summary(.anthropic, fallback: claude),
-      .grok: try summary(.grok, fallback: grok),
-    ]
+    return try selected.reduce(into: [:]) { result, provider in
+      let totals = try Self.aggregate(
+        provider: provider, since: cutoffKey, index: selectedIndex, deadline: deadline)
+      result[provider] = try summary(provider, fallback: totals)
+    }
   }
 
   /// Continuous daily series for every provider, quiet days included so a chart
@@ -796,25 +814,49 @@ public actor LocalUsageScanner {
     return key
   }
 
+  private static let dateParsers = ScannerDateParsers()
+
   private static func dayKey(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.calendar = Calendar(identifier: .gregorian)
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = .current
-    formatter.dateFormat = "yyyy-MM-dd"
-    return formatter.string(from: date)
+    Self.dateParsers.dayKey(date)
   }
 
   private static func parseDate(_ text: String) -> Date? {
-    let fractional = ISO8601DateFormatter()
-    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text)
+    Self.dateParsers.parse(text)
   }
 
   private static func int64(_ value: Any?) -> Int64 {
     if let number = value as? NSNumber { return number.int64Value }
     if let string = value as? String { return Int64(string) ?? 0 }
     return 0
+  }
+}
+
+/// Static parse helpers are also used by tests outside the scanner actor.
+/// Keep formatter reuse synchronized and follow time-zone changes.
+private final class ScannerDateParsers: @unchecked Sendable {
+  private let lock = NSLock()
+  private let day = DateFormatter()
+  private let fractional = ISO8601DateFormatter()
+  private let standard = ISO8601DateFormatter()
+
+  init() {
+    self.day.calendar = Calendar(identifier: .gregorian)
+    self.day.locale = Locale(identifier: "en_US_POSIX")
+    self.day.dateFormat = "yyyy-MM-dd"
+    self.fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  }
+
+  func dayKey(_ date: Date) -> String {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    self.day.timeZone = .current
+    return self.day.string(from: date)
+  }
+
+  func parse(_ text: String) -> Date? {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    return self.fractional.date(from: text) ?? self.standard.date(from: text)
   }
 }
 
@@ -949,6 +991,7 @@ private enum Pricing {
 
   private static func rates(provider: ProviderID, model: String) -> Rates? {
     switch provider {
+    case .copilot: return nil
     case .openAI:
       if model.contains("5.6-sol") {
         return Rates(input: 5, cached: 0.5, cacheWrite: 6.25, output: 30)

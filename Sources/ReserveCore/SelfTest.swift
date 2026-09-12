@@ -180,7 +180,7 @@ public enum ReserveSelfTests {
             id: "build-share", label: "Build share", usedPercent: used,
             windowMinutes: 7 * 24 * 60, resetsAt: riskReset),
         ],
-        source: "self-test")
+        fetchedAt: paceNow, source: "self-test")
     }
     let safeSnapshot = weekly(5)
     let riskySnapshot = weekly(80)

@@ -11,6 +11,7 @@ public struct AnthropicProvider: UsageProvider {
   private let environment: [String: String]
   private let allowKeychainRead: Bool
   private let allowKeychainInteraction: Bool
+  private let passiveStatusline: Bool
   private let requestHandler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
   private let rateLimitGate: ClaudeRateLimitGate
 
@@ -18,12 +19,14 @@ public struct AnthropicProvider: UsageProvider {
     environment: [String: String] = ProcessInfo.processInfo.environment,
     allowKeychainRead: Bool = false,
     allowKeychainInteraction: Bool = false,
+    passiveStatusline: Bool = false,
     session: URLSession? = nil
   ) {
     let session = session ?? ProviderHTTPSession.shared
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
     self.allowKeychainInteraction = allowKeychainInteraction
+    self.passiveStatusline = passiveStatusline
     self.requestHandler = {
       try await ProviderHTTPSession.boundedData(
         for: $0, using: session, maximumBytes: 1_048_576)
@@ -41,11 +44,21 @@ public struct AnthropicProvider: UsageProvider {
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
     self.allowKeychainInteraction = allowKeychainInteraction
+    self.passiveStatusline = false
     self.requestHandler = requestHandler
     self.rateLimitGate = rateLimitGate
   }
 
   public func fetch() async throws -> UsageSnapshot {
+    if self.passiveStatusline {
+      guard let snapshot = ClaudeStatuslineBridge.read(
+        cacheURL: ClaudeStatuslineBridge.cacheURL(environment: self.environment))
+      else {
+        throw UsageProviderError.unavailable(
+          "Waiting for Claude Code. Your limits appear after its next response.")
+      }
+      return snapshot
+    }
     if let retryAt = await self.rateLimitGate.activeBlock(), retryAt > Date() {
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     }

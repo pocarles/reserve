@@ -107,14 +107,13 @@ struct ProviderConnectionRecoveryTests {
     let snapshot = try await provider.fetch()
     let stats = await probe.stats()
     #expect(snapshot.provider == .cursor)
-    #expect(stats.statusRuns == 2)
+    #expect(stats.statusRuns == 1)
     #expect(stats.credentialLoads == 2)
     #expect(stats.calls == [
       "GetCurrentPeriodUsage:cursor-test-token-1",
       "GetCurrentPeriodUsage:cursor-test-token-2",
       "GetPlanInfo:cursor-test-token-2",
       "GetHardLimit:cursor-test-token-2",
-      "GetMe:cursor-test-token-2",
     ])
   }
 
@@ -135,7 +134,7 @@ struct ProviderConnectionRecoveryTests {
     }
 
     let stats = await probe.stats()
-    #expect(stats.statusRuns == 2)
+    #expect(stats.statusRuns == 1)
     #expect(stats.credentialLoads == 2)
     #expect(stats.calls == [
       "GetCurrentPeriodUsage:cursor-test-token-1",
@@ -185,7 +184,7 @@ struct ProviderConnectionRecoveryTests {
       }
 
       let stats = await probe.stats()
-      #expect(stats.statusRuns == 1)
+      #expect(stats.statusRuns == 0)
       #expect(stats.credentialLoads == 1)
       #expect(stats.calls.count == 1)
     }

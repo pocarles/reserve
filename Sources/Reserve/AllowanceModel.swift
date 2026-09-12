@@ -10,9 +10,11 @@ struct Allowance: Identifiable {
   let title: String
   let usedPercent: Double
   let resetsAt: Date?
-  let projection: UsagePaceProjection?
+  var projection: UsagePaceProjection?
   let isPrimary: Bool
-  let paceState: UsagePaceState
+  var paceState: UsagePaceState
+  var isComponentShare = false
+  var windowMinutes: Int? = nil
 
   var remainingPercent: Double { max(0, min(100, 100 - self.usedPercent)) }
 
@@ -78,8 +80,8 @@ extension UsagePaceState {
 struct ProviderSummary {
   let provider: ProviderID
   let planName: String
-  let allowances: [Allowance]
-  let paceState: UsagePaceState
+  var allowances: [Allowance]
+  var paceState: UsagePaceState
   let serviceStatus: ProviderServiceStatus?
   let isConnecting: Bool
   let isRefreshing: Bool
@@ -97,9 +99,29 @@ struct ProviderSummary {
   let detailedUsageUnavailable: Bool
   var creditBalanceMinorUnits: Int? = nil
   var usageAccessDenied = false
+  var observationTimeKnown = true
+  var checkedAt: Date? = nil
+  var availableResetCount: Int? = nil
+  var billingRenewsAt: Date? = nil
+  var subscriptionCostLabel: String? = nil
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
   var secondary: [Allowance] { self.allowances.filter { !$0.isPrimary } }
+
+  func at(_ now: Date) -> ProviderSummary {
+    var result = self
+    result.allowances = self.allowances.map { allowance in
+      var value = allowance
+      let window = UsageWindow(id: value.id, label: value.title, usedPercent: value.usedPercent,
+        windowMinutes: value.windowMinutes, resetsAt: value.resetsAt)
+      value.paceState = UsagePaceState.calculate(for: window, fetchedAt: self.lastUpdated,
+        hasError: self.error != nil || !self.observationTimeKnown, now: now)
+      value.projection = value.paceState == .stale ? nil : UsagePaceProjection.calculate(for: window, now: now)
+      return value
+    }
+    result.paceState = result.primary?.paceState ?? self.paceState
+    return result
+  }
 
   /// Provider availability is only worth showing when it is not normal.
   var serviceIsExceptional: Bool {
@@ -118,9 +140,9 @@ enum ProviderSetupAction: String, Equatable {
   var buttonTitle: String {
     switch self {
     case .install: "Connect"
-    case .update: "Connect"
-    case .signIn: "Connect"
-    case .allowAccess: "Connect"
+    case .update: "Update"
+    case .signIn: "Sign in"
+    case .allowAccess: "Allow access"
     case .openDesktop: "Open app"
     }
   }
@@ -138,6 +160,10 @@ enum ProviderSetupAction: String, Equatable {
   func toolTip(for provider: ProviderID) -> String {
     if provider == .windsurf {
       return "Open Devin Desktop or Windsurf, view usage settings, then check again in Reserve"
+    }
+    if !ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation {
+      if self == .install { return "Open official installation instructions for \(provider.displayName)" }
+      if self == .update { return "Open official update instructions for \(provider.displayName)" }
     }
     return switch self {
     case .install:
@@ -159,8 +185,10 @@ enum AllowanceBuilder {
   static func summary(for state: ProviderViewState, now: Date = Date()) -> ProviderSummary {
     let windows = state.snapshot?.windows ?? []
     let planWindows = windows.filter { !$0.isComponentShare }
-    let primaryWindow =
-      planWindows.first { $0.label.localizedCaseInsensitiveCompare("Weekly") == .orderedSame }
+    let blockingWindow = planWindows.filter { $0.usedPercent >= 99.5 && ($0.resetsAt ?? .distantFuture) > now }
+      .min { ($0.resetsAt ?? .distantFuture) < ($1.resetsAt ?? .distantFuture) }
+    let primaryWindow = blockingWindow
+      ?? planWindows.first { $0.label.localizedCaseInsensitiveCompare("Weekly") == .orderedSame }
       ?? planWindows.max(by: { $0.usedPercent < $1.usedPercent })
       ?? windows.max(by: { $0.usedPercent < $1.usedPercent })
 
@@ -177,13 +205,15 @@ enum AllowanceBuilder {
           title: Self.title(for: window),
           usedPercent: window.usedPercent,
           resetsAt: window.resetsAt,
-          projection: UsagePaceProjection.calculate(for: window, now: now),
+          projection: state.snapshot?.observationTimeKnown == false || state.error != nil
+            ? nil : UsagePaceProjection.calculate(for: window, now: now),
           isPrimary: window.id == primaryWindow?.id,
           paceState: UsagePaceState.calculate(
             for: window,
             fetchedAt: state.snapshot?.fetchedAt,
-            hasError: state.error != nil,
-            now: now))
+            hasError: state.error != nil || state.snapshot?.observationTimeKnown == false,
+            now: now),
+          isComponentShare: window.isComponentShare, windowMinutes: window.windowMinutes)
       }
 
     let planName = state.snapshot?.planName?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -215,18 +245,16 @@ enum AllowanceBuilder {
       includedSpend: state.snapshot?.includedSpend,
       detailedUsageUnavailable: state.snapshot?.detailedUsageUnavailable ?? false,
       creditBalanceMinorUnits: state.snapshot?.creditBalanceMinorUnits,
-      usageAccessDenied: state.usageAccessDenied)
+      usageAccessDenied: state.usageAccessDenied,
+      observationTimeKnown: state.snapshot?.observationTimeKnown ?? true,
+      checkedAt: state.snapshot?.checkedAt,
+      availableResetCount: state.snapshot?.availableResetCount,
+      billingRenewsAt: state.snapshot?.billingRenewsAt, subscriptionCostLabel: state.subscriptionCostLabel)
   }
 
   private static func connectionToolAvailable(for provider: ProviderID) -> Bool {
     if provider == .windsurf { return WindsurfProvider.installedApplicationURL() != nil }
-    let executable = switch provider {
-    case .openAI: "codex"
-    case .anthropic: "claude"
-    case .grok: "grok"
-    case .cursor: "cursor-agent"
-    case .windsurf: "Devin"
-    }
+    let executable = ProviderDescriptor.forProvider(provider).helper.executable
     return BinaryLocator.find(executable) != nil
   }
 
@@ -336,11 +364,19 @@ enum AllowanceBuilder {
       let worst = deficits.max {
         ($0.paceState.deficitPercent ?? 0) < ($1.paceState.deficitPercent ?? 0)
       }!
-      let amount = Int((worst.paceState.deficitPercent ?? 0).rounded())
+      let detail: String
+      if let runsOut = worst.primary?.runsOutAt, let reset = worst.primary?.resetsAt,
+        runsOut < reset
+      {
+        detail = "may run out \(DashboardFormat.gap(from: runsOut, to: reset)) before reset"
+      } else if let reset = worst.primary?.resetsAt, reset > now {
+        detail = "resets \(DashboardFormat.countdown(to: reset, now: now))"
+      } else {
+        detail = "reset time unavailable"
+      }
       return (
         deficits.count == 1 ? "1 plan may run out early" : "\(deficits.count) plans may run out early",
-        "\(worst.provider.displayName) · \(amount) points over pace"
-          + (stale.isEmpty ? "" : " · \(stale.count) also need fresh data"),
+        "\(worst.provider.displayName) · \(detail)",
         worst.paceState)
     }
     let reset = Self.nextReset(in: summaries, now: now)

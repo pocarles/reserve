@@ -6,17 +6,12 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   case grok
   case cursor
   case windsurf
+  case copilot
 
   public var id: String { self.rawValue }
 
   public var displayName: String {
-    switch self {
-    case .openAI: "OpenAI"
-    case .anthropic: "Claude"
-    case .grok: "Grok"
-    case .cursor: "Cursor"
-    case .windsurf: "Windsurf"
-    }
+    ProviderDescriptor.forProvider(self).displayName
   }
 
 }
@@ -114,8 +109,8 @@ public struct UsagePaceProjection: Equatable, Sendable {
     guard elapsed > 0 else { return nil }
     let elapsedFraction = min(1, elapsed / duration)
     // Very early projections swing wildly after a single request. Wait until at
-    // least 1% of the allowance window has elapsed before presenting a pace.
-    guard elapsedFraction >= 0.01 else { return nil }
+    // least 10% of the allowance window has elapsed before presenting a pace.
+    guard elapsedFraction >= 0.10 else { return nil }
 
     let usedFraction = min(1, max(0, window.usedPercent / 100))
     let signedVariance = (elapsedFraction - usedFraction) * 100
@@ -173,6 +168,7 @@ public enum UsagePaceState: Equatable, Sendable {
     if hasError || fetchedAt.map({ now.timeIntervalSince($0) > stalenessLimit }) == true {
       return .stale
     }
+    if let reset = window.resetsAt, reset <= now { return .stale }
     if window.usedPercent >= 99.5 { return .exhausted }
     guard let projection = UsagePaceProjection.calculate(for: window, now: now) else {
       return .unknown
@@ -201,6 +197,10 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public let accountUsage: LocalUsageSummary?
   public let detailedUsageUnavailable: Bool
   public let creditBalanceMinorUnits: Int?
+  public let observationTimeKnown: Bool
+  public let checkedAt: Date
+  public let availableResetCount: Int?
+  public let accountTokenActivity: OpenAIAccountActivity?
 
   public init(
     provider: ProviderID,
@@ -213,7 +213,11 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     monthlyPriceMinorUnits: Int? = nil,
     accountUsage: LocalUsageSummary? = nil,
     detailedUsageUnavailable: Bool = false,
-    creditBalanceMinorUnits: Int? = nil
+    creditBalanceMinorUnits: Int? = nil,
+    observationTimeKnown: Bool = true,
+    checkedAt: Date? = nil,
+    availableResetCount: Int? = nil,
+    accountTokenActivity: OpenAIAccountActivity? = nil
   ) {
     self.provider = provider
     self.planName = planName.map { String($0.prefix(Self.maximumPlanNameCharacters)) }
@@ -226,12 +230,16 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     self.accountUsage = accountUsage
     self.detailedUsageUnavailable = detailedUsageUnavailable
     self.creditBalanceMinorUnits = creditBalanceMinorUnits.map { max(0, $0) }
+    self.observationTimeKnown = observationTimeKnown
+    self.checkedAt = checkedAt ?? fetchedAt
+    self.availableResetCount = availableResetCount.map { max(0, $0) }
+    self.accountTokenActivity = accountTokenActivity
   }
 
   private enum CodingKeys: String, CodingKey {
     case provider, planName, windows, fetchedAt, source, includedSpend, billingRenewsAt
     case monthlyPriceMinorUnits, accountUsage, detailedUsageUnavailable
-    case creditBalanceMinorUnits
+    case creditBalanceMinorUnits, observationTimeKnown, checkedAt, availableResetCount, accountTokenActivity
   }
 
   public init(from decoder: Decoder) throws {
@@ -249,7 +257,12 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
       accountUsage: try container.decodeIfPresent(LocalUsageSummary.self, forKey: .accountUsage),
       detailedUsageUnavailable: try container.decodeIfPresent(
         Bool.self, forKey: .detailedUsageUnavailable) ?? false,
-      creditBalanceMinorUnits: try container.decodeIfPresent(Int.self, forKey: .creditBalanceMinorUnits))
+      creditBalanceMinorUnits: try container.decodeIfPresent(Int.self, forKey: .creditBalanceMinorUnits),
+      observationTimeKnown: try container.decodeIfPresent(Bool.self, forKey: .observationTimeKnown)
+        ?? (container.decode(ProviderID.self, forKey: .provider) != .windsurf),
+      checkedAt: try container.decodeIfPresent(Date.self, forKey: .checkedAt),
+      availableResetCount: try container.decodeIfPresent(Int.self, forKey: .availableResetCount),
+      accountTokenActivity: try container.decodeIfPresent(OpenAIAccountActivity.self, forKey: .accountTokenActivity))
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -264,6 +277,10 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     try container.encodeIfPresent(self.monthlyPriceMinorUnits, forKey: .monthlyPriceMinorUnits)
     try container.encodeIfPresent(self.accountUsage, forKey: .accountUsage)
     try container.encodeIfPresent(self.creditBalanceMinorUnits, forKey: .creditBalanceMinorUnits)
+    try container.encode(self.observationTimeKnown, forKey: .observationTimeKnown)
+    try container.encode(self.checkedAt, forKey: .checkedAt)
+    try container.encodeIfPresent(self.availableResetCount, forKey: .availableResetCount)
+    try container.encodeIfPresent(self.accountTokenActivity, forKey: .accountTokenActivity)
     if self.detailedUsageUnavailable {
       try container.encode(true, forKey: .detailedUsageUnavailable)
     }
@@ -289,7 +306,9 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
       monthlyPriceMinorUnits: self.monthlyPriceMinorUnits,
       accountUsage: self.accountUsage,
       detailedUsageUnavailable: self.detailedUsageUnavailable,
-      creditBalanceMinorUnits: self.creditBalanceMinorUnits)
+      creditBalanceMinorUnits: self.creditBalanceMinorUnits,
+      observationTimeKnown: self.observationTimeKnown, checkedAt: self.checkedAt,
+      availableResetCount: self.availableResetCount, accountTokenActivity: self.accountTokenActivity)
   }
 }
 

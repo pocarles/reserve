@@ -143,6 +143,7 @@ enum ConnectionFlowSelfTest {
     click("connection-primary", in: coordinator.panel)
     await settle { coordinator.phase == .accessNotGranted }
     expect(coordinator.phase == .accessNotGranted, "denied permission silently repeated the first permission screen")
+    expect(store.claudeKeychainReadAllowed, "a temporary macOS denial erased saved consent")
     let recoveryScript = """
       #!/bin/sh
       echo 'https://claude.ai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
@@ -303,6 +304,8 @@ enum ConnectionFlowSelfTest {
       if stubborn.isRunning { ProcessRunner.stop(stubborn) }
     } catch { failures.append("could not launch the cancellation fixture") }
 
+    failures += await self.checkRefreshScheduling(in: directory)
+
     // Render actual native controls for each step, with no real credentials.
     let preview = ProviderConnectionPanel(provider: .anthropic)
     defer { preview.close() }
@@ -346,6 +349,83 @@ enum ConnectionFlowSelfTest {
       }
       do { try desktopPreview.render(to: evidence.appendingPathComponent("\(name).png")) }
       catch { failures.append("\(name) screenshot could not be saved") }
+    }
+    return failures
+  }
+
+  /// These stores have isolated preferences/cache and a synthetic fetcher.
+  /// No login helper, provider request, or real session history is involved.
+  private static func checkRefreshScheduling(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    for scenario in ["interactive-sweep", "bounded-sweep", "history-cleared"] {
+      let suite = "Reserve.SchedulingSelfTest.\(UUID().uuidString)"
+      guard let defaults = UserDefaults(suiteName: suite) else {
+        failures.append("\(scenario): isolated preferences unavailable")
+        continue
+      }
+      defer { defaults.removePersistentDomain(forName: suite) }
+      let cache = SnapshotCache(fileURL: directory.appendingPathComponent("\(scenario).json"))
+      let probe = ConnectionSchedulingProbe(historyThenNone: scenario == "history-cleared")
+      let store = UsageStore(
+        defaults: defaults, startAutomatically: false, notificationsActive: false, cache: cache,
+        fetchOverride: { provider, allowAccess in
+          try await probe.fetch(provider, allowAccess: allowAccess)
+        },
+        openLoginURL: { _ in failures.append("\(scenario): unexpectedly opened sign-in"); return false },
+        openWindsurfApplication: { false })
+      for provider in ProviderID.allCases {
+        store.setEnabled(provider, enabled: false, refreshImmediately: false)
+      }
+      if scenario == "interactive-sweep" {
+        store.setEnabled(.cursor, enabled: true, refreshImmediately: false)
+        var completions = 0
+        store.allowKeychainAccess(for: .cursor) { completions += 1 }
+        for _ in 0..<100 {
+          if await probe.stats().total > 0 { break }
+          try? await Task.sleep(for: .milliseconds(10))
+        }
+        store.refreshAll()
+        await settle { !store.isRefreshingAll && store.states[.cursor]?.isRefreshing == false }
+        let stats = await probe.stats()
+        if stats.total != 1 || stats.interactive != 1 || stats.cancelled != 0 {
+          failures.append("scheduled sweep interrupted or duplicated an explicit access check")
+        }
+        if completions != 1 || store.states[.cursor]?.isConnecting != false
+          || store.states[.cursor]?.snapshot == nil {
+          failures.append("explicit access did not finish cleanly while a sweep waited")
+        }
+      } else if scenario == "bounded-sweep" {
+        let enabled: Set<ProviderID> = [.openAI, .grok, .cursor, .windsurf]
+        for provider in enabled {
+          store.setEnabled(provider, enabled: true, refreshImmediately: false)
+        }
+        store.refreshAll()
+        await settle { !store.isRefreshingAll }
+        let stats = await probe.stats()
+        if stats.maximumActive != 2 || stats.total != enabled.count
+          || Set(stats.providers) != enabled || stats.cancelled != 0 {
+          failures.append("idle sweep did not check exactly the enabled providers with two concurrent fetches")
+        }
+        if enabled.contains(where: { store.states[$0]?.snapshot == nil
+          || store.states[$0]?.isRefreshing != false }) {
+          failures.append("bounded sweep left an enabled provider unfinished")
+        }
+      } else {
+        store.setEnabled(.cursor, enabled: true, refreshImmediately: false)
+        store.refresh(.cursor)
+        await settle { store.states[.cursor]?.isRefreshing == false }
+        if store.states[.cursor]?.localUsage?.origin != .providerAccount {
+          failures.append("account-history fixture did not populate Insights")
+        }
+        store.refresh(.cursor)
+        await settle { store.states[.cursor]?.isRefreshing == false }
+        let saved = await cache.load()
+        if store.states[.cursor]?.snapshot?.accountUsage != nil
+          || store.states[.cursor]?.localUsage != nil || saved[.cursor]?.accountUsage != nil {
+          failures.append("account history survived a newer snapshot without account history")
+        }
+      }
+      for provider in ProviderID.allCases { store.cancelConnection(provider) }
     }
     return failures
   }
@@ -396,4 +476,42 @@ private actor ConnectionTestResponses {
     ], source: "isolated connection test")
   }
 }
+private actor ConnectionSchedulingProbe {
+  private let historyThenNone: Bool
+  private var total = 0
+  private var active = 0
+  private var maximumActive = 0
+  private var interactive = 0
+  private var cancelled = 0
+  private var providers: [ProviderID] = []
+
+  init(historyThenNone: Bool) { self.historyThenNone = historyThenNone }
+
+  func stats() -> (total: Int, maximumActive: Int, interactive: Int, cancelled: Int, providers: [ProviderID]) {
+    (self.total, self.maximumActive, self.interactive, self.cancelled, self.providers)
+  }
+
+  func fetch(_ provider: ProviderID, allowAccess: Bool) async throws -> UsageSnapshot {
+    self.total += 1
+    let call = self.total
+    self.active += 1
+    self.maximumActive = max(self.maximumActive, self.active)
+    if allowAccess { self.interactive += 1 }
+    self.providers.append(provider)
+    defer { self.active -= 1 }
+    if !self.historyThenNone {
+      do { try await Task.sleep(for: .milliseconds(300)) }
+      catch { self.cancelled += 1; throw error }
+    }
+    let usage: LocalUsageSummary? = self.historyThenNone && call == 1
+      ? LocalUsageSummary(provider: provider, periodDays: 30, inputTokens: 10,
+          outputTokens: 5, apiEquivalentCostUSD: 0.01, origin: .providerAccount)
+      : nil
+    return UsageSnapshot(provider: provider, planName: "Synthetic plan", windows: [
+      UsageWindow(id: "weekly", label: "Weekly", usedPercent: 20,
+        windowMinutes: 10080, resetsAt: Date().addingTimeInterval(86400)),
+    ], source: "isolated scheduling test", accountUsage: usage)
+  }
+}
+
 #endif

@@ -7,6 +7,16 @@ import ReserveCore
 enum ReserveApp {
   static func main() {
     _ = signal(SIGPIPE, SIG_IGN)
+    // Claude invokes this small receiver without launching a menu-bar instance.
+    if CommandLine.arguments.contains("--claude-statusline") {
+      let finished = DispatchSemaphore(value: 0)
+      Task.detached {
+        _ = await ClaudeStatuslineBridge.runReceiver(arguments: CommandLine.arguments)
+        finished.signal()
+      }
+      finished.wait()
+      return
+    }
     let instanceLock: SingleInstanceLock
     do {
       guard let acquired = try SingleInstanceLock.acquire(at: self.instanceLockURL())

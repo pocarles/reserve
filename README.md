@@ -1,9 +1,10 @@
 # Reserve
 
 Reserve is a native macOS menu-bar app that shows reported subscription
-capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, and Windsurf, along
-with authenticated Cursor account usage. Windsurf uses usage saved by the
-official Devin Desktop app.
+capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, Windsurf, and Copilot.
+Optional insights show provider-reported account activity or activity from this Mac.
+Windsurf uses usage saved by the official Devin Desktop app. Copilot support is
+experimental and still needs an authenticated release check.
 
 It is deliberately small: no Reserve account, browser automation, WebView,
 cookie extraction, telemetry, crash reporting, cloud service, or third-party
@@ -43,7 +44,8 @@ You can reopen that page or cancel the login from the connection window.
 Claude and Cursor require explicit **Allow usage access** before Reserve reads
 their protected sign-in. macOS may also ask you to approve access. The window
 stays open until Reserve reads fresh usage, or explains why it could not.
-Cursor and Windsurf start disabled after installation or upgrade.
+Cursor, Windsurf, and Copilot start disabled. On first launch, the other providers
+start enabled only when their helper is already installed. Saved choices are preserved.
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
@@ -51,7 +53,9 @@ Cursor and Windsurf start disabled after installation or upgrade.
 - `cursor-agent`, authenticated with `cursor-agent login`, for an individual
   Cursor account. Teams and Enterprise Admin API keys are not supported;
 - Devin Desktop or legacy Windsurf, signed in with its usage settings opened,
-  for cached Windsurf plan usage.
+  for cached Windsurf plan usage;
+- Copilot CLI, signed into GitHub. Setup opens GitHub’s installation instructions
+  if the helper is missing.
 
 Windsurf setup opens the installed desktop app. Sign in there, open its usage
 settings, then choose **Check again** in Reserve. Reserve reads only the saved
@@ -74,6 +78,20 @@ authenticated billing endpoint used by the CLI. OpenAI limits come from Codex
 app-server JSON-RPC. Provider changes can temporarily break a refresh even when
 the local app is healthy; the last valid snapshot remains visible and is marked
 stale.
+
+Claude can also share the limits in its documented status-line output. Enable
+**Get updates from Claude Code** in its provider details. Reserve then reads a
+quota-only local file and does not read Claude’s sign-in. Updates arrive after
+Claude Code responds, so they pause while it is idle. The existing status line
+is preserved; turning the option off restores it. No conversation text is saved.
+
+Local history is off by default. Enable **Include activity from this Mac** in
+General to use it. Only enabled providers are scanned, and history work begins
+when Insights is requested. Normal quota checks skip detailed Cursor history,
+reuse plan metadata, and check at most two providers concurrently in a sweep.
+
+See [provider support](docs/PROVIDER_SUPPORT.md) for the data contracts and
+remaining provider verification limits.
 
 ## Build from source
 
@@ -120,9 +138,11 @@ the app.
 
 Every allowance uses the same projection model: reserve, on pace, deficit,
 exhausted, stale, or unknown. Provider cards combine remaining capacity, reset
-time, progress, pace marker, and a short projection. Five-hour windows stay
-secondary to plan-level allowances. Grok's Build and Chat shares are shown as
-components of its shared weekly pool, not as extra quota.
+time, progress, pace marker, and a short projection. A currently exhausted
+five-hour or daily limit takes priority over a longer allowance. Forecasts wait
+until at least 10% of a known window has elapsed, and stop when observations
+are stale. Grok’s Build and Chat contributions appear only in details as
+percentages of its shared pool used.
 
 Cursor shows its reported Cursor Models and Other Models percentages as whole
 numbers. It also shows provider-reported tokens for today, the current billing
@@ -140,16 +160,16 @@ Reserve keeps the last valid snapshot visible. Multiple saved accounts are
 rejected rather than guessing which account is active.
 
 The desktop cache has no exact observation timestamp. Reserve conservatively
-uses the start of its newest quota window for age calculations, never the
-database modification time. This may mark cached usage stale even when the
-desktop app just updated it. These numbers can lag the Windsurf account page;
+keeps the time it checked the cache separate from the unknown observation time.
+It labels the amount as last known and never projects a forecast from it. These numbers can lag the Windsurf account page;
 this version does not make an authenticated live usage request. Windsurf token
 counts, transcript estimates, and subscription price guesses are not included.
 
 The optional savings view is an API-equivalent estimate, not a provider bill.
 OpenAI and Anthropic use the observed input/cache/output mix when available;
 Grok exposes an aggregate token count, so its comparison is approximate.
-Subscription prices remain user-editable.
+Subscription prices remain user-editable. Details distinguish reported, typical,
+and manually entered prices. Empty detail rows are omitted.
 
 Cursor's account insights come from provider-reported aggregate usage. Reserve
 labels their dollar total **Provider-reported usage value** rather than estimated
@@ -158,6 +178,12 @@ model totals without reading prompts or transcripts. It requests bounded daily
 history separately. If Cursor supplies totals without daily events, Reserve
 keeps the totals and says **Daily history unavailable** instead of inventing a
 chart.
+
+OpenAI can report additional named allowance buckets, available reset credits,
+and account token history. Reset credits appear only when available; Reserve
+does not spend them. Insights requests account history only when needed and
+shows the reported token totals without inventing a price or input/output split.
+Older helpers can omit this history while continuing to report allowances.
 
 Service-health labels come from the providers' official status sources. The
 default notification stream reports state transitions such as deficit,
@@ -295,15 +321,15 @@ from the same GitHub Release. Do not open the DMG.
 
 ## Contributing and release process
 
-Focused contributions that improve the lightweight five-provider product are
+Focused contributions that improve the lightweight six-provider product are
 welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md). Maintainer release operations
 are documented in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 
 ## Independence and trademarks
 
 Reserve is an independent open-source project. It is not affiliated with,
-endorsed by, sponsored by, or an official product of OpenAI, Anthropic, xAI, or
-Anysphere.
+endorsed by, sponsored by, or an official product of OpenAI, Anthropic, xAI,
+Anysphere, Cognition, GitHub, or Microsoft.
 Provider names and marks belong to their respective owners. See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

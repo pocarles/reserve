@@ -75,14 +75,7 @@ public actor ServiceStatusClient {
   }
 
   private func fetchFresh(_ provider: ProviderID, now: Date) async throws -> ProviderServiceStatus {
-    let endpoint: URL =
-      switch provider {
-      case .openAI: URL(string: "https://status.openai.com/api/v2/summary.json")!
-      case .anthropic: URL(string: "https://status.claude.com/api/v2/summary.json")!
-      case .grok: URL(string: "https://status.x.ai/feed.xml")!
-      case .cursor: URL(string: "https://status.cursor.com/api/v2/summary.json")!
-      case .windsurf: URL(string: "https://status.windsurf.com/api/v2/summary.json")!
-      }
+    let endpoint = ProviderDescriptor.forProvider(provider).statusFeedURL
     var request = URLRequest(url: endpoint)
     request.setValue("Reserve/1.0", forHTTPHeaderField: "User-Agent")
     let (data, response) = try await ProviderHTTPSession.boundedData(
@@ -90,7 +83,7 @@ public actor ServiceStatusClient {
     guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count <= 512_000
     else { throw StatusError.invalidResponse }
     switch provider {
-    case .openAI, .anthropic, .cursor, .windsurf:
+    case .openAI, .anthropic, .cursor, .windsurf, .copilot:
       return try Self.decodeStatuspage(data, provider: provider, now: now)
     case .grok:
       return Self.decodeXAI(data, now: now)
@@ -144,13 +137,7 @@ public actor ServiceStatusClient {
   }
 
   private static func pageURL(_ provider: ProviderID) -> URL {
-    switch provider {
-    case .openAI: URL(string: "https://status.openai.com")!
-    case .anthropic: URL(string: "https://status.claude.com")!
-    case .grok: URL(string: "https://status.x.ai")!
-    case .cursor: URL(string: "https://status.cursor.com")!
-    case .windsurf: URL(string: "https://status.windsurf.com")!
-    }
+    ProviderDescriptor.forProvider(provider).statusURL
   }
 }
 

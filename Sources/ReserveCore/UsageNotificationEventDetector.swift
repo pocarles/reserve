@@ -19,7 +19,7 @@ public enum UsageNotificationEventDetector {
     previous: UsageSnapshot?,
     current: UsageSnapshot
   ) -> [UsageThresholdCrossing] {
-    guard let previous else { return [] }
+    guard let previous, current.observationTimeKnown else { return [] }
     return current.windows.flatMap { window -> [UsageThresholdCrossing] in
       guard !window.isComponentShare else { return [] }
       guard let old = previous.windows.first(where: { $0.id == window.id }),

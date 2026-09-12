@@ -46,7 +46,7 @@ final class JSONRPCProcess: @unchecked Sendable {
       let result = lineBuffer.append(data)
       if result.exceeded {
         handle.readabilityHandler = nil
-        if process.isRunning { process.terminate() }
+        ProcessRunner.stop(process)
         continuation.finish()
         return
       }
@@ -58,12 +58,12 @@ final class JSONRPCProcess: @unchecked Sendable {
           // A provider producing responses faster than Reserve consumes them
           // is treated as a failed protocol session instead of growing memory.
           handle.readabilityHandler = nil
-          if process.isRunning { process.terminate() }
+          ProcessRunner.stop(process)
           continuation.finish()
           return
         @unknown default:
           handle.readabilityHandler = nil
-          if process.isRunning { process.terminate() }
+          ProcessRunner.stop(process)
           continuation.finish()
           return
         }
@@ -143,13 +143,7 @@ final class JSONRPCProcess: @unchecked Sendable {
     self.output.fileHandleForReading.readabilityHandler = nil
     self.errors.fileHandleForReading.readabilityHandler = nil
     try? self.input.fileHandleForWriting.close()
-    if self.process.isRunning {
-      self.process.terminate()
-      let process = self.process
-      DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
-        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-      }
-    }
+    ProcessRunner.stop(self.process)
     self.continuation.finish()
   }
 

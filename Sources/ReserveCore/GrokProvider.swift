@@ -17,16 +17,9 @@ public struct GrokProvider: UsageProvider {
     guard let executable = BinaryLocator.find("grok", environment: self.environment) else {
       throw UsageProviderError.executableNotFound("Grok Build CLI")
     }
-    let versionOutput = try await ProcessRunner.output(
-      executable: executable,
-      arguments: ["--version"],
-      environment: BinaryLocator.childEnvironment(self.environment))
-    guard let version = SemanticVersion.first(in: versionOutput),
-      version >= SemanticVersion(1, 0, 0)
-    else {
-      throw UsageProviderError.updateRequired(
-        "Grok Build 1.0.0 or newer is required for background billing access. Found: \(versionOutput)."
-      )
+    let version = try await GrokVersionCache.shared.version(executable: executable) {
+      try await ProcessRunner.output(executable: executable, arguments: ["--version"],
+        environment: BinaryLocator.childEnvironment(self.environment))
     }
 
     // Grok Build 1.x does not expose x.ai/billing through its ACP agent. Calling
@@ -36,8 +29,21 @@ public struct GrokProvider: UsageProvider {
     let credentials = try GrokCredentialLoader.load(environment: self.environment)
     async let remoteTier = self.fetchSubscriptionTier(
       version: version.headerValue, credentials: credentials)
-    let response = try await self.fetchThroughOfficialCLIProxy(
-      version: version.headerValue, credentials: credentials)
+    let response: GrokBillingEnvelope
+    do {
+      response = try await self.fetchThroughOfficialCLIProxy(
+        version: version.headerValue, credentials: credentials)
+    } catch UsageProviderError.unauthorized {
+      // Another running Grok client may have renewed the session while this
+      // request was in flight. Adopt its token once without starting a login.
+      let renewed = try GrokCredentialLoader.load(environment: self.environment)
+      guard renewed.key != credentials.key, renewed.userID == credentials.userID else {
+        throw UsageProviderError.unauthorized(
+          "Grok could not renew this session. Open Grok, then refresh Reserve.")
+      }
+      response = try await self.fetchThroughOfficialCLIProxy(
+        version: version.headerValue, credentials: renewed)
+    }
     let fetchedTier = await remoteTier
 
     guard let config = response.config ?? response.legacyConfig else {
@@ -202,6 +208,34 @@ public struct GrokProvider: UsageProvider {
     case "grokchat": return "Grok Chat share"
     default: return product + " share"
     }
+  }
+}
+
+/// Re-probe only when the executable changes. Nothing about the account is
+/// cached here, and the cache remains bounded across helper replacements.
+actor GrokVersionCache {
+  static let shared = GrokVersionCache()
+  private struct Stamp: Equatable {
+    let inode: UInt64?
+    let bytes: UInt64?
+    let modified: Date?
+  }
+  private var entries: [String: (stamp: Stamp, version: SemanticVersion)] = [:]
+
+  func version(executable: String, loader: @Sendable () async throws -> String) async throws -> SemanticVersion {
+    let resolved = URL(fileURLWithPath: executable).resolvingSymlinksInPath().path
+    let attributes = try FileManager.default.attributesOfItem(atPath: resolved)
+    let stamp = Stamp(inode: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+      bytes: (attributes[.size] as? NSNumber)?.uint64Value,
+      modified: attributes[.modificationDate] as? Date)
+    if let entry = entries[resolved], entry.stamp == stamp { return entry.version }
+    let output = try await loader()
+    guard let version = SemanticVersion.first(in: output), version >= SemanticVersion(1, 0, 0) else {
+      throw UsageProviderError.updateRequired("Grok Build 1.0.0 or newer is required for background billing access.")
+    }
+    if entries.count >= 8 { entries.removeAll(keepingCapacity: true) }
+    entries[resolved] = (stamp, version)
+    return version
   }
 }
 

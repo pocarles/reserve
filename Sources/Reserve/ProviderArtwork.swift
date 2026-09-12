@@ -12,7 +12,9 @@ enum ProviderArtwork {
     if let cached = Self.cache[provider] {
       return cached.copy() as? NSImage ?? cached
     }
-    let image = self.bundledImage(for: provider) ?? self.fallbackImage(for: provider)
+    let image = provider == .copilot
+      ? (NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Copilot") ?? self.fallbackImage(for: provider))
+      : (self.bundledImage(for: provider) ?? self.fallbackImage(for: provider))
     image.accessibilityDescription = provider.displayName
     Self.cache[provider] = image
     return image.copy() as? NSImage ?? image
@@ -53,6 +55,7 @@ enum ProviderArtwork {
       case .grok: "G"
       case .cursor: "C"
       case .windsurf: "W"
+      case .copilot: "C"
       }
     let size = NSSize(width: 18, height: 18)
     let image = NSImage(size: size, flipped: false) { rect in

@@ -11,6 +11,7 @@ struct ProviderViewState: Identifiable {
   var isConnecting = false
   var localUsage: LocalUsageSummary?
   var subscriptionCostUSD: Double?
+  var subscriptionCostLabel: String? = nil
   var renewalStart: Date?
   var nextRenewal: Date?
   var serviceStatus: ProviderServiceStatus?
@@ -96,6 +97,38 @@ final class UsageStore {
   private var cancellationGenerations: [ProviderID: Int] = [:]
   private var refreshTasks: [ProviderID: Task<Void, Never>] = [:]
   private var lastLocalUsageScanAt: Date?
+  private var claudeQuotaWatcher: QuotaFileWatcher?
+  private var insightsRequestedAt: Date?
+  var insightsVisible = false
+  private var pendingInsightProviders: Set<ProviderID> = []
+
+  var localHistoryEnabled: Bool {
+    get { self.defaults.bool(forKey: "history.localEnabled") }
+    set {
+      self.defaults.set(newValue, forKey: "history.localEnabled")
+      if !newValue {
+        for provider in ProviderID.allCases where self.states[provider]?.localUsage?.origin != .providerAccount {
+          self.states[provider]?.localUsage = nil
+        }
+      }
+      self.changed()
+      if newValue {
+        self.insightsRequestedAt = nil
+        self.requestInsights()
+      }
+    }
+  }
+
+  func requestInsights() {
+    guard self.automaticRefreshEnabled || self.fetchOverride != nil else { return }
+    if let requested = self.insightsRequestedAt, Date().timeIntervalSince(requested) < 60 { return }
+    self.insightsRequestedAt = Date()
+    if self.localHistoryEnabled { self.refreshLocalUsage() }
+    for provider in [ProviderID.cursor, .openAI] where self.isEnabled(provider) {
+      self.pendingInsightProviders.insert(provider)
+      self.refresh(provider, queueIfBusy: true)
+    }
+  }
   /// The newest refresh request per provider. Results from any older request are
   /// discarded rather than applied.
   private var refreshTokens: [ProviderID: Int] = [:]
@@ -143,6 +176,9 @@ final class UsageStore {
     ReserveAppearance.mode = self.appearanceMode
     self.notifications.requestAuthorizationIfNeeded()
     if startAutomatically {
+      if self.claudePassiveUpdatesEnabled {
+        self.claudeQuotaWatcher = try? self.makeClaudeQuotaWatcher()
+      }
       self.startupTask = Task { [weak self] in
         await self?.loadCacheAndStart()
       }
@@ -161,9 +197,48 @@ final class UsageStore {
     ProviderID.allCases.compactMap { provider in
       guard var state = self.states[provider] else { return nil }
       state.subscriptionCostUSD = self.monthlySubscriptionCost(for: provider)
+      state.subscriptionCostLabel = self.defaults.object(forKey: "subscription.monthlyCost.\(provider.rawValue)") != nil
+        ? "Your monthly cost" : state.snapshot?.monthlyPriceMinorUnits != nil
+          ? "Reported monthly cost" : "Typical monthly cost"
       state.renewalStart = self.renewalStart(for: provider)
       state.nextRenewal = self.nextRenewal(for: provider)
       return state
+    }
+  }
+
+  var claudePassiveUpdatesEnabled: Bool {
+    self.defaults.bool(forKey: "anthropic.passiveStatusline")
+  }
+
+  /// Only called after an explicit choice in Claude's provider details.
+  func setClaudePassiveUpdatesEnabled(_ enabled: Bool) throws {
+    var watcher: QuotaFileWatcher?
+    if enabled {
+      watcher = try self.makeClaudeQuotaWatcher()
+      guard let executable = Bundle.main.executableURL else {
+        throw UsageProviderError.unavailable("Reserve could not locate its app. Reopen it and try again.")
+      }
+      try ClaudeStatuslineBridge.configure(settingsURL: ClaudeStatuslineBridge.settingsURL(),
+        executableURL: executable, cacheURL: ClaudeStatuslineBridge.cacheURL())
+    } else {
+      try ClaudeStatuslineBridge.remove(settingsURL: ClaudeStatuslineBridge.settingsURL())
+    }
+    self.cancelConnection(.anthropic)
+    self.claudeQuotaWatcher?.stop()
+    self.claudeQuotaWatcher = watcher
+    self.defaults.set(enabled, forKey: "anthropic.passiveStatusline")
+    self.states[.anthropic]?.requiresKeychainAccess = false
+    self.states[.anthropic]?.requiresConnection = false
+    self.changed()
+    self.refresh(.anthropic, queueIfBusy: true)
+  }
+
+  private func makeClaudeQuotaWatcher() throws -> QuotaFileWatcher {
+    try QuotaFileWatcher(cacheURL: ClaudeStatuslineBridge.cacheURL()) { [weak self] in
+      Task { @MainActor [weak self] in
+        guard let self, self.claudePassiveUpdatesEnabled, self.isEnabled(.anthropic) else { return }
+        self.refresh(.anthropic, queueIfBusy: true)
+      }
     }
   }
 
@@ -421,10 +496,10 @@ final class UsageStore {
     for provider in ProviderID.allCases where self.isEnabled(provider) {
       self.states[provider]?.isRefreshing = true
     }
-    let scanLocalUsage = self.beginLocalUsageRefresh(force: manual)
+    let scanLocalUsage = self.insightsVisible && self.beginLocalUsageRefresh(force: manual)
     self.changed()
     Task {
-      if manual { await AnthropicProvider.clearPersistedRateLimitBlock() }
+      if manual, self.fetchOverride == nil { await AnthropicProvider.clearPersistedRateLimitBlock() }
       await self.performRefreshAll(scanLocalUsage: scanLocalUsage)
     }
   }
@@ -501,7 +576,7 @@ final class UsageStore {
     }
     let cancellationGeneration = self.cancellationGenerations[provider] ?? 0
     self.refreshTasks[provider] = Task {
-      if provider == .anthropic { await AnthropicProvider.clearPersistedRateLimitBlock() }
+      if provider == .anthropic, self.fetchOverride == nil { await AnthropicProvider.clearPersistedRateLimitBlock() }
       guard (self.cancellationGenerations[provider] ?? 0) == cancellationGeneration else { return }
       await self.performRefresh(
         provider, allowKeychainInteraction: allowKeychainInteraction)
@@ -684,6 +759,7 @@ final class UsageStore {
     self.refreshTasks.removeValue(forKey: provider)?.cancel()
     self.keychainAccessCompletions.removeValue(forKey: provider)
     self.pendingRefreshes.remove(provider)
+    self.pendingInsightProviders.remove(provider)
     self.pendingKeychainInteractions.remove(provider)
     self.refreshTokens[provider] = (self.refreshTokens[provider] ?? 0) + 1
     let process = self.loginProcesses[provider]
@@ -695,6 +771,14 @@ final class UsageStore {
   }
 
   func disconnect(_ provider: ProviderID) {
+    if provider == .anthropic, self.claudePassiveUpdatesEnabled {
+      do { try self.setClaudePassiveUpdatesEnabled(false) }
+      catch {
+        self.states[provider]?.error = "Claude’s shared updates could not be removed. \(error.localizedDescription)"
+        self.changed()
+        return
+      }
+    }
     self.defaults.set(false, forKey: "provider.\(provider.rawValue).enabled")
     self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
     self.cancelConnection(provider)
@@ -998,20 +1082,27 @@ final class UsageStore {
           UsageWindow(id: "daily", label: "Daily", usedPercent: 20,
             windowMinutes: 1_440, resetsAt: now.addingTimeInterval(12 * 3_600)),
         ], fetchedAt: now.addingTimeInterval(-120), source: "Devin Desktop account cache",
-        creditBalanceMinorUnits: 1_000))
+        creditBalanceMinorUnits: 1_000, observationTimeKnown: false, checkedAt: now))
     self.states[.windsurf]?.serviceStatus = ProviderServiceStatus(
       provider: .windsurf, health: .operational, detail: "All systems operational",
       pageURL: URL(string: "https://status.windsurf.com")!)
+    self.states[.copilot] = ProviderViewState(provider: .copilot,
+      snapshot: UsageSnapshot(provider: .copilot, planName: "Pro", windows: [
+        UsageWindow(id: "premium_interactions", label: "Premium usage", usedPercent: 18,
+          resetsAt: now.addingTimeInterval(18 * 86_400))], fetchedAt: now,
+        source: "Copilot account quota"))
     self.changed()
   }
 
   private func registerDefaults() {
     self.defaults.register(defaults: [
-      "provider.openAI.enabled": true,
-      "provider.anthropic.enabled": true,
-      "provider.grok.enabled": true,
+      "history.localEnabled": false,
+      "provider.openAI.enabled": BinaryLocator.find("codex") != nil,
+      "provider.anthropic.enabled": BinaryLocator.find("claude") != nil,
+      "provider.grok.enabled": BinaryLocator.find("grok") != nil,
       "provider.cursor.enabled": false,
       "provider.windsurf.enabled": false,
+      "provider.copilot.enabled": false,
       // Reading Claude Code's Keychain item is another application's OAuth
       // token, so it is opt-in and stays off until asked for.
       "anthropic.keychainReadAllowed": false,
@@ -1174,39 +1265,18 @@ final class UsageStore {
   }
 
   private static func loginConfiguration(for provider: ProviderID) -> LoginConfiguration {
-    switch provider {
-    case .openAI:
-      LoginConfiguration(
-        executable: "codex", arguments: ["login"], displayName: "Codex",
-        trustedHosts: ["auth.openai.com", "chatgpt.com", "platform.openai.com"])
-    case .anthropic:
-      LoginConfiguration(
-        executable: "claude", arguments: ["auth", "login", "--claudeai"],
-        displayName: "Claude Code",
-        trustedHosts: ["claude.com", "claude.ai", "platform.claude.com"])
-    case .grok:
-      LoginConfiguration(
-        // Device login prints a complete link without independently launching
-        // Launch Services, which can choose an isolated Chrome instance.
-        executable: "grok", arguments: ["login", "--device-auth"], displayName: "Grok Build",
-        trustedHosts: ["auth.x.ai", "accounts.x.ai", "x.ai", "grok.com"])
-    case .cursor:
-      LoginConfiguration(
-        executable: "cursor-agent", arguments: ["login"], displayName: "Cursor Agent",
-        trustedHosts: ["cursor.com", "auth.cursor.com", "www.cursor.com"])
-    case .windsurf:
-      LoginConfiguration(
-        executable: "Devin", arguments: [], displayName: "Devin Desktop",
-        trustedHosts: ["windsurf.com", "www.windsurf.com"])
-    }
+    let descriptor = ProviderDescriptor.forProvider(provider)
+    return LoginConfiguration(executable: descriptor.helper.executable,
+      arguments: descriptor.loginArguments, displayName: descriptor.loginDisplayName,
+      trustedHosts: descriptor.trustedLoginHosts)
   }
 
   private func loadCacheAndStart() async {
     let cached = await self.cache.load()
     for (provider, snapshot) in cached where self.isEnabled(provider) {
       self.states[provider]?.snapshot = snapshot
-      if provider == .cursor {
-        self.states[provider]?.localUsage = snapshot.accountUsage
+      if let accountUsage = snapshot.accountUsage {
+        self.states[provider]?.localUsage = accountUsage
       }
     }
     self.changed()
@@ -1215,7 +1285,7 @@ final class UsageStore {
   }
 
   private func beginLocalUsageRefresh(force: Bool) -> Bool {
-    guard !self.isScanningLocalUsage else { return false }
+    guard self.localHistoryEnabled, (force || self.insightsVisible), !self.isScanningLocalUsage else { return false }
     if !force, let lastLocalUsageScanAt,
       Date().timeIntervalSince(lastLocalUsageScanAt) < self.localUsageScanInterval
     {
@@ -1269,13 +1339,34 @@ final class UsageStore {
     }
   }
 
+  private func refreshInSweep(_ provider: ProviderID) async {
+    guard self.isEnabled(provider) else { return }
+    // A scheduled sweep must not interrupt an explicit permission check.
+    if let running = self.refreshTasks[provider] {
+      await running.value
+      return
+    }
+    let task = Task { await self.performRefresh(provider, persist: false, notify: true) }
+    self.refreshTasks[provider] = task
+    await task.value
+  }
+
   private func performRefreshAll(scanLocalUsage: Bool) async {
-    for provider in ProviderID.allCases where self.isEnabled(provider) {
-      // Keep each provider cancellable without interrupting the others.
-      self.refreshTasks[provider]?.cancel()
-      let task = Task { await self.performRefresh(provider, persist: false, notify: false) }
-      self.refreshTasks[provider] = task
-      await task.value
+    let providers = ProviderID.allCases.filter { self.isEnabled($0) }
+    // Two checks at a time bounds process pressure while one slow provider
+    // cannot hold every other row behind it.
+    await withTaskGroup(of: Void.self) { group in
+      var iterator = providers.makeIterator()
+      for _ in 0..<2 {
+        if let provider = iterator.next() {
+          group.addTask { await self.refreshInSweep(provider) }
+        }
+      }
+      while await group.next() != nil {
+        if let provider = iterator.next() {
+          group.addTask { await self.refreshInSweep(provider) }
+        }
+      }
     }
     await self.persistSnapshots()
     if scanLocalUsage {
@@ -1287,9 +1378,13 @@ final class UsageStore {
   }
 
   private func performLocalUsageScan(notify: Bool = true) async {
+    guard self.localHistoryEnabled else {
+      self.isScanningLocalUsage = false
+      return
+    }
     let now = Date()
-    let result = try? await self.localUsageScanner.scan(periodDays: 30, now: now)
-    if let result {
+    let result = try? await self.localUsageScanner.scan(periodDays: 30, now: now, providers: Set(ProviderID.allCases.filter { self.isEnabled($0) }))
+    if self.localHistoryEnabled, let result {
       for provider in ProviderID.allCases {
         guard self.isEnabled(provider) else { continue }
         let snapshot = self.states[provider]?.snapshot
@@ -1312,7 +1407,7 @@ final class UsageStore {
     snapshot: UsageSnapshot?,
     scanned: LocalUsageSummary?
   ) -> LocalUsageSummary? {
-    provider == .cursor ? snapshot?.accountUsage : scanned
+    snapshot?.accountUsage ?? scanned
   }
 
   private func beginRefresh(_ provider: ProviderID) -> Bool {
@@ -1362,27 +1457,28 @@ final class UsageStore {
       }
     }
 
+    let includeInsights = self.pendingInsightProviders.remove(provider) != nil || self.insightsVisible
     let fetcher: any UsageProvider =
       switch provider {
-      case .openAI: OpenAIProvider()
+      case .openAI: OpenAIProvider(includeAccountActivity: includeInsights)
       case .anthropic:
         AnthropicProvider(
           allowKeychainRead: self.claudeKeychainReadAllowed,
-          allowKeychainInteraction: allowKeychainInteraction)
+          allowKeychainInteraction: allowKeychainInteraction,
+          passiveStatusline: self.claudePassiveUpdatesEnabled)
       case .grok: GrokProvider()
       case .cursor:
         CursorProvider(
           allowKeychainRead: self.cursorKeychainReadAllowed,
-          allowKeychainInteraction: allowKeychainInteraction)
+          allowKeychainInteraction: allowKeychainInteraction,
+          includeAccountUsage: includeInsights)
       case .windsurf: WindsurfProvider()
+      case .copilot: CopilotProvider()
       }
     let previousHealth = self.states[provider]?.serviceStatus?.health
-    if !allowKeychainInteraction, self.fetchOverride == nil {
-      let status = await self.serviceStatusClient.fetch(provider)
-      guard isCurrent() else { return }
-      self.states[provider]?.serviceStatus = status
-      self.reportServiceHealth(provider, previous: previousHealth)
-    }
+    let statusTask: Task<ProviderServiceStatus, Never>? = self.fetchOverride == nil
+      ? Task { await self.serviceStatusClient.fetch(provider) } : nil
+    defer { statusTask?.cancel() }
     var providerFetchSucceeded = false
     do {
       let previous = self.states[provider]?.snapshot
@@ -1401,8 +1497,10 @@ final class UsageStore {
       self.states[provider]?.requiresInstallation = false
       self.states[provider]?.requiresUpdate = false
       self.states[provider]?.usageAccessDenied = false
-      if provider == .cursor {
-        self.states[provider]?.localUsage = snapshot.accountUsage
+      if let accountUsage = snapshot.accountUsage {
+        self.states[provider]?.localUsage = accountUsage
+      } else if self.states[provider]?.localUsage?.origin == .providerAccount {
+        self.states[provider]?.localUsage = nil
       }
       providerFetchSucceeded = true
       self.notifications.update(
@@ -1439,12 +1537,11 @@ final class UsageStore {
         requiresKeychainAccess = false
       }
       self.states[provider]?.requiresKeychainAccess = requiresKeychainAccess
-      if requiresKeychainAccess && !self.pendingKeychainInteractions.contains(provider) {
-        self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
-      }
+      // A temporary macOS access failure does not revoke the user's consent.
     }
-    if allowKeychainInteraction, providerFetchSucceeded, self.fetchOverride == nil {
-      let status = await self.serviceStatusClient.fetch(provider)
+    if providerFetchSucceeded { self.changed() }
+    if let statusTask {
+      let status = await statusTask.value
       guard isCurrent() else { return }
       self.states[provider]?.serviceStatus = status
       self.reportServiceHealth(provider, previous: previousHealth)
@@ -1484,6 +1581,7 @@ final class UsageStore {
   /// Fires once when a provider's numbers go stale, and clears when they
   /// recover, so the alert tracks the condition rather than the refresh loop.
   private func reportStaleness(_ provider: ProviderID, now: Date = Date()) {
+    guard self.states[provider]?.snapshot?.observationTimeKnown != false else { return }
     let lastUpdated = self.states[provider]?.snapshot?.fetchedAt
     let isStale = SmartAlertDetector.isStale(lastUpdated: lastUpdated, now: now)
     if isStale, !self.staleProviders.contains(provider) {

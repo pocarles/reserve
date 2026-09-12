@@ -677,22 +677,24 @@ enum LifecycleSelfTest {
       quotaSource: nil,
       includedSpend: nil,
       detailedUsageUnavailable: false)
+    var recoveryProvider: ProviderID?
     let card = ProviderDashboardCard(
       summary: summary, now: now, isSelectedForMenuBar: false, isExpanded: true,
-      connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+      connectProvider: { recoveryProvider = $0 }, selectMenuBarProvider: { _ in })
     card.layoutSubtreeIfNeeded()
     let descendants = self.descendants(of: card)
     let signIn = descendants.compactMap { $0 as? NSButton }
       .first { $0.identifier?.rawValue == "connect-anthropic" }
+    signIn?.performClick(nil)
     result.expect(
-      signIn?.title == "Connect",
+      signIn?.title == "Allow access" && recoveryProvider == .anthropic,
       "the Claude recovery action does not open the shared connection flow")
     let copy = descendants.compactMap { $0 as? NSTextField }.map(\.stringValue)
     result.expect(
       copy.contains("Waiting for permission to read usage"),
       "Claude access is not clearly distinguished from sign-in")
     result.expect(
-      copy.contains("Subscription") && copy.contains("Not set")
+      !copy.contains("Subscription") && !copy.contains("Not set")
         && !copy.contains("$20.00/mo") && !copy.contains("Anthropic Plan"),
       "an unknown provider plan is still presented as a detected $20 plan")
 

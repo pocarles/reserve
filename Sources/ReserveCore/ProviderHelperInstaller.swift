@@ -24,40 +24,7 @@ public struct ProviderHelperDefinition: Sendable, Equatable {
 
 public enum ProviderHelperCatalog {
   public static func definition(for provider: ProviderID) -> ProviderHelperDefinition {
-    switch provider {
-    case .openAI:
-      ProviderHelperDefinition(
-        provider: provider,
-        executable: "codex",
-        displayName: "Codex helper",
-        installerURL: URL(string: "https://chatgpt.com/codex/install.sh")!,
-        updateArguments: ["update"])
-    case .anthropic:
-      ProviderHelperDefinition(
-        provider: provider,
-        executable: "claude",
-        displayName: "Claude helper",
-        installerURL: URL(string: "https://claude.ai/install.sh")!,
-        updateArguments: ["update"])
-    case .grok:
-      ProviderHelperDefinition(
-        provider: provider,
-        executable: "grok",
-        displayName: "Grok helper",
-        installerURL: URL(string: "https://x.ai/cli/install.sh")!,
-        updateArguments: ["update"])
-    case .cursor:
-      ProviderHelperDefinition(
-        provider: provider,
-        executable: "cursor-agent",
-        displayName: "Cursor helper",
-        installerURL: URL(string: "https://cursor.com/install")!,
-        updateArguments: ["update"])
-    case .windsurf:
-      ProviderHelperDefinition(
-        provider: provider, executable: "Devin", displayName: "Devin Desktop",
-        installerURL: URL(string: "https://windsurf.com/download")!, updateArguments: [])
-    }
+    ProviderDescriptor.forProvider(provider).helper
   }
 }
 
@@ -90,8 +57,8 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
   }
 
   public func install(_ provider: ProviderID) async throws {
-    guard provider != .windsurf else {
-      throw ProviderHelperInstallerError.installFailed("Install Devin Desktop from windsurf.com, then return to Reserve.")
+    guard ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation else {
+      throw ProviderHelperInstallerError.installFailed("Install \(provider.displayName) from its official download page, then return to Reserve.")
     }
     let definition = ProviderHelperCatalog.definition(for: provider)
     var request = URLRequest(url: definition.installerURL)
@@ -144,8 +111,8 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
   }
 
   public func update(_ provider: ProviderID) async throws {
-    guard provider != .windsurf else {
-      throw ProviderHelperInstallerError.installFailed("Update Devin Desktop from its application menu, then return to Reserve.")
+    guard ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation else {
+      throw ProviderHelperInstallerError.installFailed("Update \(provider.displayName) using its official installation instructions, then return to Reserve.")
     }
     let definition = ProviderHelperCatalog.definition(for: provider)
     guard let executable = BinaryLocator.find(definition.executable) else {

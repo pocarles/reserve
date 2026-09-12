@@ -101,7 +101,7 @@ final class ProviderSetupCoordinator {
     let generation = self.generation
     switch self.phase {
     case .needsInstall, .needsUpdate:
-      if provider == .windsurf {
+      if !ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation {
         _ = LoginBrowser.open(ProviderHelperCatalog.definition(for: provider).installerURL)
         self.present(.waitingForDesktop)
         return
@@ -127,7 +127,7 @@ final class ProviderSetupCoordinator {
         }
       }
     case .needsSignIn, .accessNotGranted:
-      if provider == .windsurf {
+      if ProviderDescriptor.forProvider(provider).authenticationStrategy == .desktopCache {
         self.loginAttempted = true
         self.store.connect(provider)
         self.present(.waitingForDesktop)
@@ -156,7 +156,7 @@ final class ProviderSetupCoordinator {
         self.didCheck()
       }
     case .failed, .unavailable, .accessDenied:
-      if provider == .windsurf {
+      if ProviderDescriptor.forProvider(provider).authenticationStrategy == .desktopCache {
         self.store.connect(provider)
         self.present(.waitingForDesktop)
       } else { self.check() }
@@ -357,6 +357,17 @@ final class ProviderConnectionPanel: NSPanel {
       self.message.stringValue = "In Devin Desktop or Windsurf, sign in and open your usage settings. Then return here and choose Check again."
       self.privacy.stringValue = "Reserve reads only the plan usage saved by the desktop app. It does not access your password or protected sign-in."
       action = "Check again"
+    }
+    if self.provider == .copilot {
+      self.privacy.stringValue = "Reserve asks the official Copilot CLI for allowance data. It never starts a conversation."
+      if phase == .needsInstall || phase == .needsUpdate {
+        self.message.stringValue = "Install or update the official Copilot CLI, then return here."
+        action = "Open download page"
+      } else if phase == .waitingForDesktop {
+        self.heading.stringValue = "Finish installing Copilot"
+        self.message.stringValue = "Return here when the official Copilot CLI is installed."
+        action = "Check again"
+      }
     }
     if self.provider == .windsurf {
       switch phase {

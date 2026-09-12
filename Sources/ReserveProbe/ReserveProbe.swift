@@ -10,7 +10,9 @@ struct ReserveProbe {
       appDefaults?.bool(forKey: "anthropic.keychainReadAllowed") ?? false
     let allowCursorKeychainRead =
       appDefaults?.bool(forKey: "cursor.keychainReadAllowed") ?? false
-    let argument = CommandLine.arguments.dropFirst().first
+    let arguments = Array(CommandLine.arguments.dropFirst())
+    let includeInsights = arguments.contains("--insights")
+    let argument = arguments.first(where: { !$0.hasPrefix("--") })
     if argument?.lowercased() == "local" {
       await self.printLocalUsage()
       return
@@ -22,10 +24,11 @@ struct ReserveProbe {
     case "grok": selected = [.grok]
     case "cursor": selected = [.cursor]
     case "windsurf", "devin": selected = [.windsurf]
+    case "copilot": selected = [.copilot]
     case nil, "all": selected = ProviderID.allCases
     default:
       FileHandle.standardError.write(
-        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|windsurf|local|all]\n".utf8))
+        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|windsurf|copilot|local|all] [--insights]\n".utf8))
       exit(64)
     }
 
@@ -34,11 +37,12 @@ struct ReserveProbe {
     for provider in selected {
       let fetcher: any UsageProvider =
         switch provider {
-        case .openAI: OpenAIProvider()
+        case .openAI: OpenAIProvider(includeAccountActivity: includeInsights)
         case .anthropic: AnthropicProvider(allowKeychainRead: allowClaudeKeychainRead)
         case .grok: GrokProvider()
-        case .cursor: CursorProvider(allowKeychainRead: allowCursorKeychainRead)
+        case .cursor: CursorProvider(allowKeychainRead: allowCursorKeychainRead, includeAccountUsage: includeInsights)
         case .windsurf: WindsurfProvider()
+        case .copilot: CopilotProvider()
         }
       do {
         snapshots.append(try await fetcher.fetch())
