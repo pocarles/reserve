@@ -4,9 +4,12 @@ public struct OpenAIProvider: UsageProvider {
   public let id: ProviderID = .openAI
   static let appServerArguments = ["-s", "read-only", "-a", "never", "app-server"]
   private let environment: [String: String]
+  private let includeAccountActivity: Bool
 
-  public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+  public init(environment: [String: String] = ProcessInfo.processInfo.environment,
+    includeAccountActivity: Bool = false) {
     self.environment = environment
+    self.includeAccountActivity = includeAccountActivity
   }
 
   public func fetch() async throws -> UsageSnapshot {
@@ -43,25 +46,27 @@ public struct OpenAIProvider: UsageProvider {
       planName = OpenAIPlanFormatter.plan(from: account.account?.planType)
     }
 
-    var windows: [UsageWindow] = []
-    if let primary = selected.primary {
-      windows.append(
-        primary.usageWindow(id: primary.stableID(fallback: "primary"), fallbackLabel: "Session"))
-    }
-    if let secondary = selected.secondary {
-      windows.append(
-        secondary.usageWindow(
-          id: secondary.stableID(fallback: "secondary"), fallbackLabel: "Weekly"))
-    }
+    let windows = response.usageWindows
     guard !windows.isEmpty else {
       throw UsageProviderError.unavailable("OpenAI did not return subscription usage windows.")
     }
 
+    // Optional and capability-tolerant. An older CLI or an account without this
+    // endpoint must still return its allowance successfully. Never starts a turn.
+    var activity: OpenAIAccountActivity?
+    if self.includeAccountActivity,
+      let message = try? await rpc.request(method: "account/usage/read", timeout: .seconds(5))
+    {
+      activity = try? rpc.decodeResult(OpenAIAccountActivity.self, from: message)
+    }
+    try Task.checkCancellation()
     return UsageSnapshot(
       provider: .openAI,
       planName: planName,
       windows: windows,
-      source: "Codex app-server")
+      source: "Codex app-server",
+      availableResetCount: response.rateLimitResetCredits?.availableCount,
+      accountTokenActivity: activity)
   }
 }
 
@@ -91,16 +96,19 @@ enum OpenAIPlanFormatter {
 struct OpenAIRateLimitsResponse: Decodable, Sendable {
   let rateLimits: OpenAIRateLimitSnapshot
   let rateLimitsByLimitId: [String: OpenAIRateLimitSnapshot]?
+  let rateLimitResetCredits: OpenAIResetCredits?
 
   enum CodingKeys: String, CodingKey {
     case rateLimits
     case rateLimitsByLimitId
     case rateLimitsByLimitIdSnake = "rate_limits_by_limit_id"
+    case rateLimitResetCredits
   }
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    self.rateLimits = try container.decode(OpenAIRateLimitSnapshot.self, forKey: .rateLimits)
+    self.rateLimits = try container.decodeIfPresent(OpenAIRateLimitSnapshot.self, forKey: .rateLimits)
+      ?? OpenAIRateLimitSnapshot()
     self.rateLimitsByLimitId =
       try container.decodeIfPresent(
         [String: OpenAIRateLimitSnapshot].self,
@@ -108,25 +116,59 @@ struct OpenAIRateLimitsResponse: Decodable, Sendable {
       ?? container.decodeIfPresent(
         [String: OpenAIRateLimitSnapshot].self,
         forKey: .rateLimitsByLimitIdSnake)
+    self.rateLimitResetCredits = try container.decodeIfPresent(OpenAIResetCredits.self, forKey: .rateLimitResetCredits)
   }
+
+  var usageWindows: [UsageWindow] {
+    var buckets: [(String, OpenAIRateLimitSnapshot)] = []
+    buckets.append(("codex", rateLimitsByLimitId?["codex"] ?? rateLimits))
+    for key in (rateLimitsByLimitId ?? [:]).keys.sorted() where key != "codex" {
+      if let bucket = rateLimitsByLimitId?[key] { buckets.append((key, bucket)) }
+    }
+    var windows: [UsageWindow] = []
+    for (id, bucket) in buckets.prefix(16) {
+      let bucketName = bucket.limitName?.trimmingCharacters(in: .whitespacesAndNewlines)
+      let label = bucketName?.isEmpty == false ? bucketName! : id.replacingOccurrences(of: "_", with: " ")
+      for (fallback, window) in [("primary", bucket.primary), ("secondary", bucket.secondary)] {
+        guard let window else { continue }
+        let suffix = window.stableID(fallback: fallback)
+        let rendered = window.usageWindow(id: id == "codex" ? suffix : "\(id)-\(suffix)",
+          fallbackLabel: fallback == "primary" ? "Session" : "Weekly")
+        windows.append(UsageWindow(id: rendered.id,
+          label: id == "codex" ? rendered.label : "\(label) · \(rendered.label)",
+          usedPercent: rendered.usedPercent, windowMinutes: rendered.windowMinutes,
+          resetsAt: rendered.resetsAt))
+      }
+    }
+    return Array(windows.prefix(UsageSnapshot.maximumWindows))
+  }
+}
+
+struct OpenAIResetCredits: Decodable, Sendable {
+  let availableCount: Int?
 }
 
 struct OpenAIRateLimitSnapshot: Decodable, Sendable {
   let primary: OpenAIRateLimitWindow?
   let secondary: OpenAIRateLimitWindow?
   let planType: String?
+  let limitName: String?
+
+  init() { primary = nil; secondary = nil; planType = nil; limitName = nil }
 
   enum CodingKeys: String, CodingKey {
     case primary
     case secondary
     case planType
     case planTypeSnake = "plan_type"
+    case limitName
   }
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     self.primary = try container.decodeIfPresent(OpenAIRateLimitWindow.self, forKey: .primary)
     self.secondary = try container.decodeIfPresent(OpenAIRateLimitWindow.self, forKey: .secondary)
+    self.limitName = try container.decodeIfPresent(String.self, forKey: .limitName)
     self.planType =
       try container.decodeIfPresent(String.self, forKey: .planType)
       ?? container.decodeIfPresent(String.self, forKey: .planTypeSnake)

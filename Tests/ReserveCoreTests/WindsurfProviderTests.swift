@@ -128,7 +128,7 @@ struct WindsurfProviderTests {
     let status = try ServiceStatusClient.decodeStatuspage(data, provider: .windsurf)
     #expect(status.health == .degraded)
     #expect(status.pageURL.host == "status.windsurf.com")
-    #expect(ProviderID.allCases.last == .windsurf)
+    #expect(ProviderID.allCases.contains(.windsurf))
     #expect(ProviderHelperCatalog.definition(for: .windsurf).updateArguments.isEmpty)
   }
 

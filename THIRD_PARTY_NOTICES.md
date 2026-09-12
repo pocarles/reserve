@@ -43,12 +43,13 @@ because Reserve is not sandboxed.
 
 ## Provider names and marks
 
-OpenAI, Codex, Anthropic, Claude, xAI, Grok, Anysphere, Cursor, Windsurf, Devin, Cognition, and their
-associated marks belong to their respective owners. Their appearance is
-descriptive and does not imply affiliation, sponsorship, or endorsement.
+OpenAI, Codex, Anthropic, Claude, xAI, Grok, Anysphere, Cursor, Windsurf,
+Devin, Cognition, GitHub, Microsoft, Copilot, and their associated marks belong
+to their respective owners. Their appearance is descriptive and does not imply
+affiliation, sponsorship, or endorsement.
 
 Reserve bundles unmodified provider marks obtained from first-party sources on
-August 16 and August 25, 2026:
+August 16, August 25, and September 11, 2026:
 
 - the transparent OpenAI Blossom Black SVG from the official
   [OpenAI logo download](https://cdn.openai.com/brand/openai-logos.zip), used
@@ -73,5 +74,5 @@ adapted provider SVGs remain excluded. Provider marks are used only to identify
 their corresponding services and must not imply affiliation or endorsement.
 
 Reserve is an independent open-source project and is not affiliated with,
-endorsed by, sponsored by, or an official product of OpenAI, Anthropic, xAI, or
-Anysphere or Cognition.
+endorsed by, sponsored by, or an official product of OpenAI, Anthropic, xAI,
+Anysphere, Cognition, GitHub, or Microsoft.

@@ -220,7 +220,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let aggregateCopyWorks =
       singleSummary.primary == "1 plan may run out early"
       && pluralSummary.primary == "2 plans may run out early"
-      && pluralSummary.secondary.contains("8 points over pace")
+      && pluralSummary.secondary.hasPrefix("\(previewSummaries[0].provider.displayName) · ")
+      && !pluralSummary.secondary.contains("points")
+      && (pluralSummary.secondary.contains("before reset") || pluralSummary.secondary.contains("resets in"))
       && staleSummary.primary == "1 plan needs fresh data"
       && staleSummary.secondary.contains("2 other plans have reserve")
       && oneHealthyStale.secondary.contains("1 other plan has reserve")
@@ -246,7 +248,21 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           usedPercent: forecastWindow.usedPercent, resetsAt: forecastWindow.resetsAt,
           projection: forecastProjection, isPrimary: true, paceState: .deficit(percent: 25)),
         paceState: .deficit(percent: 25), lastUpdated: forecastNow, now: forecastNow
-      ) == "25 points over pace · may run out 3d 2h before reset"
+      ) == "At this pace · may run out 3d 2h before reset"
+    let exhaustedWithoutPeriod = Allowance(id: "premium", title: "Premium requests", usedPercent: 100,
+      resetsAt: forecastReset, projection: nil, isPrimary: true, paceState: .exhausted)
+    let exhaustedEarlyWindow = Allowance(id: "early", title: "5-hour window", usedPercent: 100,
+      resetsAt: forecastNow.addingTimeInterval(295 * 60), projection: nil,
+      isPrimary: true, paceState: .exhausted, windowMinutes: 300)
+    let withoutPeriod = Allowance(id: "premium", title: "Premium requests", usedPercent: 40,
+      resetsAt: forecastReset, projection: nil, isPrimary: true, paceState: .unknown)
+    let exhaustionAndMissingForecastAreTruthful =
+      [exhaustedWithoutPeriod, exhaustedEarlyWindow].allSatisfy {
+        DashboardFormat.forecast($0, paceState: .exhausted, lastUpdated: forecastNow, now: forecastNow)
+          .hasPrefix("Limit exhausted · resets")
+      }
+      && DashboardFormat.forecast(withoutPeriod, paceState: .unknown,
+        lastUpdated: forecastNow, now: forecastNow) == "Forecast unavailable"
     let nonSharePrimary = AllowanceBuilder.summary(
       for: ProviderViewState(
         provider: .grok,
@@ -344,7 +360,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       identifiers.contains("provider-logo-\($0.rawValue)")
     }
     let bundledProviderArtworkPresent = ProviderID.allCases.allSatisfy {
-      ProviderArtwork.hasBundledMark(for: $0)
+      if $0 == .copilot {
+        let image = ProviderArtwork.image(for: $0)
+        return image.isValid && image.size.width > 0 && image.size.height > 0
+          && !image.representations.isEmpty
+      }
+      return ProviderArtwork.hasBundledMark(for: $0)
     }
     let dashboardButtons = descendants.compactMap { $0 as? NSButton }
     let footerButtons = dashboardButtons.filter {
@@ -426,7 +447,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && !labels.contains("API VALUE")
     // Every percentage states what it measures.
     let percentagesAreLabelled =
-      labels.filter { $0 == "left" }.count == ProviderID.allCases.count
+      labels.filter { $0 == "left" }.count == previewSummaries.filter { $0.paceState != .stale }.count
+      && labels.filter { $0 == "last known" }.count == previewSummaries.filter { $0.paceState == .stale }.count
       && labels.contains { $0.hasSuffix("% left") }
       && !labels.contains { $0.hasSuffix("% used") }
       && DashboardFormat.remainingPercent(99.7525) == "99"
@@ -434,12 +456,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let allowanceCount = descendants.filter {
       ($0.identifier?.rawValue ?? "").hasPrefix("allowance-")
     }.count
+    let expectedForecastCount = previewSummaries.filter { summary in
+      summary.primary.map { DashboardFormat.showsForecast($0, paceState: summary.paceState,
+        observationTimeKnown: summary.observationTimeKnown) } ?? false
+    }.count
     let forecastsPresent =
-      forecastCount == ProviderID.allCases.count
+      forecastCount == expectedForecastCount
       && allowanceCount == ProviderID.allCases.count
       && labels.contains {
-        $0.contains("points under pace") || $0.hasPrefix("On pace")
-          || $0.contains("points over pace") || $0.hasPrefix("Forecast unavailable")
+        $0.hasPrefix("On track") || $0.hasPrefix("On pace")
+          || $0.hasPrefix("At this pace") || $0.hasPrefix("Forecast unavailable")
           || $0 == "Too early to forecast" || $0 == "No usage yet"
       }
     // Provider availability is announced only when it is not normal.
@@ -451,7 +477,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let expectedSecondaryWindows = self.store.orderedStates
       .filter { self.store.isEnabled($0.provider) }
       .reduce(0) { count, state in
-        count + max(0, (state.snapshot?.windows.count ?? 0) - 1)
+        count + AllowanceBuilder.summary(for: state).secondary.filter { !$0.isComponentShare }.count
       }
     let secondaryWindowsPresent =
       descendants.filter { ($0.identifier?.rawValue ?? "").hasPrefix("secondary-") }.count
@@ -546,9 +572,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let rowsAreSpoken =
       spokenRows.count == ProviderID.allCases.count
       && spokenRows.allSatisfy { row in
-        row.accessibilityRole() == .button
+        let summary = previewSummaries.first { row.identifier?.rawValue == "provider-card-\($0.provider.rawValue)" }
+        let expected = summary?.paceState == .stale ? "percent last known" : "percent left"
+        return row.accessibilityRole() == .button
           && (row.accessibilityLabel() ?? "").isEmpty == false
-          && (row.accessibilityValue() as? String ?? "").contains("percent left")
+          && (row.accessibilityValue() as? String ?? "").contains(expected)
           && (row.accessibilityHelp() ?? "").isEmpty == false
       }
     // Decoration must not announce itself: the row already says which provider
@@ -556,16 +584,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let decorationIsSilent = liveDescendants.compactMap { $0 as? NSImageView }
       .allSatisfy { ($0.accessibilityLabel() ?? "").isEmpty }
     let renderedMeters = liveDescendants.compactMap { $0 as? ReserveMeter }
-    let metersAreSpoken = renderedMeters.allSatisfy { meter in
+    let metersAreSpoken = zip(renderedMeters, previewSummaries).allSatisfy { meter, summary in
         meter.accessibilityRole() == .progressIndicator
           && (meter.accessibilityLabel() ?? "").isEmpty == false
-          && (meter.accessibilityValue() as? String ?? "").contains("percent left")
+          && (meter.accessibilityValue() as? String ?? "").contains(summary.paceState == .stale ? "percent last known" : "percent left")
       }
     let primaryAllowances = previewSummaries.compactMap(\.primary)
     let meterSemanticsWork =
       renderedMeters.count == primaryAllowances.count
       && zip(renderedMeters, primaryAllowances).allSatisfy { meter, allowance in
-        let expectedPace = allowance.expectedPercent.map { 100 - $0 }
+        let expectedPace = allowance.paceState == .stale ? nil : allowance.expectedPercent.map { 100 - $0 }
         let paceMatches: Bool =
           switch (meter.paceRemainingPercentForTesting, expectedPace) {
           case (nil, nil): true
@@ -730,6 +758,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let outsideClickDismissalWorks =
       settingsWindow.map { !self.shouldDismissDashboard(forClickedWindow: $0) } == true
       && self.shouldDismissDashboard(forClickedWindow: unrelatedWindow)
+    let clockAndDisclosureUpdatesWork = Self.dashboardClockAndDisclosureChecks()
     guard providerCards == ProviderID.allCases.count, actionsPresent, quitRemainsReachable,
       logosPresent, bundledProviderArtworkPresent, scrollingMatchesAvailableSpace, contentFits,
       dashboardFits, fifthProviderReachable, headlinePresent,
@@ -746,13 +775,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       staleFreshnessIsVisible, freshWithoutForecastDoesNotLookStale,
       automaticSourceWorks,
       pinnedModelWorks, aggregateCopyWorks, deficitForecastUsesRenewalGap,
+      exhaustionAndMissingForecastAreTruthful, clockAndDisclosureUpdatesWork,
       primaryWindowIgnoresComponentShares, compactMoneyKeepsCurrency,
       localizedTimeUsesRegionalClock,
       semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork
     else {
       return (
         false,
-        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (
@@ -1128,6 +1158,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let nextMinute = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970 / 60) * 60 + 60)
     let timer = Timer(fireAt: nextMinute, interval: 60, target: self,
                       selector: #selector(self.minuteTick), userInfo: nil, repeats: true)
+    timer.tolerance = 3
     RunLoop.main.add(timer, forMode: .common)
     self.minuteTimer = timer
   }
@@ -1185,6 +1216,119 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.dashboardController = controller
     self.popover.contentViewController = controller
     return controller
+  }
+
+  private static func dashboardClockAndDisclosureChecks() -> Bool {
+    let now = Date()
+    let later = now.addingTimeInterval(120)
+    let weekly = UsageWindow(id: "weekly", label: "Weekly", usedPercent: 40,
+      windowMinutes: 10_080, resetsAt: now.addingTimeInterval(4 * 86_400))
+    let daily = UsageWindow(id: "daily", label: "Daily", usedPercent: 20,
+      windowMinutes: 1_440, resetsAt: now.addingTimeInterval(12 * 3_600 + 60))
+    func summary(fetchedAt: Date) -> ProviderSummary {
+      AllowanceBuilder.summary(for: ProviderViewState(provider: .openAI,
+        snapshot: UsageSnapshot(provider: .openAI, windows: [weekly, daily],
+          fetchedAt: fetchedAt, source: "UI clock fixture")), now: now)
+    }
+    func card(_ summary: ProviderSummary, expanded: Bool = false) -> ProviderDashboardCard {
+      ProviderDashboardCard(summary: summary, now: now, isSelectedForMenuBar: false,
+        isExpanded: expanded, connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+    }
+    func tick(_ view: NSView, _ date: Date) {
+      for clock in ([view] + Self.descendants(of: view)).compactMap({ $0 as? any ReserveClockUpdating }) {
+        clock.updateClock(date)
+      }
+    }
+    let stale = card(summary(fetchedAt: now.addingTimeInterval(-31 * 60)))
+    let staleViews = Self.descendants(of: stale)
+    guard let age = staleViews.compactMap({ $0 as? ReserveLabel }).first(where: {
+      $0.identifier?.rawValue == "freshness-label-openAI"
+    }), let staleMeter = staleViews.compactMap({ $0 as? ReserveMeter }).first else { return false }
+    let beforeAge = age.stringValue
+    let beforeSpoken = stale.accessibilityValue() as? String
+    guard staleViews.compactMap({ $0 as? NSTextField }).contains(where: {
+      $0.stringValue == "60%" && ($0.accessibilityLabel() ?? "").contains("percent last known")
+    }) else { return false }
+    tick(stale, later)
+    guard age.stringValue != beforeAge, age.stringValue.contains("33m"),
+      stale.accessibilityValue() as? String != beforeSpoken,
+      (stale.accessibilityValue() as? String ?? "").contains("33 min ago"),
+      (staleMeter.accessibilityValue() as? String ?? "").contains("percent last known"),
+      staleMeter.paceRemainingPercentForTesting == nil else { return false }
+
+    let fresh = card(summary(fetchedAt: now))
+    let freshViews = Self.descendants(of: fresh)
+    guard let meter = freshViews.compactMap({ $0 as? ReserveMeter }).first,
+      let beforeMarker = meter.paceRemainingPercentForTesting,
+      let secondary = freshViews.first(where: { $0.identifier?.rawValue == "secondary-daily" }),
+      let reset = Self.descendants(of: secondary).compactMap({ $0 as? ReserveLabel }).first(where: {
+        $0.stringValue.hasPrefix("resets ")
+      }) else { return false }
+    let beforeReset = reset.stringValue
+    tick(fresh, later)
+    guard let afterMarker = meter.paceRemainingPercentForTesting,
+      afterMarker < beforeMarker, reset.stringValue != beforeReset,
+      reset.stringValue.hasPrefix("resets at ") else { return false }
+    tick(fresh, now.addingTimeInterval(31 * 60))
+    guard meter.paceRemainingPercentForTesting == nil,
+      (meter.accessibilityValue() as? String ?? "").contains("last known") else { return false }
+
+    var typical = summary(fetchedAt: now)
+    typical.subscriptionCostLabel = "Typical monthly cost"
+    var manual = typical
+    manual.subscriptionCostLabel = "Your monthly cost"
+    func signature(_ value: ProviderSummary) -> String {
+      DashboardViewController.signature(summaries: [value], selectedMenuBarProvider: nil,
+        expandedProvider: .openAI, isRefreshing: false, now: now)
+    }
+    guard signature(typical) != signature(manual) else { return false }
+    manual = typical
+    manual.observationTimeKnown = false
+    guard signature(typical) != signature(manual) else { return false }
+
+    let grok = AllowanceBuilder.summary(for: ProviderViewState(provider: .grok,
+      snapshot: UsageSnapshot(provider: .grok, windows: [
+        UsageWindow(id: "pool", label: "Weekly", usedPercent: 20),
+        UsageWindow(id: "build-share", label: "Grok Build share", usedPercent: 90),
+      ], source: "UI share fixture")), now: now)
+    let collapsed = Self.descendants(of: card(grok))
+    let expanded = Self.descendants(of: card(grok, expanded: true))
+    let expandedLabels = expanded.compactMap { ($0 as? NSTextField)?.stringValue }
+    func forecastLabels(_ view: NSView) -> [String] {
+      Self.descendants(of: view).compactMap { node in
+        guard node.identifier?.rawValue == "forecast" else { return nil }
+        return (node as? NSTextField)?.stringValue
+      }
+    }
+    let savedSummary = AllowanceBuilder.summary(for: ProviderViewState(provider: .windsurf,
+      snapshot: UsageSnapshot(provider: .windsurf, windows: [weekly], fetchedAt: now,
+        source: "UI saved fixture", observationTimeKnown: false)), now: now)
+    let saved = card(savedSummary)
+    let savedLabels = Self.descendants(of: saved).compactMap { ($0 as? NSTextField)?.stringValue }
+    let noPeriodSummary = AllowanceBuilder.summary(for: ProviderViewState(provider: .copilot,
+      snapshot: UsageSnapshot(provider: .copilot, windows: [
+        UsageWindow(id: "premium", label: "Premium requests", usedPercent: 40,
+          resetsAt: now.addingTimeInterval(20 * 86_400))], source: "UI quota fixture")), now: now)
+    let exhaustedSummary = AllowanceBuilder.summary(for: ProviderViewState(provider: .copilot,
+      snapshot: UsageSnapshot(provider: .copilot, windows: [
+        UsageWindow(id: "premium", label: "Premium requests", usedPercent: 100,
+          resetsAt: now.addingTimeInterval(20 * 86_400))], source: "UI exhausted fixture")), now: now)
+    let earlySummary = AllowanceBuilder.summary(for: ProviderViewState(provider: .openAI,
+      snapshot: UsageSnapshot(provider: .openAI, windows: [
+        UsageWindow(id: "session", label: "5 hours", usedPercent: 5, windowMinutes: 300,
+          resetsAt: now.addingTimeInterval(295 * 60))], source: "UI early fixture")), now: now)
+    return !collapsed.contains { $0.identifier?.rawValue == "secondary-build-share" }
+      && expanded.contains { $0.identifier?.rawValue == "secondary-build-share" }
+      && expandedLabels.contains("90% of pool used")
+      && !expandedLabels.contains("10% left")
+      && forecastLabels(saved).isEmpty
+      && savedLabels.contains("Saved usage · age unknown")
+      && forecastLabels(card(noPeriodSummary)).isEmpty
+      && forecastLabels(card(exhaustedSummary)).contains { $0.hasPrefix("Limit exhausted · resets") }
+      && forecastLabels(card(earlySummary)) == ["Too early to forecast"]
+      && forecastLabels(stale) == ["Update needed for a forecast"]
+      && ProviderSetupAction.install.toolTip(for: .copilot) == "Open official installation instructions for Copilot"
+      && ProviderSetupAction.update.toolTip(for: .copilot) == "Open official update instructions for Copilot"
   }
 
   private static func descendants(of view: NSView) -> [NSView] {

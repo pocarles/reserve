@@ -124,6 +124,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     // The current pane is already live. Rebuilding it on every reopen retained
     // a complete control tree until the next AppKit autorelease drain.
     if self.window?.contentView == nil { self.applyPane(animated: false) }
+    self.store.insightsVisible = self.pane == .insights
     super.showWindow(sender)
     self.window?.makeKeyAndOrderFront(nil)
     self.window?.orderFrontRegardless()
@@ -134,6 +135,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     // A closed Settings window can hold every Insights chart and provider row
     // for the rest of the app session. Release that hidden control tree; the
     // next show rebuilds the current pane through the existing lazy path.
+    self.store.insightsVisible = false
     self.renewalStatusLabels.removeAll()
     self.window?.contentView = nil
   }
@@ -141,11 +143,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   func show(_ pane: Pane) {
     let paneChanged = self.pane != pane
     self.pane = pane
+    self.store.insightsVisible = pane == .insights && self.window?.isVisible == true
     self.window?.toolbar?.selectedItemIdentifier = pane.itemIdentifier
     if paneChanged || self.window?.contentView == nil {
       self.applyPane(animated: self.window?.isVisible == true)
     }
     self.showWindow(nil)
+    if pane == .insights { self.store.requestInsights() }
   }
 
   /// The analytical surface, reached from the popover footer.
@@ -210,6 +214,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let pane = Pane.allCases.first(where: { $0.itemIdentifier == sender.itemIdentifier })
     else { return }
     self.pane = pane
+    self.store.insightsVisible = pane == .insights && self.window?.isVisible == true
+    if pane == .insights { self.store.requestInsights() }
     self.applyPane(animated: true)
   }
 
@@ -261,6 +267,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           rows: [
             self.formRow("Refresh limits:", self.refreshIntervalControl()),
             self.formRow("Startup:", self.launchAtLoginCheckbox()),
+            self.formRow("History:", self.localHistoryCheckbox()),
           ]),
         self.section(
           title: "Menu bar",
@@ -348,7 +355,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func insightsPane() -> NSView {
-    let rows = ProviderID.allCases.map(self.insightRow)
+    let rows = ProviderID.allCases.filter { self.store.isEnabled($0) }.map(self.insightRow)
     let states = ProviderID.allCases.compactMap { self.store.states[$0] }
       .filter { self.store.isEnabled($0.provider) }
     let measured = states.filter { $0.localUsage != nil }
@@ -358,7 +365,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let planTotal = plans.reduce(0, +)
     let total = SettingsLabel(
       measured.isEmpty
-        ? "No local usage has been measured yet"
+        ? "No usage history available"
         : plans.isEmpty
           ? "\(DashboardFormat.money(apiValue)) of API-equivalent usage"
           : "\(DashboardFormat.money(apiValue)) of API-equivalent usage against "
@@ -367,6 +374,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     total.identifier = NSUserInterfaceItemIdentifier("insights-total")
 
     let charts = states.compactMap { state -> NSView? in
+      if let daily = state.snapshot?.accountTokenActivity?.dailyUsageBuckets, !daily.isEmpty {
+        return self.chartRow(provider: state.provider, series: daily)
+      }
       guard let usage = state.localUsage else { return nil }
       if usage.dailyTokens.contains(where: { $0.tokens > 0 }) {
         return self.chartRow(provider: state.provider, series: usage.dailyTokens)
@@ -378,7 +388,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
 
     let activityFooter: String
-    if origins.contains(.localDevice), origins.contains(.providerAccount) {
+    if states.contains(where: { $0.snapshot?.accountTokenActivity != nil }) {
+      activityFooter = "OpenAI reports account token totals without a price or token-type breakdown. Other rows identify local or provider-reported history."
+    } else if origins.contains(.localDevice), origins.contains(.providerAccount) {
       activityFooter = "OpenAI, Claude, and Grok use session logs on this Mac. Cursor uses "
         + "provider-reported account totals, which can include other devices."
     } else if origins.contains(.providerAccount) {
@@ -398,7 +410,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         self.section(
           title: "Daily tokens",
           footer: charts.isEmpty
-            ? "No local activity has been recorded yet."
+            ? "History appears when the provider supplies it. Local history is optional in General."
             : "One bar per day, newest on the right. A compressed square-root scale keeps "
               + "ordinary days visible beside outliers. Each provider uses its own peak. "
               + "Daily history unavailable means the provider supplied totals without a "
@@ -538,8 +550,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
               "Cursor's cursor-user / cursor-access-token Keychain item, only after you choose Allow access",
               "~/.claude/.credentials.json and ~/.grok/auth.json",
               "Session logs under ~/.claude/projects, ~/.codex/sessions and ~/.grok/sessions, "
-                + "for token counts only",
+                + "for token counts only, when local history is enabled",
               "Cursor account usage totals from Cursor's authenticated DashboardService; Reserve does not read Cursor prompts or transcripts",
+              "Optional quota updates shared by Claude Code; Reserve stores only limits and their observation time",
+              "Copilot allowance and OpenAI account activity through their installed helpers, without sending prompts",
             ])
           ]),
         self.section(
@@ -578,6 +592,19 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   // MARK: - Rows
+
+  private func localHistoryCheckbox() -> NSButton {
+    let button = NSButton(checkboxWithTitle: "Include activity from this Mac", target: self,
+      action: #selector(self.localHistoryChanged(_:)))
+    button.state = self.store.localHistoryEnabled ? .on : .off
+    button.identifier = NSUserInterfaceItemIdentifier("history-local-enabled")
+    button.toolTip = "Optional token history from enabled providers. Allowance checks do not need it."
+    return button
+  }
+
+  @objc private func localHistoryChanged(_ sender: NSButton) {
+    self.store.localHistoryEnabled = sender.state == .on
+  }
 
   private func refreshIntervalControl() -> NSView {
     let popup = NSPopUpButton()
@@ -737,6 +764,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.formRow("Monthly cost:", self.planControls(provider), labelWidth: 92),
       self.formRow("Sources:", self.sourceLabels(provider), labelWidth: 92),
     ]
+    if provider == .copilot {
+      rows.append(SettingsLabel("Experimental support · quota checks only", size: 11, color: .secondaryLabelColor))
+    }
     if provider == .anthropic || provider == .cursor {
       let checkbox = NSButton(
         checkboxWithTitle: "Allow access to my \(provider.displayName) usage",
@@ -744,9 +774,20 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       checkbox.identifier = NSUserInterfaceItemIdentifier(
         "settings-keychain-\(provider.rawValue)")
       checkbox.state = self.store.keychainReadAllowed(for: provider) ? .on : .off
+      checkbox.isEnabled = provider != .anthropic || !self.store.claudePassiveUpdatesEnabled
       checkbox.toolTip =
         "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
       rows.append(self.formRow("\(provider.displayName):", checkbox, labelWidth: 92))
+    }
+    if provider == .anthropic {
+      let passive = NSButton(checkboxWithTitle: "Get updates from Claude Code", target: self,
+        action: #selector(self.claudePassiveUpdatesChanged(_:)))
+      passive.state = self.store.claudePassiveUpdatesEnabled ? .on : .off
+      passive.identifier = NSUserInterfaceItemIdentifier("settings-claude-passive")
+      passive.toolTip = "Shares limits after Claude Code responds, without reading your sign-in. Preserves your existing status line. Updates pause when you are not using Claude Code."
+      rows.append(self.formRow("Updates:", passive, labelWidth: 92))
+      rows.append(SettingsLabel("Updates after Claude Code responds. No sign-in access needed.",
+        size: 11, color: .secondaryLabelColor))
     }
     if let setupAction = AllowanceBuilder.setupAction(
       for: self.store.states[provider] ?? ProviderViewState(provider: provider))
@@ -869,6 +910,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let name = SettingsLabel(provider.displayName, size: 13, color: .labelColor)
     name.widthAnchor.constraint(equalToConstant: 92).isActive = true
     let usage = self.store.states[provider]?.localUsage
+    if let activity = self.store.states[provider]?.snapshot?.accountTokenActivity {
+      let total = SettingsLabel(activity.lifetimeTokens.map {
+        "\(DashboardFormat.tokens($0)) lifetime tokens"
+      } ?? "Account activity", size: 12, color: .secondaryLabelColor)
+      let source = SettingsLabel("Reported by OpenAI", size: 11, color: .tertiaryLabelColor)
+      let row = NSStackView.row([logo, name, total, NSStackView.spacer(), source], spacing: 8)
+      row.identifier = NSUserInterfaceItemIdentifier("insight-\(provider.rawValue)")
+      row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+      return row
+    }
     let today = SettingsLabel(
       usage.map { "\(DashboardFormat.tokens($0.todayTokens)) today" }
         ?? (self.store.states[provider]?.snapshot?.detailedUsageUnavailable == true
@@ -1091,6 +1142,18 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.store.disconnect(provider)
   }
 
+  @objc private func claudePassiveUpdatesChanged(_ sender: NSButton) {
+    do { try self.store.setClaudePassiveUpdatesEnabled(sender.state == .on) }
+    catch {
+      sender.state = self.store.claudePassiveUpdatesEnabled ? .on : .off
+      let alert = NSAlert()
+      alert.messageText = "Claude updates could not be changed"
+      alert.informativeText = error.localizedDescription
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
+    }
+  }
+
   @objc private func keychainChanged(_ sender: NSButton) {
     let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(
       of: "settings-keychain-", with: "")
@@ -1268,16 +1331,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func providerStatus(_ provider: ProviderID) -> (text: String, color: NSColor) {
-    let executable: String =
-      switch provider {
-      case .openAI: "codex"
-      case .anthropic: "claude"
-      case .grok: "grok"
-      case .cursor: "cursor-agent"
-      case .windsurf: "Devin"
-      }
+    let executable = ProviderDescriptor.forProvider(provider).helper.executable
     let state = self.store.states[provider]
-    if !self.store.isEnabled(provider) { return ("Off", .secondaryLabelColor) }
+    if !self.store.isEnabled(provider) {
+      let detected = provider == .windsurf ? WindsurfProvider.installedApplicationURL() != nil
+        : BinaryLocator.find(executable) != nil
+      return (detected ? "Available on this Mac" : "Off", .secondaryLabelColor)
+    }
+    if state?.snapshot?.observationTimeKnown == false, state?.error == nil {
+      return ("Using saved usage", .secondaryLabelColor)
+    }
     if state?.requiresKeychainAccess == true { return ("Permission needed", .systemOrange) }
     if state?.usageAccessDenied == true { return ("Usage access denied", .systemOrange) }
     if state?.isConnecting == true { return ("Connecting", .secondaryLabelColor) }
@@ -1350,6 +1413,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let originalPane = self.pane
     for pane in Pane.allCases {
       self.pane = pane
+    self.store.insightsVisible = pane == .insights && self.window?.isVisible == true
       self.applyPane(animated: false)
       let fitted = fits("pane-\(pane.rawValue)")
       let readable = typographyIsReadable()
@@ -1585,6 +1649,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   private func renderPane(_ pane: Pane, to url: URL) throws {
     self.pane = pane
+    self.store.insightsVisible = pane == .insights && self.window?.isVisible == true
     if pane == .providers { self.expandedProviders = [.anthropic] }
     self.applyPane(animated: false)
     guard let view = self.window?.contentView else { throw SettingsRenderError.viewUnavailable }

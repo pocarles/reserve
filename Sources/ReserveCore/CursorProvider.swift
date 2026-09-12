@@ -14,6 +14,8 @@ public struct CursorProvider: UsageProvider {
   public static let eventPageSize = 250
 
   public let id: ProviderID = .cursor
+  private let includeAccountUsage: Bool
+  private let dataCache: CursorDataCache
   private let environment: [String: String]
   private let allowKeychainRead: Bool
   private let allowKeychainInteraction: Bool
@@ -25,14 +27,18 @@ public struct CursorProvider: UsageProvider {
   private let requestHandler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
   private static let sharedCredentialSession = CursorCredentialSession()
+  private static let sharedDataCache = CursorDataCache()
 
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     allowKeychainRead: Bool = false,
     allowKeychainInteraction: Bool = false,
+    includeAccountUsage: Bool = false,
     session: URLSession? = nil
   ) {
     let session = session ?? ProviderHTTPSession.shared
+    self.includeAccountUsage = includeAccountUsage
+    self.dataCache = Self.sharedDataCache
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
     self.allowKeychainInteraction = allowKeychainInteraction
@@ -63,6 +69,8 @@ public struct CursorProvider: UsageProvider {
     environment: [String: String],
     allowKeychainRead: Bool,
     allowKeychainInteraction: Bool = false,
+    includeAccountUsage: Bool = false,
+    dataCache: CursorDataCache = CursorDataCache(),
     keychainItemExists: @escaping @Sendable () -> Bool = { false },
     agentLocator: @escaping @Sendable ([String: String]) -> String? = { _ in "/usr/bin/true" },
     statusRunner: @escaping @Sendable (String, [String], [String: String]) async throws -> String,
@@ -70,6 +78,8 @@ public struct CursorProvider: UsageProvider {
     credentialSession: CursorCredentialSession = CursorCredentialSession(),
     requestHandler: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse)
   ) {
+    self.includeAccountUsage = includeAccountUsage
+    self.dataCache = dataCache
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
     self.allowKeychainInteraction = allowKeychainInteraction
@@ -87,7 +97,7 @@ public struct CursorProvider: UsageProvider {
       throw UsageProviderError.credentialsNotFound(
         "Cursor is not connected to Reserve. Use Sign in or Allow access.")
     }
-    let loadCredential: @Sendable () async throws -> CursorCredential = {
+    let recoverCredential: @Sendable () async throws -> CursorCredential = {
       guard let executable = self.agentLocator(self.environment) else {
         throw UsageProviderError.executableNotFound("Cursor Agent")
       }
@@ -98,7 +108,16 @@ public struct CursorProvider: UsageProvider {
       try Self.validateStatusOutput(status)
       return try await self.credentialLoader(self.allowKeychainInteraction)
     }
-    let credential = try await self.credentialSession.credential(loader: loadCredential)
+    let credential = try await self.credentialSession.credential {
+      do {
+        return try await self.credentialLoader(self.allowKeychainInteraction)
+      } catch let error as UsageProviderError {
+        // An existing, authorized Keychain session needs no helper process.
+        // Never turn a locked Keychain or denied consent into a CLI prompt.
+        guard case .credentialsNotFound = error else { throw error }
+        return try await recoverCredential()
+      }
+    }
     do {
       return try await self.fetch(credential: credential)
     } catch let error as UsageProviderError {
@@ -108,7 +127,7 @@ public struct CursorProvider: UsageProvider {
       // run the same official status check before making one bounded retry.
       try Task.checkCancellation()
       await self.credentialSession.clear()
-      let refreshedCredential = try await self.credentialSession.credential(loader: loadCredential)
+      let refreshedCredential = try await self.credentialSession.credential(loader: recoverCredential)
       do {
         return try await self.fetch(credential: refreshedCredential)
       } catch let retryError as UsageProviderError {
@@ -128,8 +147,30 @@ public struct CursorProvider: UsageProvider {
     current = try await client.call(
       .currentPeriodUsage, body: Data(#"{"includePooledUsage":false}"#.utf8),
       as: CursorCurrentPeriodUsageResponse.self)
-    plan = try await client.call(
-      .planInfo, body: Data("{}".utf8), as: CursorPlanInfoResponse.self)
+    let now = Date()
+    let cacheKey = SHA256.hash(data: Data(credential.accessToken.utf8))
+      .map { String(format: "%02x", $0) }.joined()
+    let cached = await self.dataCache.value(
+      for: cacheKey, billingStart: current.billingCycleStart, now: now)
+    if let cachedPlan = cached.plan, cached.planExpiresAt > now,
+      cached.billingStart == current.billingCycleStart
+    {
+      plan = cachedPlan
+    } else {
+      do {
+        plan = try await client.call(
+          .planInfo, body: Data("{}".utf8), as: CursorPlanInfoResponse.self)
+        await self.dataCache.storePlan(
+          plan, key: cacheKey, billingStart: current.billingCycleStart, now: now)
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        // Plan metadata is optional; fresh quota is still useful if it fails.
+        plan = cached.billingStart == current.billingCycleStart
+          ? (cached.plan ?? CursorPlanInfoResponse(planInfo: nil))
+          : CursorPlanInfoResponse(planInfo: nil)
+      }
+    }
     hardLimit = try? await client.call(
       .hardLimit, body: Data("{}".utf8), as: CursorHardLimitResponse.self)
 
@@ -140,25 +181,24 @@ public struct CursorProvider: UsageProvider {
       usage: current.planUsage,
       resetsAt: billingEnd,
       windowMinutes: Self.windowMinutes(start: billingStart, end: billingEnd))
-    let accountUsage: LocalUsageSummary?
-    let detailedUsageUnavailable: Bool
-    do {
-      accountUsage = try await Self.fetchAccountUsage(
-        client: client, billingStart: billingStart, now: Date())
-      detailedUsageUnavailable = false
-    } catch let error as CursorDetailedUsageUnavailable {
-      _ = error
-      accountUsage = nil
-      detailedUsageUnavailable = true
-    } catch let error as UsageProviderError {
-      switch error {
-      case .unauthorized, .accessDenied, .rateLimited, .timedOut, .unavailable, .invalidResponse:
-        accountUsage = nil
+    var accountUsage = cached.usage
+    var detailedUsageUnavailable = cached.usageUnavailable
+    if self.includeAccountUsage, cached.usageExpiresAt <= now {
+      do {
+        accountUsage = try await Self.fetchAccountUsage(
+          client: client, billingStart: billingStart, now: now)
+        detailedUsageUnavailable = false
+        await self.dataCache.storeUsage(accountUsage, key: cacheKey, now: now)
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        // A history outage must not discard current allowance or previously
+        // collected history. Its original fetchedAt continues to show its age.
         detailedUsageUnavailable = true
-      default:
-        throw error
+        await self.dataCache.noteUsageFailure(key: cacheKey, now: now)
       }
     }
+    try Task.checkCancellation()
 
     let monthlyPrice = Self.monthlyPriceMinorUnits(plan.planInfo?.price)
     return UsageSnapshot(
@@ -184,6 +224,7 @@ public struct CursorProvider: UsageProvider {
 
   public static func clearCachedCredential() async {
     await Self.sharedCredentialSession.clear()
+    await Self.sharedDataCache.clear()
   }
 
   static func validateStatusOutput(_ output: String) throws {
@@ -465,6 +506,56 @@ public struct CursorProvider: UsageProvider {
       throw CursorDetailedUsageUnavailable()
     }
     return result
+  }
+}
+
+/// Memory-only cache scoped to the credential fingerprint, never the raw token.
+/// Quota and spending remain live; optional metadata and history have separate
+/// budgets. A new billing cycle invalidates metadata immediately.
+actor CursorDataCache {
+  struct Entry: Sendable {
+    var plan: CursorPlanInfoResponse?
+    var billingStart: Int64?
+    var planExpiresAt = Date.distantPast
+    var usage: LocalUsageSummary?
+    var usageExpiresAt = Date.distantPast
+    var usageUnavailable = false
+  }
+  private var key: String?
+  private var entry = Entry()
+
+  func value(for key: String, billingStart: Int64? = nil, now: Date) -> Entry {
+    if self.key != key || self.entry.billingStart != billingStart {
+      self.key = key
+      self.entry = Entry()
+      self.entry.billingStart = billingStart
+    }
+    return self.entry
+  }
+
+  func storePlan(_ plan: CursorPlanInfoResponse, key: String, billingStart: Int64?, now: Date) {
+    guard self.key == key else { return }
+    self.entry.plan = plan
+    self.entry.billingStart = billingStart
+    self.entry.planExpiresAt = now.addingTimeInterval(3_600)
+  }
+
+  func storeUsage(_ usage: LocalUsageSummary?, key: String, now: Date) {
+    guard self.key == key else { return }
+    self.entry.usage = usage
+    self.entry.usageUnavailable = false
+    self.entry.usageExpiresAt = now.addingTimeInterval(900)
+  }
+
+  func noteUsageFailure(key: String, now: Date) {
+    guard self.key == key else { return }
+    self.entry.usageUnavailable = true
+    self.entry.usageExpiresAt = now.addingTimeInterval(300)
+  }
+
+  func clear() {
+    self.key = nil
+    self.entry = Entry()
   }
 }
 

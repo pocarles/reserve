@@ -112,7 +112,7 @@ enum ReserveColor {
       return Self.dynamic(light: 0xC2_5B_36, dark: 0xE8_70_45)
     case .grok:
       return Self.dynamic(light: 0x1F_63_92, dark: 0x6B_AE_EE)
-    case .cursor, .windsurf:
+    case .cursor, .windsurf, .copilot:
       return Self.dynamic(light: 0x12_12_12, dark: 0xF4_F4_F4)
     }
   }
@@ -150,7 +150,20 @@ extension NSView {
 
 /// A non-editable label with optional letter spacing.
 @MainActor
-final class ReserveLabel: NSTextField {
+protocol ReserveClockUpdating {
+  func updateClock(_ now: Date)
+}
+
+@MainActor
+final class ReserveLabel: NSTextField, ReserveClockUpdating {
+  var clockText: ((Date) -> String)?
+
+  func updateClock(_ now: Date) {
+    guard let clockText else { return }
+    let text = clockText(now)
+    if self.stringValue != text { self.stringValue = text; self.toolTip = text }
+  }
+
   init(
     _ text: String,
     font: NSFont,
@@ -289,25 +302,44 @@ class ReserveSurface: NSView {
 /// fill is capacity left, and the marker is the capacity that should remain at
 /// this point in the window. A fill left of the marker is therefore a deficit.
 @MainActor
-final class ReserveMeter: NSView {
+final class ReserveMeter: NSView, ReserveClockUpdating {
   private let remainingPercent: Double
-  private let paceRemainingPercent: Double?
+  private var paceRemainingPercent: Double?
   private let color: NSColor
+  private var isStale: Bool
+  var clockPresentation: ((Date) -> (paceRemainingPercent: Double?, isStale: Bool))?
 
   init(
     remainingPercent: Double,
     paceRemainingPercent: Double?,
     label: String? = nil,
-    color: NSColor
+    color: NSColor,
+    isStale: Bool = false
   ) {
     self.remainingPercent = min(100, max(0, remainingPercent))
     self.paceRemainingPercent = paceRemainingPercent.map { min(100, max(0, $0)) }
     self.color = color
+    self.isStale = isStale
     super.init(frame: .zero)
     self.wantsLayer = true
     self.setAccessibilityRole(.progressIndicator)
     self.setAccessibilityLabel(label ?? "Allowance remaining")
-    self.setAccessibilityValue("\(Int(self.remainingPercent.rounded())) percent left")
+    self.updateSpokenValue()
+  }
+
+  func updateClock(_ now: Date) {
+    guard let presentation = self.clockPresentation?(now) else { return }
+    let pace = presentation.paceRemainingPercent.map { min(100, max(0, $0)) }
+    if self.paceRemainingPercent != pace || self.isStale != presentation.isStale {
+      self.paceRemainingPercent = pace
+      self.isStale = presentation.isStale
+      self.updateSpokenValue()
+      self.needsDisplay = true
+    }
+  }
+
+  private func updateSpokenValue() {
+    self.setAccessibilityValue("\(Int(self.remainingPercent.rounded())) percent \(self.isStale ? "last known" : "left")")
   }
 
   required init?(coder: NSCoder) { nil }

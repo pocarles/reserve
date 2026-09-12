@@ -87,7 +87,7 @@ public struct WindsurfProvider: UsageProvider {
       // This cache has no observation timestamp. The start of its newest quota
       // is a conservative lower bound, never the database's modification time.
       fetchedAt: observedAfter, source: source, billingRenewsAt: end,
-      creditBalanceMinorUnits: balance)
+      creditBalanceMinorUnits: balance, observationTimeKnown: false, checkedAt: now)
   }
 
   private static func number(_ value: Any?) throws -> Double? {
