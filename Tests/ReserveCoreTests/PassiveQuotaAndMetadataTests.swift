@@ -99,6 +99,26 @@ struct PassiveQuotaAndMetadataTests {
     #expect(result.rateLimitResetCredits?.availableCount == 2)
   }
 
+  @Test func codexHidesUnusedAndDuplicateSecondaryBuckets() throws {
+    let unused = try JSONDecoder().decode(OpenAIRateLimitsResponse.self, from: Data(#"""
+      {
+      "rateLimitsByLimitId":{
+        "codex":{"primary":{"usedPercent":40,"windowDurationMins":300,"resetsAt":1800000000}},
+        "spark":{"limitName":"Spark","primary":{"usedPercent":0,"windowDurationMins":300},"secondary":{"usedPercent":0,"windowDurationMins":10080}}
+      }}
+      """#.utf8))
+    #expect(unused.usageWindows.map(\.id) == ["five-hour"])
+
+    let duplicate = try JSONDecoder().decode(OpenAIRateLimitsResponse.self, from: Data(#"""
+      {
+      "rateLimitsByLimitId":{
+        "codex":{"primary":{"usedPercent":40,"windowDurationMins":300,"resetsAt":1800000000}},
+        "spark":{"limitName":"Spark","primary":{"usedPercent":40,"windowDurationMins":300,"resetsAt":1800000000},"secondary":{"usedPercent":25,"windowDurationMins":10080}}
+      }}
+      """#.utf8))
+    #expect(duplicate.usageWindows.map(\.id) == ["five-hour", "spark-weekly"])
+  }
+
   @Test func codexLegacyStillWorksAndWindowCountIsBounded() throws {
     let legacy = try JSONDecoder().decode(OpenAIRateLimitsResponse.self,
       from: Data(#"{"rateLimits":{"primary":{"used_percent":12,"window_duration_mins":300}}}"#.utf8))

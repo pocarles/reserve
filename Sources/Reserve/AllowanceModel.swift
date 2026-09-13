@@ -187,7 +187,16 @@ enum AllowanceBuilder {
     let planWindows = windows.filter { !$0.isComponentShare }
     let blockingWindow = planWindows.filter { $0.usedPercent >= 99.5 && ($0.resetsAt ?? .distantFuture) > now }
       .min { ($0.resetsAt ?? .distantFuture) < ($1.resetsAt ?? .distantFuture) }
+    let urgentWindow = planWindows.filter {
+      100 - $0.usedPercent <= 20 && ($0.resetsAt ?? .distantFuture) > now
+    }.min {
+      if $0.usedPercent != $1.usedPercent {
+        return $0.usedPercent > $1.usedPercent
+      }
+      return ($0.resetsAt ?? .distantFuture) < ($1.resetsAt ?? .distantFuture)
+    }
     let primaryWindow = blockingWindow
+      ?? urgentWindow
       ?? planWindows.first { $0.label.localizedCaseInsensitiveCompare("Weekly") == .orderedSame }
       ?? planWindows.max(by: { $0.usedPercent < $1.usedPercent })
       ?? windows.max(by: { $0.usedPercent < $1.usedPercent })
@@ -339,7 +348,7 @@ enum AllowanceBuilder {
     primary: String, secondary: String, state: UsagePaceState
   ) {
     guard !summaries.isEmpty else {
-      return ("No providers are being tracked", "Choose providers in Settings", .unknown)
+      return ("Connect a provider in Settings", "", .unknown)
     }
     let stale = summaries.filter { $0.paceState == .stale }
     let unknown = summaries.filter { $0.paceState == .unknown }
@@ -354,10 +363,11 @@ enum AllowanceBuilder {
       return false
     }
     if let first = exhausted.first {
+      let reset = first.primary?.resetsAt.flatMap { $0 > now ? DashboardFormat.countdown(to: $0, now: now) : nil }
       return (
-        exhausted.count == 1 ? "1 plan exhausted" : "\(exhausted.count) plans exhausted",
-        "\(first.provider.displayName) · limit exhausted"
-          + (stale.isEmpty ? "" : " · \(stale.count) also need fresh data"),
+        "\(first.provider.displayName) is out of allowance"
+          + (reset.map { " · resets \($0)" } ?? ""),
+        "",
         .exhausted)
     }
     if !deficits.isEmpty {
@@ -375,8 +385,8 @@ enum AllowanceBuilder {
         detail = "reset time unavailable"
       }
       return (
-        deficits.count == 1 ? "1 plan may run out early" : "\(deficits.count) plans may run out early",
-        "\(worst.provider.displayName) · \(detail)",
+        "\(worst.provider.displayName) \(detail)",
+        "",
         worst.paceState)
     }
     let reset = Self.nextReset(in: summaries, now: now)
@@ -384,38 +394,29 @@ enum AllowanceBuilder {
       "Next reset: \($0.provider.displayName) \(DashboardFormat.countdown(to: $0.date, now: now))"
     } ?? "Next reset unavailable"
     if !stale.isEmpty {
-      let knownSummary = Self.healthySummary(
-        reserve: reserve.count, onPace: onPace.count, other: true)
-      let context = [
-        knownSummary,
-        unknown.isEmpty ? nil : Self.paceUnavailable(unknown.count, other: true),
-        nextReset,
-      ].compactMap { $0 }
+      let names = stale.prefix(2).map { $0.provider.displayName }
+      let subject = names.joined(separator: " and ")
+        + (stale.count > 2 ? " and \(stale.count - 2) more" : "")
       return (
-        Self.plans(stale.count, singular: "needs fresh data", plural: "need fresh data"),
-        context.joined(separator: " · "), .stale)
+        "\(subject) need\(stale.count == 1 ? "s" : "") fresh data",
+        "", .stale)
     }
     if !unknown.isEmpty {
-      let knownSummary = Self.healthySummary(
-        reserve: reserve.count, onPace: onPace.count, other: true)
-      let context = [knownSummary, nextReset].compactMap { $0 }
+      let subject = unknown.count == 1
+        ? unknown[0].provider.displayName
+        : "\(unknown.count) plans"
       return (
-        Self.paceUnavailable(unknown.count),
-        context.joined(separator: " · "), .unknown)
+        "\(subject) \(unknown.count == 1 ? "has" : "have") no pace forecast yet",
+        "", .unknown)
     }
     if !onPace.isEmpty {
-      let primary = reserve.isEmpty
-        ? "All plans are on pace"
-        : (Self.healthySummary(
-          reserve: reserve.count, onPace: onPace.count, other: false) ?? "All plans are on pace")
-      return (primary, nextReset, .onPace)
+      return ("All tracked plans are usable · \(nextReset.lowercased())", "", .onPace)
     }
     if !reserve.isEmpty {
-      return ("All plans have reserve", nextReset, .reserve(percent: 0))
+      return ("All tracked plans have reserve · \(nextReset.lowercased())", "", .reserve(percent: 0))
     }
     return (
-      Self.paceUnavailable(summaries.count),
-      "Current pace is unavailable", .unknown)
+      "Current pace is unavailable", "", .unknown)
   }
 
   /// "1 plan has reserve" / "2 other plans remain on pace".

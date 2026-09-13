@@ -129,18 +129,44 @@ struct OpenAIRateLimitsResponse: Decodable, Sendable {
     for (id, bucket) in buckets.prefix(16) {
       let bucketName = bucket.limitName?.trimmingCharacters(in: .whitespacesAndNewlines)
       let label = bucketName?.isEmpty == false ? bucketName! : id.replacingOccurrences(of: "_", with: " ")
+      var renderedBucket: [UsageWindow] = []
       for (fallback, window) in [("primary", bucket.primary), ("secondary", bucket.secondary)] {
         guard let window else { continue }
         let suffix = window.stableID(fallback: fallback)
         let rendered = window.usageWindow(id: id == "codex" ? suffix : "\(id)-\(suffix)",
           fallbackLabel: fallback == "primary" ? "Session" : "Weekly")
-        windows.append(UsageWindow(id: rendered.id,
+        renderedBucket.append(UsageWindow(id: rendered.id,
           label: id == "codex" ? rendered.label : "\(label) · \(rendered.label)",
           usedPercent: rendered.usedPercent, windowMinutes: rendered.windowMinutes,
           resetsAt: rendered.resetsAt))
       }
+      if id != "codex" {
+        // The API can return model-specific buckets that have never been used.
+        // Showing two extra 100%-left rows makes the real account limits harder
+        // to find. Keep additional buckets only once they carry actual usage,
+        // and suppress an exact duplicate of a limit already shown.
+        guard windows.isEmpty || renderedBucket.contains(where: { $0.usedPercent > 0.05 }) else {
+          continue
+        }
+        renderedBucket.removeAll { candidate in
+          windows.contains { existing in
+            existing.windowMinutes == candidate.windowMinutes
+              && abs(existing.usedPercent - candidate.usedPercent) < 0.05
+              && Self.sameReset(existing.resetsAt, candidate.resetsAt)
+          }
+        }
+      }
+      windows.append(contentsOf: renderedBucket)
     }
     return Array(windows.prefix(UsageSnapshot.maximumWindows))
+  }
+
+  private static func sameReset(_ lhs: Date?, _ rhs: Date?) -> Bool {
+    switch (lhs, rhs) {
+    case (nil, nil): true
+    case let (lhs?, rhs?): abs(lhs.timeIntervalSince(rhs)) < 60
+    default: false
+    }
   }
 }
 

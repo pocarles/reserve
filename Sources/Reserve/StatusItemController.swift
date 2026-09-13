@@ -218,23 +218,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         withState(previewSummaries[2], .reserve(percent: 18)),
       ])
     let aggregateCopyWorks =
-      singleSummary.primary == "1 plan may run out early"
-      && pluralSummary.primary == "2 plans may run out early"
-      && pluralSummary.secondary.hasPrefix("\(previewSummaries[0].provider.displayName) · ")
-      && !pluralSummary.secondary.contains("points")
-      && (pluralSummary.secondary.contains("before reset") || pluralSummary.secondary.contains("resets in"))
-      && staleSummary.primary == "1 plan needs fresh data"
-      && staleSummary.secondary.contains("2 other plans have reserve")
-      && oneHealthyStale.secondary.contains("1 other plan has reserve")
-      && !oneHealthyStale.secondary.contains("have reserve")
-      && mixedStale.secondary.contains("1 other plan has reserve")
-      && mixedStale.secondary.contains("1 is on pace")
-      && !mixedStale.secondary.contains("remain on pace")
-      && mixedHealthy.primary == "1 plan has reserve · 2 are on pace"
-      && freshWithoutForecast.primary == "1 plan has no pace forecast"
-      && freshWithoutForecast.secondary.contains("2 other plans have reserve")
-      && !freshWithoutForecast.primary.contains("update")
-      && !staleSummary.primary.contains("All plans")
+      singleSummary.primary.contains("may run out")
+      && pluralSummary.primary.contains("may run out")
+      && pluralSummary.secondary.isEmpty
+      && staleSummary.primary.contains(previewSummaries[0].provider.displayName)
+      && staleSummary.primary.hasSuffix("needs fresh data")
+      && staleSummary.secondary.isEmpty
+      && oneHealthyStale.primary.hasSuffix("needs fresh data")
+      && mixedStale.primary.hasSuffix("needs fresh data")
+      && mixedHealthy.primary.hasPrefix("All tracked plans are usable")
+      && freshWithoutForecast.primary.contains(previewSummaries[0].provider.displayName)
+      && freshWithoutForecast.primary.hasSuffix("has no pace forecast yet")
+      && freshWithoutForecast.secondary.isEmpty
     let forecastNow = Date(timeIntervalSinceReferenceDate: 800_000_000)
     let forecastReset = forecastNow.addingTimeInterval(4 * 86_400 + 2 * 3_600)
     let forecastWindow = UsageWindow(
@@ -286,6 +281,20 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             ],
             source: "self-test")))
         .allowances.first(where: \.isPrimary)?.id == "other-models"
+    let urgentWindowBecomesPrimary =
+      AllowanceBuilder.summary(
+        for: ProviderViewState(
+          provider: .openAI,
+          snapshot: UsageSnapshot(
+            provider: .openAI,
+            windows: [
+              UsageWindow(id: "five-hour", label: "5 hours", usedPercent: 94,
+                windowMinutes: 300, resetsAt: Date().addingTimeInterval(2 * 3_600)),
+              UsageWindow(id: "weekly", label: "Weekly", usedPercent: 35,
+                windowMinutes: 10_080, resetsAt: Date().addingTimeInterval(5 * 86_400)),
+            ],
+            source: "self-test")))
+        .primary?.id == "five-hour"
     let compactMoneyKeepsCurrency =
       DashboardFormat.money(14_200) == "$14.2K"
       && DashboardFormat.money(1_420_000) == "$1.42M"
@@ -776,13 +785,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       automaticSourceWorks,
       pinnedModelWorks, aggregateCopyWorks, deficitForecastUsesRenewalGap,
       exhaustionAndMissingForecastAreTruthful, clockAndDisclosureUpdatesWork,
-      primaryWindowIgnoresComponentShares, compactMoneyKeepsCurrency,
+      primaryWindowIgnoresComponentShares, urgentWindowBecomesPrimary, compactMoneyKeepsCurrency,
       localizedTimeUsesRegionalClock,
       semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork
     else {
       return (
         false,
-        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
       )
     }
     return (
