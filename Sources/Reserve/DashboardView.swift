@@ -65,6 +65,9 @@ final class DashboardViewController: NSViewController {
       parts.append(String(reflecting: summary.checkedAt))
       parts.append(String(reflecting: summary.availableResetCount))
       parts.append(String(reflecting: summary.billingRenewsAt))
+      parts.append(String(reflecting: summary.nextRenewal))
+      parts.append(summary.localHistoryEnabled ? "local-history" : "-")
+      parts.append(summary.historyPossible ? "history-possible" : "-")
       parts.append(summary.error ?? "-")
       parts.append(summary.needsConnection ? "connect" : "-")
       parts.append(summary.requiresKeychainAccess ? "keychain" : "-")
@@ -475,7 +478,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     }
     if isExpanded {
       rows.append(ReserveHairline(width: DashboardMetrics.cardContentWidth))
-      rows.append(UsageDetailGrid(summary: summary))
+      rows.append(UsageDetailGrid(summary: summary, now: now))
     }
 
     let stack = NSStackView.column(rows, spacing: DashboardMetrics.cardRowGap)
@@ -1127,7 +1130,7 @@ final class DetailDisclosureButton: NSButton {
 /// carries.
 @MainActor
 private final class UsageDetailGrid: NSView {
-  init(summary: ProviderSummary) {
+  init(summary: ProviderSummary, now: Date = Date()) {
     super.init(frame: .zero)
     self.identifier = NSUserInterfaceItemIdentifier("usage-detail-\(summary.provider.rawValue)")
     let usage = summary.localUsage
@@ -1148,29 +1151,6 @@ private final class UsageDetailGrid: NSView {
           // API-equivalent value is modeled from token counts either way, so it
           // carries the approximation mark.
           "≈ \(DashboardFormat.money(usage.apiEquivalentCostUSD))"))
-    }
-    if let cost = summary.subscriptionCostUSD {
-      rows.append(Self.cell(summary.subscriptionCostLabel ?? "Monthly cost", DashboardFormat.money(cost)))
-    }
-    if let renewal = summary.billingRenewsAt, renewal > Date() {
-      rows.append(Self.cell("Renews", DashboardFormat.moment(renewal, now: Date())))
-    }
-    if let count = summary.availableResetCount, count > 0 {
-      rows.append(Self.cell("Resets available", String(count)))
-    }
-    if let balance = summary.creditBalanceMinorUnits, balance > 0 {
-      rows.append(Self.cell("Extra usage balance", DashboardFormat.money(Double(balance) / 100)))
-    }
-    if let spend = summary.includedSpend {
-      let value: String =
-        switch spend.limitState {
-        case .disabled: "Off"
-        case .unlimited:
-          "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) used · unlimited"
-        case .capped:
-          "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) of \(DashboardFormat.money(Double(spend.limitMinorUnits) / 100)) · \(DashboardFormat.money(Double(spend.remainingMinorUnits ?? 0) / 100)) left"
-        }
-      rows.append(Self.cell(spend.label, value))
     }
     if let models = usage?.modelCosts.prefix(3), !models.isEmpty {
       let text = models.map {
@@ -1193,6 +1173,78 @@ private final class UsageDetailGrid: NSView {
       caption.toolTip = ReserveSparkline.scaleExplanation
       rows.append(contentsOf: [chart, caption])
     }
+    if let cost = summary.subscriptionCostUSD {
+      rows.append(Self.cell(summary.subscriptionCostLabel ?? "Monthly cost", DashboardFormat.money(cost)))
+    }
+    if let renewal = summary.billingRenewsAt, renewal > now {
+      rows.append(Self.cell("Renews", DashboardFormat.moment(renewal, now: now)))
+    }
+    if let count = summary.availableResetCount, count > 0 {
+      rows.append(Self.cell("Resets available", String(count)))
+    }
+    if let balance = summary.creditBalanceMinorUnits, balance > 0 {
+      rows.append(Self.cell("Extra usage balance", DashboardFormat.money(Double(balance) / 100)))
+    }
+    if let spend = summary.includedSpend {
+      let value: String =
+        switch spend.limitState {
+        case .disabled: "Off"
+        case .unlimited:
+          "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) used · unlimited"
+        case .capped:
+          "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) of \(DashboardFormat.money(Double(spend.limitMinorUnits) / 100)) · \(DashboardFormat.money(Double(spend.remainingMinorUnits ?? 0) / 100)) left"
+        }
+      rows.append(Self.cell(spend.label, value))
+    }
+    // A renewal the provider does not report but the person entered a billing
+    // day for is still worth showing, and is named for where it came from.
+    if summary.billingRenewsAt == nil, let renewal = summary.nextRenewal, renewal > now {
+      rows.append(
+        Self.cell(
+          "Plan renews", DashboardFormat.moment(renewal, now: now),
+          identifier: "usage-renews-\(summary.provider.rawValue)"))
+    }
+    if let source = summary.quotaSource?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !source.isEmpty
+    {
+      let activity: String
+      if let origin = usage?.origin {
+        activity = origin == .providerAccount ? " · account activity" : " · activity from this Mac"
+      } else {
+        activity = ""
+      }
+      rows.append(
+        Self.cell(
+          "Source", source + activity,
+          identifier: "usage-source-\(summary.provider.rawValue)"))
+    }
+    if let checked = summary.checkedAt ?? summary.lastUpdated {
+      rows.append(
+        Self.cell(
+          "Last checked", Self.age(checked, now: now),
+          identifier: "usage-checked-\(summary.provider.rawValue)",
+          alternateValues: ["just now", "59 min ago", "999h ago"],
+          clockText: { date in Self.age(checked, now: date) }))
+    }
+    // The detail view says what it is waiting for rather than showing nothing.
+    // Copilot has neither local logs nor account history, so it says nothing.
+    if usage == nil, summary.historyPossible {
+      let message: String
+      if !summary.localHistorySupported {
+        message = "Gathering account activity…"
+      } else if summary.localHistoryEnabled {
+        message = "Gathering activity from this Mac…"
+      } else {
+        message = "Activity from this Mac is off · turn it on in Settings"
+      }
+      let note = ReserveLabel(
+        message, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+      ).flexible()
+      note.identifier = NSUserInterfaceItemIdentifier(
+        "usage-history-note-\(summary.provider.rawValue)")
+      note.toolTip = message
+      rows.append(note)
+    }
     let stack = NSStackView.column(rows, spacing: 8)
     stack.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(stack)
@@ -1207,15 +1259,40 @@ private final class UsageDetailGrid: NSView {
 
   required init?(coder: NSCoder) { nil }
 
-  private static func cell(_ label: String, _ value: String) -> NSView {
+  /// "just now", "12 min ago", "3h ago" — the freshness phrase without the
+  /// sentence the banner wraps it in.
+  private static func age(_ date: Date, now: Date) -> String {
+    DashboardFormat.updated(date, now: now).replacingOccurrences(of: "Updated ", with: "")
+  }
+
+  private static func cell(
+    _ label: String, _ value: String, identifier: String? = nil,
+    alternateValues: [String] = [], clockText: ((Date) -> String)? = nil
+  ) -> NSView {
     let caption = ReserveLabel(
       label, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
     ).fitted()
-    let value = ReserveLabel(
+    let valueLabel = ReserveLabel(
       value, font: ReserveFont.digits(ReserveType.metadata, .semibold), color: ReserveColor.text
-    ).fitted()
-    let row = NSStackView.row([caption, NSStackView.spacer(), value], spacing: 7)
+    )
+    // A single-line field reports no intrinsic width, so every value here is
+    // pinned to a measured one. A value the clock rewrites is measured against
+    // the widest wording it can take, not the one it happened to draw first.
+    if alternateValues.isEmpty {
+      valueLabel.fitted()
+    } else {
+      var widest = ceil(valueLabel.attributedStringValue.size().width)
+      for candidate in alternateValues {
+        valueLabel.stringValue = candidate
+        widest = max(widest, ceil(valueLabel.attributedStringValue.size().width))
+      }
+      valueLabel.stringValue = value
+      valueLabel.width(widest + 2)
+    }
+    valueLabel.clockText = clockText
+    let row = NSStackView.row([caption, NSStackView.spacer(), valueLabel], spacing: 7)
     row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+    if let identifier { row.identifier = NSUserInterfaceItemIdentifier(identifier) }
     return row
   }
 }

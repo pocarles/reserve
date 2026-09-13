@@ -104,6 +104,15 @@ struct ProviderSummary {
   var availableResetCount: Int? = nil
   var billingRenewsAt: Date? = nil
   var subscriptionCostLabel: String? = nil
+  /// The renewal Reserve works out from the billing day the person entered, used
+  /// when the provider does not report one.
+  var nextRenewal: Date? = nil
+  var localHistoryEnabled = false
+  /// Whether this provider can ever have activity history at all: local logs,
+  /// account history, or both.
+  var historyPossible = false
+  /// Whether this provider's history comes from logs on this Mac.
+  var localHistorySupported = false
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
   var secondary: [Allowance] { self.allowances.filter { !$0.isPrimary } }
@@ -222,6 +231,7 @@ enum AllowanceBuilder {
       lastUpdated: state.snapshot?.fetchedAt, now: now)
 
     let connectionToolAvailable = Self.connectionToolAvailable(for: state.provider)
+    let capabilities = ProviderDescriptor.forProvider(state.provider).capabilities
     let setupAction = Self.setupAction(
       for: state, connectionToolAvailable: connectionToolAvailable)
     return ProviderSummary(
@@ -250,7 +260,13 @@ enum AllowanceBuilder {
       observationTimeKnown: state.snapshot?.observationTimeKnown ?? true,
       checkedAt: state.snapshot?.checkedAt,
       availableResetCount: state.snapshot?.availableResetCount,
-      billingRenewsAt: state.snapshot?.billingRenewsAt, subscriptionCostLabel: state.subscriptionCostLabel)
+      billingRenewsAt: state.snapshot?.billingRenewsAt,
+      subscriptionCostLabel: state.subscriptionCostLabel,
+      nextRenewal: state.nextRenewal,
+      localHistoryEnabled: state.localHistoryEnabled,
+      historyPossible: capabilities.contains(.localHistory)
+        || capabilities.contains(.accountHistory),
+      localHistorySupported: capabilities.contains(.localHistory))
   }
 
   private static func connectionToolAvailable(for provider: ProviderID) -> Bool {

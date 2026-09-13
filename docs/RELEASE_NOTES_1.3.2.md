@@ -11,6 +11,10 @@ This release keeps Claude and Grok connected between sign-ins.
   provider's helper ends with an error. Reserve checks your usage before it
   says the sign-in did not finish.
 - Claude's sign-in no longer reports a stray "Invalid code" while connecting.
+- Expanding a provider card now shows everything Reserve knows about it —
+  activity from this Mac, the data source, and when it was last checked — and
+  asks for that provider's history as the card opens, instead of only showing it
+  once Insights has been opened.
 - The headline names the plan that runs out soonest, not the one furthest off
   pace, and says how many others are at risk. It no longer leads with "no pace
   forecast yet" while every other plan is fine.

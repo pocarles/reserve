@@ -131,6 +131,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   /// the real toggle rather than writing the store directly.
   func toggleProviderDetailForTesting(_ provider: ProviderID) {
     self.store.expandedProvider = self.store.expandedProvider == provider ? nil : provider
+    if self.store.expandedProvider == provider { self.store.requestInsights(for: provider) }
     self.expandDashboard()
   }
 
@@ -658,6 +659,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       // The history chart lives with the activity numbers.
       && expandedIDs.contains("usage-chart-anthropic")
       && expandedLabels.contains { $0.contains("compressed scale") }
+      // Where the numbers came from and when they were last checked.
+      && expandedIDs.contains("usage-source-anthropic")
+      && expandedIDs.contains("usage-checked-anthropic")
+      && expandedLabels.contains("Source")
+      && expandedLabels.contains("Last checked")
+      && expandedLabels.contains { $0.hasPrefix("Claude OAuth · activity from this Mac") }
       // The internal provenance block is intentionally absent from every provider.
       && !expandedIDs.contains { $0.hasPrefix("sources-") }
       // Only one row opens at a time.
@@ -769,6 +776,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       settingsWindow.map { !self.shouldDismissDashboard(forClickedWindow: $0) } == true
       && self.shouldDismissDashboard(forClickedWindow: unrelatedWindow)
     let clockAndDisclosureUpdatesWork = Self.dashboardClockAndDisclosureChecks()
+    let expandRequestsDetails = self.expandingAProviderRequestsItsDetails()
+    let historyPlaceholdersAreHonest = Self.historyPlaceholderChecks()
     guard providerCards == ProviderID.allCases.count, actionsPresent, quitRemainsReachable,
       logosPresent, bundledProviderArtworkPresent, scrollingMatchesAvailableSpace, contentFits,
       dashboardFits, fifthProviderReachable, headlinePresent,
@@ -788,11 +797,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       exhaustionAndMissingForecastAreTruthful, clockAndDisclosureUpdatesWork,
       primaryWindowIgnoresComponentShares, urgentWindowBecomesPrimary, compactMoneyKeepsCurrency,
       localizedTimeUsesRegionalClock,
-      semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork
+      semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork,
+      expandRequestsDetails, historyPlaceholdersAreHonest
     else {
       return (
         false,
-        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork), expandRequestsDetails=\(expandRequestsDetails), historyPlaceholders=\(historyPlaceholdersAreHonest)"
       )
     }
     return (
@@ -1227,12 +1237,100 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           guard let self else { return }
           // One row at a time, so cross-provider comparison survives.
           self.store.expandedProvider = self.store.expandedProvider == provider ? nil : provider
+          // Opening a card is the request for everything Reserve knows about
+          // that provider; it no longer waits for someone to visit Insights.
+          if self.store.expandedProvider == provider {
+            self.store.requestInsights(for: provider)
+          }
           self.expandDashboard()
         },
         quit: { NSApplication.shared.terminate(nil) }))
     self.dashboardController = controller
     self.popover.contentViewController = controller
     return controller
+  }
+
+  /// Expanding a provider card must ask the store for that provider's detail
+  /// data. The store records the request; its own guards keep an automated run
+  /// from starting a scan or a provider subprocess.
+  private func expandingAProviderRequestsItsDetails() -> Bool {
+    #if RESERVE_DEV_AUTOMATION
+    let original = self.store.expandedProvider
+    defer {
+      self.store.expandedProvider = original
+      self.dashboardControllerForUse().update()
+    }
+    self.store.expandedProvider = nil
+    let provider = ProviderID.openAI
+    let other = ProviderID.cursor
+    let before = self.store.insightsRequestCount(for: provider)
+    let otherBefore = self.store.insightsRequestCount(for: other)
+    self.toggleProviderDetailForTesting(provider)
+    let expandedProvider = self.store.expandedProvider
+    let afterExpand = self.store.insightsRequestCount(for: provider)
+    self.toggleProviderDetailForTesting(provider)
+    return expandedProvider == provider
+      && self.store.expandedProvider == nil
+      && afterExpand == before + 1
+      // Closing a card asks for nothing.
+      && self.store.insightsRequestCount(for: provider) == afterExpand
+      && self.store.insightsRequestCount(for: other) == otherBefore
+      // Activity from this Mac is not scanned during an automated run.
+      && !self.store.isScanningLocalUsage
+      // Only providers whose adapter reports account history are asked for it.
+      && ProviderDescriptor.forProvider(.openAI).capabilities.contains(.accountHistory)
+      && ProviderDescriptor.forProvider(.cursor).capabilities.contains(.accountHistory)
+      && !ProviderDescriptor.forProvider(.anthropic).capabilities.contains(.accountHistory)
+      && !ProviderDescriptor.forProvider(.grok).capabilities.contains(.accountHistory)
+      && !ProviderDescriptor.forProvider(.copilot).capabilities.contains(.accountHistory)
+    #else
+    return true
+    #endif
+  }
+
+  /// An expanded card with no activity yet says what it is waiting for, and a
+  /// provider that can never have activity says nothing at all.
+  private static func historyPlaceholderChecks() -> Bool {
+    let now = Date()
+    func state(_ provider: ProviderID, localHistoryEnabled: Bool) -> ProviderViewState {
+      var value = ProviderViewState(provider: provider)
+      value.snapshot = UsageSnapshot(
+        provider: provider,
+        windows: [
+          UsageWindow(
+            id: "weekly", label: "Weekly", usedPercent: 30, windowMinutes: 10_080,
+            resetsAt: now.addingTimeInterval(3 * 86_400))
+        ],
+        fetchedAt: now, source: "history fixture")
+      value.localHistoryEnabled = localHistoryEnabled
+      return value
+    }
+    func labels(_ state: ProviderViewState) -> (texts: [String], identifiers: Set<String>) {
+      let card = ProviderDashboardCard(
+        summary: AllowanceBuilder.summary(for: state, now: now), now: now,
+        isSelectedForMenuBar: false, isExpanded: true, connectProvider: { _ in },
+        selectMenuBarProvider: { _ in })
+      card.layoutSubtreeIfNeeded()
+      let views = Self.descendants(of: card)
+      return (
+        views.compactMap { ($0 as? NSTextField)?.stringValue },
+        Set(views.compactMap { $0.identifier?.rawValue }))
+    }
+    let waiting = labels(state(.openAI, localHistoryEnabled: true))
+    let off = labels(state(.openAI, localHistoryEnabled: false))
+    let account = labels(state(.cursor, localHistoryEnabled: false))
+    let never = labels(state(.copilot, localHistoryEnabled: true))
+    return waiting.identifiers.contains("usage-history-note-openAI")
+      && waiting.texts.contains("Gathering activity from this Mac…")
+      && off.texts.contains("Activity from this Mac is off · turn it on in Settings")
+      // Cursor's history is its account's, so the local switch does not describe it.
+      && account.texts.contains("Gathering account activity…")
+      // Copilot reports neither local nor account history.
+      && !never.identifiers.contains { $0.hasPrefix("usage-history-note-") }
+      // Source and freshness travel with every expanded card.
+      && waiting.identifiers.contains("usage-source-openAI")
+      && waiting.identifiers.contains("usage-checked-openAI")
+      && waiting.texts.contains("history fixture")
   }
 
   private static func dashboardClockAndDisclosureChecks() -> Bool {
@@ -1272,6 +1370,20 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       (stale.accessibilityValue() as? String ?? "").contains("33 min ago"),
       (staleMeter.accessibilityValue() as? String ?? "").contains("percent last known"),
       staleMeter.paceRemainingPercentForTesting == nil else { return false }
+
+    // The expanded detail's "Last checked" line follows the same minute clock.
+    let detail = card(summary(fetchedAt: now.addingTimeInterval(-5 * 60)), expanded: true)
+    let detailViews = Self.descendants(of: detail)
+    guard let checkedRow = detailViews.first(where: {
+      $0.identifier?.rawValue == "usage-checked-openAI"
+    }),
+      let checkedLabel = Self.descendants(of: checkedRow).compactMap({ $0 as? ReserveLabel })
+        .first(where: { $0.clockText != nil }),
+      checkedLabel.stringValue == "5 min ago"
+    else { return false }
+    tick(detail, later)
+    let detailFreshnessFollowsClock = checkedLabel.stringValue == "7 min ago"
+      && detailViews.contains { $0.identifier?.rawValue == "usage-source-openAI" }
 
     let fresh = card(summary(fetchedAt: now))
     let freshViews = Self.descendants(of: fresh)
@@ -1363,7 +1475,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && (markedMeter.accessibilityValue() as? String ?? "").contains("even pace (58%)")
       && unmarkedMeter.toolTip == nil
       && unmarkedMeter.accessibilityValue() as? String == "40 percent left"
-    return relativeResetsRead && markerIsExplained && Self.headlineChoiceChecks()
+    return relativeResetsRead && markerIsExplained && detailFreshnessFollowsClock
+      && Self.headlineChoiceChecks()
       && !collapsed.contains { $0.identifier?.rawValue == "secondary-build-share" }
       && expanded.contains { $0.identifier?.rawValue == "secondary-build-share" }
       && expandedLabels.contains("90% of pool used")
