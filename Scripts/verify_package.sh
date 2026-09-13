@@ -56,7 +56,9 @@ expect_equal() {
 }
 
 plutil -lint "$plist" "$privacy"
-otool -L "$binary" | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle'
+# `grep -q` exits on the first match, so otool can still be writing and take a
+# SIGPIPE, which pipefail reports as a failure. Read the whole listing instead.
+otool -L "$binary" | grep -F '@rpath/Sparkle.framework/Versions/B/Sparkle' >/dev/null
 expect_equal CFBundleExecutable \
   "$(plutil -extract CFBundleExecutable raw "$plist")" Reserve
 expect_equal CFBundleIdentifier \
