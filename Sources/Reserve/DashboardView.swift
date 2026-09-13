@@ -1204,20 +1204,9 @@ private final class UsageDetailGrid: NSView {
           "Plan renews", DashboardFormat.moment(renewal, now: now),
           identifier: "usage-renews-\(summary.provider.rawValue)"))
     }
-    if let source = summary.quotaSource?.trimmingCharacters(in: .whitespacesAndNewlines),
-      !source.isEmpty
-    {
-      let activity: String
-      if let origin = usage?.origin {
-        activity = origin == .providerAccount ? " · account activity" : " · activity from this Mac"
-      } else {
-        activity = ""
-      }
-      rows.append(
-        Self.cell(
-          "Source", source + activity,
-          identifier: "usage-source-\(summary.provider.rawValue)"))
-    }
+    // The data source is deliberately not listed here: it names transports
+    // ("Codex app-server", "Claude OAuth") that mean nothing to most people.
+    // Settings > Providers still shows it for anyone who wants it.
     if let checked = summary.checkedAt ?? summary.lastUpdated {
       rows.append(
         Self.cell(
