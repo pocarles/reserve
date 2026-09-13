@@ -31,7 +31,8 @@ app=$1
 plist="$app/Contents/Info.plist"
 binary="$app/Contents/MacOS/Reserve"
 privacy="$app/Contents/Resources/PrivacyInfo.xcprivacy"
-provider_logos="$app/Contents/Resources/Reserve_Reserve.bundle/ProviderLogos"
+resource_bundle="$app/Contents/Resources/Reserve_Reserve.bundle"
+provider_logos="$resource_bundle/ProviderLogos"
 sparkle="$app/Contents/Frameworks/Sparkle.framework"
 [[ -f "$plist" && -x "$binary" && -f "$privacy" \
   && -d "$sparkle" && -x "$sparkle/Versions/B/Autoupdate" \
@@ -40,7 +41,8 @@ sparkle="$app/Contents/Frameworks/Sparkle.framework"
   && -f "$provider_logos/openAI.svg" \
   && -f "$provider_logos/anthropic.svg" \
   && -f "$provider_logos/grok.svg" \
-  && -f "$provider_logos/cursor.svg" ]] || {
+  && -f "$provider_logos/cursor.svg" \
+  && -x "$resource_bundle/ClaudeLoginBrowser.sh" ]] || {
   echo "error: package is missing required app files" >&2
   exit 65
 }

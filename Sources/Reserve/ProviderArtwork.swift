@@ -25,9 +25,8 @@ enum ProviderArtwork {
   }
 
   private static func bundledImage(for provider: ProviderID) -> NSImage? {
-    let bundle = self.packagedResourceBundle ?? Bundle.module
     guard
-      let url = bundle.url(
+      let url = Bundle.reserveResources.url(
         forResource: provider.rawValue,
         withExtension: "svg",
         subdirectory: "ProviderLogos"),
@@ -37,14 +36,6 @@ enum ProviderArtwork {
     // surrounding label colour without changing their first-party geometry.
     image.isTemplate = provider != .anthropic
     return image
-  }
-
-  private static var packagedResourceBundle: Bundle? {
-    guard
-      Bundle.main.bundleURL.pathExtension == "app",
-      let url = Bundle.main.url(forResource: "Reserve_Reserve", withExtension: "bundle")
-    else { return nil }
-    return Bundle(url: url)
   }
 
   private static func fallbackImage(for provider: ProviderID) -> NSImage {

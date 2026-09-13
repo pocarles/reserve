@@ -64,6 +64,7 @@ enum ConnectionFlowSelfTest {
     let responses = ConnectionTestResponses()
     var openedBrowserCount = 0
     var lastOpenedBrowserURL: URL?
+    var browserOpens = true
     let store = UsageStore(
       defaults: defaults, startAutomatically: false, cache: cache,
       fetchOverride: { provider, allowAccess in
@@ -72,7 +73,7 @@ enum ConnectionFlowSelfTest {
       loginCommandOverride: { _ in
         ("/bin/sh", [directory.appendingPathComponent("login.sh").path])
       },
-      openLoginURL: { url in openedBrowserCount += 1; lastOpenedBrowserURL = url; return true })
+      openLoginURL: { url in openedBrowserCount += 1; lastOpenedBrowserURL = url; return browserOpens })
     let coordinator = ProviderSetupCoordinator(store: store)
     defer { coordinator.close() }
 
@@ -113,11 +114,10 @@ enum ConnectionFlowSelfTest {
     expect(coordinator.phase == .needsAccess, "permission was presented as expired login")
     click("connection-primary", in: accessWindow)
     await settle { coordinator.phase == .connected }
-    expect(coordinator.phase == .connected && coordinator.panel === accessWindow,
-      "permission did not finish in the same window after reading usage")
+    expect(coordinator.phase == .connected && coordinator.activeProvider == nil
+      && accessWindow?.isVisible != true,
+      "a verified connection kept a window open instead of finishing quietly")
     expect(openedBrowserCount == 0, "existing sign-in unnecessarily opened a browser")
-    click("connection-primary", in: coordinator.panel)
-    expect(coordinator.activeProvider == nil, "Done did not dismiss the verified connection")
 
     // Grant access while an older background check is still returning a
     // consent error. That older result must not revoke the new permission.
@@ -137,6 +137,9 @@ enum ConnectionFlowSelfTest {
     await settle { coordinator.phase == .accessNotGranted }
     expect(coordinator.phase == .accessNotGranted, "denied permission silently repeated the first permission screen")
     expect(store.claudeKeychainReadAllowed, "a temporary macOS denial erased saved consent")
+    coordinator.panel?.markAsSimulation()
+    do { try coordinator.panel?.render(to: evidence.appendingPathComponent("claude-simulation-sign-in-again.png")) }
+    catch { failures.append("Claude simulation evidence could not be saved") }
     let recoveryScript = """
       #!/bin/sh
       echo 'https://claude.ai/oauth/authorize?redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
@@ -151,6 +154,8 @@ enum ConnectionFlowSelfTest {
     await settle { store.canReopenLoginBrowser(.anthropic) }
     expect(store.canReopenLoginBrowser(.anthropic) && coordinator.phase == .signingIn,
       "failed permission retried the inaccessible item instead of opening fresh sign-in")
+    expect(coordinator.panel?.isVisible != true,
+      "the permission window stayed open while the browser sign-in was in progress")
     expect(lastOpenedBrowserURL?.query?.contains("localhost") == true,
       "Claude simulation opened the manual-code fallback instead of the browser callback")
     expect(openedBrowserCount == 1, "Claude simulation opened duplicate browser links")
@@ -158,9 +163,6 @@ enum ConnectionFlowSelfTest {
     expect(coordinator.phase == .connected, "fresh sign-in did not verify usage after failed permission")
     expect(store.states[.anthropic]?.snapshot?.windows.first?.usedPercent == 20,
       "Claude simulation did not return its expected usage data")
-    coordinator.panel?.markAsSimulation()
-    do { try coordinator.panel?.render(to: evidence.appendingPathComponent("claude-simulation-connected.png")) }
-    catch { failures.append("Claude simulation evidence could not be saved") }
     coordinator.close()
     openedBrowserCount = 0
 
@@ -208,17 +210,27 @@ enum ConnectionFlowSelfTest {
     await settle { store.canReopenLoginBrowser(.openAI) }
     expect(store.canReopenLoginBrowser(.openAI), "browser link was not retained during login")
     expect(coordinator.phase == .signingIn, "opening the browser falsely completed connection")
-    click("connection-primary", in: coordinator.panel)
-    expect(openedBrowserCount == 2, "Open browser again did not reuse the login URL")
+    expect(coordinator.panel?.isVisible != true,
+      "an opened browser sign-in showed a window that only asked to wait")
+    coordinator.start(.openAI)
+    expect(openedBrowserCount == 2, "Connect during a pending sign-in did not reopen the login page")
+    expect(coordinator.panel?.isVisible != true, "reopening the login page showed a window")
     await responses.set(.success)
     await settle { coordinator.phase == .connected }
     expect(coordinator.phase == .connected, "successful login did not wait for fresh usage")
+    expect(coordinator.activeProvider == nil, "a finished sign-in kept its connection window")
     expect(!store.canReopenLoginBrowser(.openAI), "completed login retained its browser URL")
     coordinator.close()
 
+    // A browser that cannot open is the one sign-in problem that needs a
+    // window, and that window is where Cancel lives.
+    browserOpens = false
     await responses.set(.signedOut)
     coordinator.start(.openAI)
-    await settle { store.canReopenLoginBrowser(.openAI) }
+    await settle { store.loginBrowserFailedToOpen(.openAI) }
+    expect(coordinator.phase == .signingIn && coordinator.panel?.isVisible == true,
+      "a browser that failed to open was not reported in a window")
+    browserOpens = true
     let callsBeforeCancellation = await responses.calls
     click("connection-close", in: coordinator.panel)
     await responses.set(.success)
@@ -327,7 +339,7 @@ enum ConnectionFlowSelfTest {
     for (name, phase) in [
       ("setup", ProviderSetupCoordinator.Phase.needsInstall),
       ("browser", .signingIn), ("permission", .needsAccess),
-      ("connected", .connected), ("unavailable", .unavailable), ("access-denied", .accessDenied),
+      ("unavailable", .unavailable), ("access-denied", .accessDenied),
     ] {
       preview.update(phase: phase, canReopenBrowser: true)
       preview.markAsSimulation()
@@ -348,8 +360,7 @@ enum ConnectionFlowSelfTest {
     defer { manualPreview.close() }
     for (name, phase) in [
       ("copilot-install", ProviderSetupCoordinator.Phase.needsInstall),
-      ("copilot-manual-setup", .waitingForManualSetup), ("copilot-connected", .connected),
-      ("copilot-unavailable", .unavailable),
+      ("copilot-manual-setup", .waitingForManualSetup), ("copilot-unavailable", .unavailable),
     ] {
       manualPreview.update(phase: phase)
       manualPreview.show()
