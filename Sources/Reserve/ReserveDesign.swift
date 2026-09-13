@@ -339,7 +339,33 @@ final class ReserveMeter: NSView, ReserveClockUpdating {
   }
 
   private func updateSpokenValue() {
-    self.setAccessibilityValue("\(Int(self.remainingPercent.rounded())) percent \(self.isStale ? "last known" : "left")")
+    let capacity =
+      "\(Int(self.remainingPercent.rounded())) percent \(self.isStale ? "last known" : "left")"
+    guard let explanation = self.markerExplanation else {
+      self.setAccessibilityValue(capacity)
+      self.toolTip = nil
+      return
+    }
+    self.setAccessibilityValue("\(capacity). \(explanation)")
+    self.toolTip = explanation
+  }
+
+  /// Where the marker is drawn, or nil when there is none. The drawing and the
+  /// explanation read the same value, so a described marker is always a visible
+  /// one.
+  private var markerPercent: Double? {
+    guard let paceRemainingPercent = self.paceRemainingPercent,
+      paceRemainingPercent > 1, paceRemainingPercent < 99
+    else { return nil }
+    return paceRemainingPercent
+  }
+
+  /// The marker is the only element on the card whose meaning is not written
+  /// beside it, so it says what it is.
+  private var markerExplanation: String? {
+    self.markerPercent.map {
+      "Marker: capacity that should remain now at an even pace (\(Int($0.rounded()))%)"
+    }
   }
 
   required init?(coder: NSCoder) { nil }
@@ -361,10 +387,8 @@ final class ReserveMeter: NSView, ReserveClockUpdating {
       NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
     }
 
-    guard let paceRemainingPercent,
-      paceRemainingPercent > 1, paceRemainingPercent < 99
-    else { return }
-    let x = (self.bounds.width * paceRemainingPercent / 100).rounded()
+    guard let markerPercent = self.markerPercent else { return }
+    let x = (self.bounds.width * markerPercent / 100).rounded()
     // Punch a gap around the marker so it stays visible on top of the fill.
     ReserveColor.background.setFill()
     NSRect(x: x - 1.5, y: self.bounds.minY - 1, width: 3, height: self.bounds.height + 2).fill()

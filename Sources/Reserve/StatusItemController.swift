@@ -131,6 +131,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   /// the real toggle rather than writing the store directly.
   func toggleProviderDetailForTesting(_ provider: ProviderID) {
     self.store.expandedProvider = self.store.expandedProvider == provider ? nil : provider
+    if self.store.expandedProvider == provider { self.store.requestInsights(for: provider) }
     self.expandDashboard()
   }
 
@@ -226,9 +227,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && staleSummary.secondary.isEmpty
       && oneHealthyStale.primary.hasSuffix("needs fresh data")
       && mixedStale.primary.hasSuffix("needs fresh data")
-      && mixedHealthy.primary.hasPrefix("All tracked plans are usable")
-      && freshWithoutForecast.primary.contains(previewSummaries[0].provider.displayName)
-      && freshWithoutForecast.primary.hasSuffix("has no pace forecast yet")
+      && mixedHealthy.primary.hasPrefix("All plans on track")
+      // A plan without a forecast never takes the headline from plans that are fine.
+      && freshWithoutForecast.primary.hasPrefix("No plan at risk")
+      && !freshWithoutForecast.primary.contains("No pace forecast")
       && freshWithoutForecast.secondary.isEmpty
     let forecastNow = Date(timeIntervalSinceReferenceDate: 800_000_000)
     let forecastReset = forecastNow.addingTimeInterval(4 * 86_400 + 2 * 3_600)
@@ -657,6 +659,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       // The history chart lives with the activity numbers.
       && expandedIDs.contains("usage-chart-anthropic")
       && expandedLabels.contains { $0.contains("compressed scale") }
+      // Where the numbers came from and when they were last checked.
+      && expandedIDs.contains("usage-source-anthropic")
+      && expandedIDs.contains("usage-checked-anthropic")
+      && expandedLabels.contains("Source")
+      && expandedLabels.contains("Last checked")
+      && expandedLabels.contains { $0.hasPrefix("Claude OAuth · activity from this Mac") }
       // The internal provenance block is intentionally absent from every provider.
       && !expandedIDs.contains { $0.hasPrefix("sources-") }
       // Only one row opens at a time.
@@ -768,6 +776,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       settingsWindow.map { !self.shouldDismissDashboard(forClickedWindow: $0) } == true
       && self.shouldDismissDashboard(forClickedWindow: unrelatedWindow)
     let clockAndDisclosureUpdatesWork = Self.dashboardClockAndDisclosureChecks()
+    let expandRequestsDetails = self.expandingAProviderRequestsItsDetails()
+    let historyPlaceholdersAreHonest = Self.historyPlaceholderChecks()
     guard providerCards == ProviderID.allCases.count, actionsPresent, quitRemainsReachable,
       logosPresent, bundledProviderArtworkPresent, scrollingMatchesAvailableSpace, contentFits,
       dashboardFits, fifthProviderReachable, headlinePresent,
@@ -787,11 +797,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       exhaustionAndMissingForecastAreTruthful, clockAndDisclosureUpdatesWork,
       primaryWindowIgnoresComponentShares, urgentWindowBecomesPrimary, compactMoneyKeepsCurrency,
       localizedTimeUsesRegionalClock,
-      semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork
+      semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork,
+      expandRequestsDetails, historyPlaceholdersAreHonest
     else {
       return (
         false,
-        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork)"
+        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork), expandRequestsDetails=\(expandRequestsDetails), historyPlaceholders=\(historyPlaceholdersAreHonest)"
       )
     }
     return (
@@ -1226,12 +1237,100 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           guard let self else { return }
           // One row at a time, so cross-provider comparison survives.
           self.store.expandedProvider = self.store.expandedProvider == provider ? nil : provider
+          // Opening a card is the request for everything Reserve knows about
+          // that provider; it no longer waits for someone to visit Insights.
+          if self.store.expandedProvider == provider {
+            self.store.requestInsights(for: provider)
+          }
           self.expandDashboard()
         },
         quit: { NSApplication.shared.terminate(nil) }))
     self.dashboardController = controller
     self.popover.contentViewController = controller
     return controller
+  }
+
+  /// Expanding a provider card must ask the store for that provider's detail
+  /// data. The store records the request; its own guards keep an automated run
+  /// from starting a scan or a provider subprocess.
+  private func expandingAProviderRequestsItsDetails() -> Bool {
+    #if RESERVE_DEV_AUTOMATION
+    let original = self.store.expandedProvider
+    defer {
+      self.store.expandedProvider = original
+      self.dashboardControllerForUse().update()
+    }
+    self.store.expandedProvider = nil
+    let provider = ProviderID.openAI
+    let other = ProviderID.cursor
+    let before = self.store.insightsRequestCount(for: provider)
+    let otherBefore = self.store.insightsRequestCount(for: other)
+    self.toggleProviderDetailForTesting(provider)
+    let expandedProvider = self.store.expandedProvider
+    let afterExpand = self.store.insightsRequestCount(for: provider)
+    self.toggleProviderDetailForTesting(provider)
+    return expandedProvider == provider
+      && self.store.expandedProvider == nil
+      && afterExpand == before + 1
+      // Closing a card asks for nothing.
+      && self.store.insightsRequestCount(for: provider) == afterExpand
+      && self.store.insightsRequestCount(for: other) == otherBefore
+      // Activity from this Mac is not scanned during an automated run.
+      && !self.store.isScanningLocalUsage
+      // Only providers whose adapter reports account history are asked for it.
+      && ProviderDescriptor.forProvider(.openAI).capabilities.contains(.accountHistory)
+      && ProviderDescriptor.forProvider(.cursor).capabilities.contains(.accountHistory)
+      && !ProviderDescriptor.forProvider(.anthropic).capabilities.contains(.accountHistory)
+      && !ProviderDescriptor.forProvider(.grok).capabilities.contains(.accountHistory)
+      && !ProviderDescriptor.forProvider(.copilot).capabilities.contains(.accountHistory)
+    #else
+    return true
+    #endif
+  }
+
+  /// An expanded card with no activity yet says what it is waiting for, and a
+  /// provider that can never have activity says nothing at all.
+  private static func historyPlaceholderChecks() -> Bool {
+    let now = Date()
+    func state(_ provider: ProviderID, localHistoryEnabled: Bool) -> ProviderViewState {
+      var value = ProviderViewState(provider: provider)
+      value.snapshot = UsageSnapshot(
+        provider: provider,
+        windows: [
+          UsageWindow(
+            id: "weekly", label: "Weekly", usedPercent: 30, windowMinutes: 10_080,
+            resetsAt: now.addingTimeInterval(3 * 86_400))
+        ],
+        fetchedAt: now, source: "history fixture")
+      value.localHistoryEnabled = localHistoryEnabled
+      return value
+    }
+    func labels(_ state: ProviderViewState) -> (texts: [String], identifiers: Set<String>) {
+      let card = ProviderDashboardCard(
+        summary: AllowanceBuilder.summary(for: state, now: now), now: now,
+        isSelectedForMenuBar: false, isExpanded: true, connectProvider: { _ in },
+        selectMenuBarProvider: { _ in })
+      card.layoutSubtreeIfNeeded()
+      let views = Self.descendants(of: card)
+      return (
+        views.compactMap { ($0 as? NSTextField)?.stringValue },
+        Set(views.compactMap { $0.identifier?.rawValue }))
+    }
+    let waiting = labels(state(.openAI, localHistoryEnabled: true))
+    let off = labels(state(.openAI, localHistoryEnabled: false))
+    let account = labels(state(.cursor, localHistoryEnabled: false))
+    let never = labels(state(.copilot, localHistoryEnabled: true))
+    return waiting.identifiers.contains("usage-history-note-openAI")
+      && waiting.texts.contains("Gathering activity from this Mac…")
+      && off.texts.contains("Activity from this Mac is off · turn it on in Settings")
+      // Cursor's history is its account's, so the local switch does not describe it.
+      && account.texts.contains("Gathering account activity…")
+      // Copilot reports neither local nor account history.
+      && !never.identifiers.contains { $0.hasPrefix("usage-history-note-") }
+      // Source and freshness travel with every expanded card.
+      && waiting.identifiers.contains("usage-source-openAI")
+      && waiting.identifiers.contains("usage-checked-openAI")
+      && waiting.texts.contains("history fixture")
   }
 
   private static func dashboardClockAndDisclosureChecks() -> Bool {
@@ -1272,6 +1371,20 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       (staleMeter.accessibilityValue() as? String ?? "").contains("percent last known"),
       staleMeter.paceRemainingPercentForTesting == nil else { return false }
 
+    // The expanded detail's "Last checked" line follows the same minute clock.
+    let detail = card(summary(fetchedAt: now.addingTimeInterval(-5 * 60)), expanded: true)
+    let detailViews = Self.descendants(of: detail)
+    guard let checkedRow = detailViews.first(where: {
+      $0.identifier?.rawValue == "usage-checked-openAI"
+    }),
+      let checkedLabel = Self.descendants(of: checkedRow).compactMap({ $0 as? ReserveLabel })
+        .first(where: { $0.clockText != nil }),
+      checkedLabel.stringValue == "5 min ago"
+    else { return false }
+    tick(detail, later)
+    let detailFreshnessFollowsClock = checkedLabel.stringValue == "7 min ago"
+      && detailViews.contains { $0.identifier?.rawValue == "usage-source-openAI" }
+
     let fresh = card(summary(fetchedAt: now))
     let freshViews = Self.descendants(of: fresh)
     guard let meter = freshViews.compactMap({ $0 as? ReserveMeter }).first,
@@ -1284,7 +1397,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     tick(fresh, later)
     guard let afterMarker = meter.paceRemainingPercentForTesting,
       afterMarker < beforeMarker, reset.stringValue != beforeReset,
-      reset.stringValue.hasPrefix("resets at ") else { return false }
+      // The daily window crossed the twelve-hour line, so its reset is now a
+      // countdown rather than a clock time.
+      reset.stringValue.hasPrefix("resets in ") else { return false }
     tick(fresh, now.addingTimeInterval(31 * 60))
     guard meter.paceRemainingPercentForTesting == nil,
       (meter.accessibilityValue() as? String ?? "").contains("last known") else { return false }
@@ -1334,7 +1449,35 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       snapshot: UsageSnapshot(provider: .openAI, windows: [
         UsageWindow(id: "session", label: "5 hours", usedPercent: 5, windowMinutes: 300,
           resetsAt: now.addingTimeInterval(295 * 60))], source: "UI early fixture")), now: now)
-    return !collapsed.contains { $0.identifier?.rawValue == "secondary-build-share" }
+    // A reset within half a day reads as a countdown; beyond it, as a weekday or
+    // a date.
+    let soon = Allowance(id: "soon", title: "Weekly limit", usedPercent: 50,
+      resetsAt: now.addingTimeInterval(80 * 60), projection: nil, isPrimary: true,
+      paceState: .onPace)
+    let far = Allowance(id: "far", title: "Weekly limit", usedPercent: 50,
+      resetsAt: now.addingTimeInterval(2 * 86_400), projection: nil, isPrimary: true,
+      paceState: .onPace)
+    let relativeResetsRead =
+      DashboardFormat.limitLine(soon, now: now) == "Weekly limit · resets in 1h 20m"
+      && DashboardFormat.resetLine(soon, now: now) == "Resets in 1h 20m"
+      && DashboardFormat.secondaryDetail(soon, now: now) == "resets in 1h 20m"
+      && !DashboardFormat.limitLine(far, now: now).contains("resets in ")
+      && DashboardFormat.limitLine(far, now: now).hasPrefix("Weekly limit · resets ")
+    // The pace marker is the one element whose meaning is not written beside it.
+    let markedMeter = ReserveMeter(remainingPercent: 40, paceRemainingPercent: 58,
+      label: "Weekly limit", color: ReserveColor.onPace)
+    let unmarkedMeter = ReserveMeter(remainingPercent: 40, paceRemainingPercent: nil,
+      label: "Weekly limit", color: ReserveColor.onPace)
+    let markerIsExplained =
+      markedMeter.toolTip
+        == "Marker: capacity that should remain now at an even pace (58%)"
+      && (markedMeter.accessibilityValue() as? String ?? "").contains("40 percent left")
+      && (markedMeter.accessibilityValue() as? String ?? "").contains("even pace (58%)")
+      && unmarkedMeter.toolTip == nil
+      && unmarkedMeter.accessibilityValue() as? String == "40 percent left"
+    return relativeResetsRead && markerIsExplained && detailFreshnessFollowsClock
+      && Self.headlineChoiceChecks()
+      && !collapsed.contains { $0.identifier?.rawValue == "secondary-build-share" }
       && expanded.contains { $0.identifier?.rawValue == "secondary-build-share" }
       && expandedLabels.contains("90% of pool used")
       && !expandedLabels.contains("10% left")
@@ -1342,9 +1485,68 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && forecastLabels(card(noPeriodSummary)).isEmpty
       && forecastLabels(card(exhaustedSummary)).contains { $0.hasPrefix("Limit exhausted · resets") }
       && forecastLabels(card(earlySummary)) == ["Too early to forecast"]
-      && forecastLabels(stale) == ["Update needed for a forecast"]
+      // The freshness banner, the tinted surface and the "last known" label are
+      // the staleness signals; the forecast line is not a fourth one.
+      && forecastLabels(stale).isEmpty
       && ProviderSetupAction.install.toolTip(for: .copilot) == "Open official installation instructions for Copilot"
       && ProviderSetupAction.update.toolTip(for: .copilot) == "Open official update instructions for Copilot"
+  }
+
+  /// The headline chooser, checked against the two cases that used to mislead:
+  /// the loudest deficit outranking the soonest run-out, and a plan without a
+  /// forecast outranking plans that are fine.
+  private static func headlineChoiceChecks() -> Bool {
+    let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    func plan(
+      _ provider: ProviderID, usedPercent: Double, resetsInDays: Double,
+      windowMinutes: Int? = 10_080
+    ) -> ProviderSummary {
+      AllowanceBuilder.summary(
+        for: ProviderViewState(
+          provider: provider,
+          snapshot: UsageSnapshot(
+            provider: provider,
+            windows: [
+              UsageWindow(
+                id: "weekly", label: "Weekly", usedPercent: usedPercent,
+                windowMinutes: windowMinutes,
+                resetsAt: now.addingTimeInterval(resetsInDays * 86_400))
+            ],
+            fetchedAt: now, source: "headline fixture")),
+        now: now)
+    }
+    // Grok is 23 points behind pace and runs out tomorrow. OpenAI is 31 points
+    // behind and runs out later, so the larger gap must not take the headline.
+    let soonest = plan(.grok, usedPercent: 80, resetsInDays: 3)
+    let loudest = plan(.openAI, usedPercent: 60, resetsInDays: 5)
+    guard let soonestRunsOut = soonest.primary?.runsOutAt,
+      let loudestRunsOut = loudest.primary?.runsOutAt,
+      soonestRunsOut < loudestRunsOut,
+      let soonestGap = soonest.paceState.deficitPercent,
+      let loudestGap = loudest.paceState.deficitPercent,
+      soonestGap < loudestGap
+    else { return false }
+    let reserve = plan(.anthropic, usedPercent: 20, resetsInDays: 2)
+    let onPace = plan(.cursor, usedPercent: 57, resetsInDays: 3)
+    let unknown = plan(.copilot, usedPercent: 40, resetsInDays: 6, windowMinutes: nil)
+    guard reserve.paceState.reservePercent != nil, onPace.paceState == .onPace,
+      unknown.paceState == .unknown
+    else { return false }
+    let twoDeficits = AllowanceBuilder.headline(for: [loudest, soonest], now: now)
+    let oneDeficit = AllowanceBuilder.headline(for: [soonest], now: now)
+    let unknownBesideHealthy = AllowanceBuilder.headline(for: [unknown, reserve], now: now)
+    let mixedHealthy = AllowanceBuilder.headline(for: [reserve, onPace], now: now)
+    let onlyUnknown = AllowanceBuilder.headline(for: [unknown], now: now)
+    return twoDeficits.primary == "Grok may run out 2d 0h before reset · 1 more at risk"
+      && twoDeficits.state == soonest.paceState
+      && oneDeficit.primary == "Grok may run out 2d 0h before reset"
+      // Provider names keep their own capitalisation in the reset phrase.
+      && unknownBesideHealthy.primary == "No plan at risk · Claude resets in 2d 0h"
+      && unknownBesideHealthy.state == .reserve(percent: 0)
+      && mixedHealthy.primary == "All plans on track · Claude resets in 2d 0h"
+      && mixedHealthy.state == .onPace
+      && onlyUnknown.primary == "No pace forecast yet · Copilot resets in 6d 0h"
+      && onlyUnknown.state == .unknown
   }
 
   private static func descendants(of view: NSView) -> [NSView] {

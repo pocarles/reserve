@@ -77,7 +77,11 @@ credits. Optional `account/usage/read` supplies account token activity in
 Insights; an unsupported endpoint leaves quota checks working. Total tokens
 are not assigned an invented input/output split or price. Quota-only polls do
 not retain account activity without verified account identity. No reset credit
-is redeemed and no conversation is started. [App-server documentation](https://developers.openai.com/codex/app-server)
+is redeemed and no conversation is started. A full app-server launch plus one
+limits read was measured at 0.6-0.9 s on the author's Mac. Reserve therefore
+starts the app-server per refresh and lets it exit, rather than keeping a
+resident process between refreshes for a saving smaller than the interval it
+would occupy. [App-server documentation](https://developers.openai.com/codex/app-server)
 
 ### Cursor
 

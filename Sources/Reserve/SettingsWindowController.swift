@@ -371,8 +371,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           ? "No usage history or monthly costs available"
           : "No usage history yet · \(DashboardFormat.money(planTotal))/month across \(trackedPlans)")
         : plans.isEmpty
-          ? "\(DashboardFormat.money(apiValue)) estimated API value · \(coverage)"
-          : "\(DashboardFormat.money(apiValue)) estimated API value from \(coverage) · "
+          ? "≈ \(DashboardFormat.money(apiValue)) estimated API value · \(coverage)"
+          : "≈ \(DashboardFormat.money(apiValue)) estimated API value from \(coverage) · "
             + "\(DashboardFormat.money(planTotal))/month across \(trackedPlans)",
       size: 13, weight: .medium, color: .labelColor)
     total.identifier = NSUserInterfaceItemIdentifier("insights-total")
@@ -755,15 +755,20 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
     var views: [NSView] = [checkbox, logo, name, plan, status, updated, spacer]
     let providerState = self.store.states[provider] ?? ProviderViewState(provider: provider)
-    if !self.store.isEnabled(provider) || AllowanceBuilder.setupAction(for: providerState) != nil {
+    let quickSetupAction = AllowanceBuilder.setupAction(for: providerState)
+    if !self.store.isEnabled(provider) || quickSetupAction != nil {
+      // A tracked provider already knows what it needs — a sign-in, permission,
+      // a helper — so the button says that rather than a generic "Reconnect".
+      let pendingAction = self.store.isEnabled(provider) ? quickSetupAction : nil
       let quickSetup = NSButton(
-        title: self.store.isEnabled(provider) ? "Reconnect" : "Connect",
+        title: pendingAction?.buttonTitle ?? "Connect",
         target: self,
         action: #selector(self.setupProviderClicked(_:)))
       quickSetup.identifier = NSUserInterfaceItemIdentifier("provider-quick-setup-\(provider.rawValue)")
       quickSetup.bezelStyle = .rounded
       quickSetup.controlSize = .small
-      quickSetup.toolTip = "Connect \(provider.displayName) to Reserve"
+      quickSetup.toolTip = pendingAction?.toolTip(for: provider)
+        ?? "Connect \(provider.displayName) to Reserve"
       views.append(quickSetup)
     }
     views.append(disclose)
@@ -938,9 +943,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       activity.map { "\(DashboardFormat.tokens($0.rolling)) in 30 days" } ?? "—",
       size: 12, color: .secondaryLabelColor)
     rolling.widthAnchor.constraint(equalToConstant: 150).isActive = true
+    // An API-equivalent value is modeled, so it is marked and kept in regular
+    // weight; only the total in "Comparable value and cost" is emphasised.
     let value = SettingsLabel(
-      activity?.value.map(DashboardFormat.money) ?? "—",
-      size: 12, weight: .medium, color: .labelColor)
+      activity?.value.map { "≈ \(DashboardFormat.money($0))" } ?? "—",
+      size: 12, color: .labelColor)
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
     let row = NSStackView(views: [logo, name, today, rolling, spacer, value])
@@ -1370,10 +1377,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     if !self.store.isEnabled(provider) {
       return (BinaryLocator.find(executable) != nil ? "Available on this Mac" : "Off", .secondaryLabelColor)
     }
-    if state?.requiresKeychainAccess == true { return ("Permission needed", .systemOrange) }
-    if state?.usageAccessDenied == true { return ("Usage access denied", .systemOrange) }
+    // Setup and permission states are next steps, not capacity risk, so they
+    // use the accent rather than the warning colour.
+    if state?.requiresKeychainAccess == true { return ("Permission needed", ReserveColor.accent) }
+    if state?.usageAccessDenied == true { return ("Usage access denied", ReserveColor.accent) }
     if state?.isConnecting == true { return ("Connecting", .secondaryLabelColor) }
-    if state?.requiresConnection == true { return ("Sign-in needed", .systemOrange) }
+    if state?.requiresConnection == true { return ("Sign-in needed", ReserveColor.accent) }
     return Self.providerStatus(
       provider: provider,
       hasSnapshot: state?.snapshot != nil,
@@ -1393,9 +1402,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         : ("Connected", .secondaryLabelColor)
     }
     if toolDetected {
-      return ("Detected, not signed in", .systemOrange)
+      return ("Detected, not signed in", ReserveColor.accent)
     }
-    return ("Setup needed", .systemOrange)
+    return ("Setup needed", ReserveColor.accent)
   }
 
   private static func descendants(of view: NSView) -> [NSView] {

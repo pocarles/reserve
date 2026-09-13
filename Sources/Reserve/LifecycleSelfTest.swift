@@ -726,8 +726,8 @@ enum LifecycleSelfTest {
       .first { $0.identifier?.rawValue == "connect-anthropic" }
     let setupCopy = setupDescendants.compactMap { ($0 as? NSTextField)?.stringValue }
     result.expect(
-      setupButton?.title == "Connect"
-        && setupCopy.contains("Connect Claude to show plan limits"),
+      setupButton?.title == "Set up"
+        && setupCopy.contains("Set up Claude to show plan limits"),
       "a missing provider helper still looks broken instead of offering setup")
     let domain = "com.pocarles.reserve.cost-selftest"
     guard let defaults = UserDefaults(suiteName: domain) else {

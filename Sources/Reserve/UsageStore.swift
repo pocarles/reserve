@@ -19,6 +19,7 @@ struct ProviderViewState: Identifiable {
   var requiresInstallation = false
   var requiresUpdate = false
   var usageAccessDenied = false
+  var localHistoryEnabled = false
 }
 
 enum PreviewScenario: String, CaseIterable {
@@ -97,9 +98,22 @@ final class UsageStore {
   private var refreshTasks: [ProviderID: Task<Void, Never>] = [:]
   private var lastLocalUsageScanAt: Date?
   private var claudeQuotaWatcher: QuotaFileWatcher?
-  private var insightsRequestedAt: Date?
+  /// One throttle per provider, because detail data is now asked for one card at
+  /// a time as well as all at once from the Insights pane.
+  private var insightsRequestedAt: [ProviderID: Date] = [:]
+  /// The local scan covers every provider at once, so its own throttle is
+  /// separate from the per-provider account fetches.
+  private var localInsightsRequestedAt: Date?
   var insightsVisible = false
   private var pendingInsightProviders: Set<ProviderID> = []
+  #if RESERVE_DEV_AUTOMATION
+  private var insightsRequestCounts: [ProviderID: Int] = [:]
+
+  /// How many times a surface has asked for this provider's detail data.
+  func insightsRequestCount(for provider: ProviderID) -> Int {
+    self.insightsRequestCounts[provider] ?? 0
+  }
+  #endif
 
   var localHistoryEnabled: Bool {
     get { self.defaults.bool(forKey: "history.localEnabled") }
@@ -112,22 +126,56 @@ final class UsageStore {
       }
       self.changed()
       if newValue {
-        self.insightsRequestedAt = nil
+        self.insightsRequestedAt.removeAll()
+        self.localInsightsRequestedAt = nil
         self.requestInsights()
       }
     }
   }
 
+  /// The Insights pane wants every provider's detail data at once.
   func requestInsights() {
     guard self.automaticRefreshEnabled || self.fetchOverride != nil else { return }
-    if let requested = self.insightsRequestedAt, Date().timeIntervalSince(requested) < 60 { return }
-    self.insightsRequestedAt = Date()
-    if self.localHistoryEnabled { self.refreshLocalUsage() }
-    for provider in [ProviderID.cursor, .openAI] where self.isEnabled(provider) {
-      self.pendingInsightProviders.insert(provider)
-      self.refresh(provider, queueIfBusy: true)
-    }
+    if self.localHistoryEnabled, self.localScanThrottleAllows() { self.refreshLocalUsage() }
+    for provider in ProviderID.allCases { self.requestAccountInsights(for: provider) }
   }
+
+  /// Expanding a provider card asks for everything Reserve can know about that
+  /// one provider: the activity scan of this Mac, and the account history of
+  /// providers whose adapter reports it.
+  func requestInsights(for provider: ProviderID) {
+    #if RESERVE_DEV_AUTOMATION
+    self.insightsRequestCounts[provider, default: 0] += 1
+    #endif
+    guard self.automaticRefreshEnabled || self.fetchOverride != nil else { return }
+    // The scan is shared, so repeated expands reuse its interval rather than
+    // rescanning every log directory again.
+    if self.localHistoryEnabled { self.refreshLocalUsage(force: false) }
+    self.requestAccountInsights(for: provider)
+  }
+
+  private func requestAccountInsights(for provider: ProviderID) {
+    guard self.isEnabled(provider),
+      ProviderDescriptor.forProvider(provider).capabilities.contains(.accountHistory)
+    else { return }
+    if let requested = self.insightsRequestedAt[provider],
+      Date().timeIntervalSince(requested) < 60
+    {
+      return
+    }
+    self.insightsRequestedAt[provider] = Date()
+    self.pendingInsightProviders.insert(provider)
+    self.refresh(provider, queueIfBusy: true)
+  }
+
+  private func localScanThrottleAllows(now: Date = Date()) -> Bool {
+    if let requested = self.localInsightsRequestedAt, now.timeIntervalSince(requested) < 60 {
+      return false
+    }
+    self.localInsightsRequestedAt = now
+    return true
+  }
+
   /// The newest refresh request per provider. Results from any older request are
   /// discarded rather than applied.
   private var refreshTokens: [ProviderID: Int] = [:]
@@ -196,6 +244,7 @@ final class UsageStore {
           ? "Reported monthly cost" : "Typical monthly cost"
       state.renewalStart = self.renewalStart(for: provider)
       state.nextRenewal = self.nextRenewal(for: provider)
+      state.localHistoryEnabled = self.localHistoryEnabled
       return state
     }
   }
@@ -1287,8 +1336,11 @@ final class UsageStore {
     self.refreshAll(manual: false)
   }
 
+  /// `force` waives the scan interval. Whether a surface should scan at all is
+  /// the caller's decision, so that the Insights pane and an expanded provider
+  /// card can both ask without one gating the other.
   private func beginLocalUsageRefresh(force: Bool) -> Bool {
-    guard self.localHistoryEnabled, (force || self.insightsVisible), !self.isScanningLocalUsage else { return false }
+    guard self.localHistoryEnabled, !self.isScanningLocalUsage else { return false }
     if !force, let lastLocalUsageScanAt,
       Date().timeIntervalSince(lastLocalUsageScanAt) < self.localUsageScanInterval
     {
@@ -1298,8 +1350,8 @@ final class UsageStore {
     return true
   }
 
-  private func refreshLocalUsage() {
-    guard self.beginLocalUsageRefresh(force: true) else { return }
+  private func refreshLocalUsage(force: Bool = true) {
+    guard self.beginLocalUsageRefresh(force: force) else { return }
     self.changed()
     Task { await self.performLocalUsageScan() }
   }

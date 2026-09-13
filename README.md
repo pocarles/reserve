@@ -145,6 +145,12 @@ until at least 10% of a known window has elapsed, and stop when observations
 are stale. Grok’s Build and Chat contributions appear only in details as
 percentages of its shared pool used.
 
+Expanding a card shows everything Reserve knows about that provider without
+leaving the dashboard: every allowance window and its reset, activity from this
+Mac when that is turned on, provider-reported account activity where it exists,
+the plan's cost and renewal, where the numbers came from, and when they were
+last checked.
+
 Cursor shows its reported Cursor Models and Other Models percentages as whole
 numbers. It also shows provider-reported tokens for today, the current billing
 cycle, and the last 30 days. Reserve does not derive a percentage from token
