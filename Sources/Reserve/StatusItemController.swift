@@ -1197,6 +1197,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.bringReserveWindowToFront(forClickedWindow: self.settingsWindow)
   }
 
+  /// Insights lives in the Settings window. Opened from the dashboard it must
+  /// come in front of the popover exactly as Settings does, or it lands behind.
+  private func showInsights() {
+    self.openInsights()
+    self.bringReserveWindowToFront(forClickedWindow: self.settingsWindow)
+  }
+
   private func connectProvider(_ provider: ProviderID) {
     self.popover.performClose(nil)
     DispatchQueue.main.async { [weak self] in self?.setupProvider(provider) }
@@ -1213,7 +1220,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           self?.store.selectMenuBarProvider(provider)
         },
         openSettings: { [weak self] in self?.showSettings() },
-        openInsights: { [weak self] in self?.openInsights() },
+        openInsights: { [weak self] in self?.showInsights() },
         dismiss: { [weak self] in self?.popover.performClose(nil) },
         toggleProviderDetail: { [weak self] provider in
           guard let self else { return }
