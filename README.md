@@ -5,6 +5,8 @@ capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, and Copilot.
 Optional insights show provider-reported account activity or activity from this Mac.
 Copilot support is experimental and still needs an authenticated release check.
 
+Learn more at [pocarles.com/reserve](https://pocarles.com/reserve/).
+
 It is deliberately small: no Reserve account, browser automation, WebView,
 cookie extraction, telemetry, crash reporting, cloud service, or third-party
 status aggregator. Reserve uses Sparkle only for signed, user-approved macOS
