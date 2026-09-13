@@ -754,8 +754,10 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
       state = "Waiting for permission"
       fullState = state
     } else if summary.setupAction == .openDesktop {
-      state = "Cache unavailable"
-      fullState = state
+      // Devin Desktop rewrites its saved usage only from its own settings
+      // panel. Reserve cannot ask for that, so say what is being waited on.
+      state = "Saved usage out of date"
+      fullState = "Devin Desktop has not refreshed its saved usage since before its last reset"
     } else if summary.needsConnection {
       state = "Sign-in needed"
       fullState = state
@@ -766,11 +768,16 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
       state = summary.observationTimeKnown ? "Cached" : "Saved usage"
       fullState = "Cached data"
     }
-    let age = !summary.observationTimeKnown && summary.lastUpdated != nil
+    let waitingForDesktop = summary.setupAction == .openDesktop
+    let age = waitingForDesktop
+      ? "waiting for Devin Desktop"
+      : !summary.observationTimeKnown && summary.lastUpdated != nil
       ? "age unknown" : summary.lastUpdated.map {
       "last checked \(Self.compactAge(since: $0, now: now))"
     } ?? "not checked yet"
-    let fullAge = !summary.observationTimeKnown && summary.lastUpdated != nil
+    let fullAge = waitingForDesktop
+      ? "Devin Desktop refreshes it only from its own settings; Reserve cannot request that"
+      : !summary.observationTimeKnown && summary.lastUpdated != nil
       ? "saved by the provider app; exact update time unknown" : summary.lastUpdated.map {
       DashboardFormat.updated($0, now: now).replacingOccurrences(
         of: "Updated", with: "last updated")
@@ -789,14 +796,18 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
       message, font: ReserveFont.sans(ReserveType.metadata, .medium), color: ReserveColor.muted
     ).flexible()
     label.clockText = { date in
-      let age = !summary.observationTimeKnown && summary.lastUpdated != nil
+      let age = waitingForDesktop
+        ? "waiting for Devin Desktop"
+        : !summary.observationTimeKnown && summary.lastUpdated != nil
         ? "age unknown" : summary.lastUpdated.map {
           "last checked \(Self.compactAge(since: $0, now: date))"
         } ?? "not checked yet"
       return "\(state) · \(age)"
     }
     self.spokenClock = { date in
-      let age = !summary.observationTimeKnown && summary.lastUpdated != nil
+      let age = waitingForDesktop
+        ? "Devin Desktop refreshes it only from its own settings; Reserve cannot request that"
+        : !summary.observationTimeKnown && summary.lastUpdated != nil
         ? "saved by the provider app; exact update time unknown" : summary.lastUpdated.map {
           DashboardFormat.updated($0, now: date).replacingOccurrences(of: "Updated", with: "last updated")
         } ?? "never updated"
