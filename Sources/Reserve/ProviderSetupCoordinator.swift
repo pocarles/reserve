@@ -30,7 +30,12 @@ final class ProviderSetupCoordinator {
   }
 
   func start(_ provider: ProviderID) {
-    if self.activeProvider != nil {
+    if let active = self.activeProvider {
+      // Connect pressed again during a browser sign-in brings the sign-in page
+      // back. Anything else surfaces the pending flow so it can be cancelled.
+      if self.panel?.isVisible != true, self.phase == .signingIn, active == provider,
+        self.store.reopenLoginBrowser(active)
+      { return }
       self.panel?.show()
       return
     }
@@ -46,7 +51,6 @@ final class ProviderSetupCoordinator {
     self.panel = panel
     self.observer = self.store.observe { [weak self] in self?.storeChanged() }
     self.check()
-    panel.show()
   }
 
   private func storeChanged() {
@@ -81,6 +85,9 @@ final class ProviderSetupCoordinator {
       return
     }
     self.present(Self.phase(after: state))
+    // Fresh usage is the whole point of connecting; the card already shows it,
+    // so there is nothing left for a window to say.
+    if self.phase == .connected { self.close() }
     // Connect already expresses the user's intent to sign in. Open the
     // browser when needed, but never automatically repeat a failed login.
     if self.phase == .needsSignIn && !self.loginAttempted { self.continueConnection() }
@@ -195,6 +202,20 @@ final class ProviderSetupCoordinator {
       loginCompleted: self.loginCompleted)
     if phase == .signingIn, self.store.loginBrowserFailedToOpen(provider) {
       self.panel?.showBrowserFailure()
+    }
+    if self.needsWindow(phase, for: provider) { self.panel?.show() }
+    else { self.panel?.orderOut(nil) }
+  }
+
+  /// The window appears only when the person has to decide something or a
+  /// problem needs explaining. Checking, a browser sign-in that opened, and a
+  /// finished connection pass without one; the provider card shows their state.
+  private func needsWindow(_ phase: Phase, for provider: ProviderID) -> Bool {
+    switch phase {
+    case .checking, .connected: false
+    case .needsSignIn: self.loginAttempted
+    case .signingIn: self.store.loginBrowserFailedToOpen(provider)
+    default: true
     }
   }
 }

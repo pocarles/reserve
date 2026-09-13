@@ -17,6 +17,16 @@ enum ReserveApp {
       finished.wait()
       return
     }
+    // Packaging launches the staged app with the SwiftPM build directory gone,
+    // so this is the only place a missing or unreadable resource bundle shows
+    // up before someone installs the build and signs in.
+    if CommandLine.arguments.contains("--package-smoke-test") {
+      let failures = Bundle.packagedReserveResourceFailures()
+      if !failures.isEmpty {
+        for failure in failures { fputs("Reserve package smoke test: \(failure)\n", stderr) }
+        exit(65)
+      }
+    }
     let instanceLock: SingleInstanceLock
     do {
       guard let acquired = try SingleInstanceLock.acquire(at: self.instanceLockURL())

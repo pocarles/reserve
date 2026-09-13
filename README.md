@@ -33,17 +33,19 @@ source build is ad-hoc signed and is intended only for the Mac that built it.
 ## Provider requirements
 
 Open **Settings > Providers** and choose **Connect** beside a provider. Reserve
-first checks for an existing sign-in, then guides you through only the steps
-that are needed in one window.
+first checks for an existing sign-in. If one works, the provider card simply
+fills in. A window appears only when Reserve needs a decision from you or has
+a problem to explain.
 If a helper needs installation or an update, Reserve explains the change and
 waits for your approval. Browser sign-in opens on the provider's website in
 your regular Chrome profile, with your existing sessions and saved passwords.
 If Chrome is not installed, Reserve uses your default browser.
-You can reopen that page or cancel the login from the connection window.
+Choose **Connect** again to reopen that page. If the browser could not open,
+Reserve says so in a window where you can try again or cancel.
 
 Claude and Cursor require explicit **Allow usage access** before Reserve reads
-their protected sign-in. macOS may also ask you to approve access. The window
-stays open until Reserve reads fresh usage, or explains why it could not.
+their protected sign-in. macOS may also ask you to approve access. That window
+closes on its own once Reserve reads fresh usage, or explains why it could not.
 Cursor and Copilot start disabled. On first launch, the other providers
 start enabled only when their helper is already installed. Saved choices are preserved.
 
@@ -63,8 +65,8 @@ helper's own store. It never performs the token exchange and never writes a
 provider's credentials. Browser sign-in is asked for only when nothing can be
 renewed, or when the helper refuses the renewal.
 
-The same connection window handles installation, updates, sign-in, permission,
-and the first usage check. Provider installation and updates never
+The same connection window handles installation, updates, permission, and any
+problem with sign-in or the first usage check. Provider installation and updates never
 run silently. Installer downloads are bounded, remain on the provider's exact
 official HTTPS host, run with a minimal environment that excludes unrelated API
 keys, and are removed from temporary storage afterward. Sign-in browser
@@ -290,8 +292,8 @@ target.
 ## Troubleshooting
 
 **Connecting a provider.** Choose **Connect** on its card, or enable it in
-Settings > Providers. Follow the steps in the connection window. No Terminal
-commands or copied tokens are needed.
+Settings > Providers. Reserve opens the sign-in page, or a window with the next
+step. No Terminal commands or copied tokens are needed.
 
 **Already signed in, but permission is needed.** Choose **Connect**, then
 **Allow usage access**. Approve macOS access if prompted. Denied access stays a
