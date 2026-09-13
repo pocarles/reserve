@@ -755,6 +755,13 @@ enum LifecycleSelfTest {
       "Cursor no longer starts disabled with Keychain access off")
     result.expect(!store.isEnabled(.windsurf), "Windsurf no longer starts disabled")
     result.expect(
+      store.localHistoryEnabled,
+      "local history no longer remains available after updating Reserve")
+    store.localHistoryEnabled = false
+    result.expect(
+      !store.localHistoryEnabled,
+      "an explicit choice to disable local history is not preserved")
+    result.expect(
       store.exerciseCursorAccessDisableForSelfTest(),
       "turning off Cursor access did not take effect immediately")
     store.setMonthlySubscriptionCost(90, for: .anthropic)

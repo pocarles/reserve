@@ -289,7 +289,7 @@ private final class FlippedView: NSView {
   override var isFlipped: Bool { true }
 }
 
-/// Name, the one conclusion, freshness, and the secondary controls.
+/// Name, one conclusion, and the secondary controls.
 @MainActor
 private final class DashboardHeaderView: NSView {
   init(
@@ -324,14 +324,6 @@ private final class DashboardHeaderView: NSView {
     let conclusionRow = NSStackView.row([conclusionIcon, conclusion], spacing: 6)
     conclusionRow.identifier = NSUserInterfaceItemIdentifier("dashboard-headline")
 
-    let freshness = ReserveLabel(
-      Self.freshness(summaries: summaries, isRefreshing: isRefreshing, now: now),
-      font: ReserveFont.sans(ReserveType.metadata),
-      color: ReserveColor.subtle
-    ).fitted()
-    freshness.toolTip = "Usage data is processed on this Mac."
-    freshness.clockText = { date in Self.freshness(summaries: summaries.map { $0.at(date) }, isRefreshing: isRefreshing, now: date) }
-
     let refresh = ReserveIconButton(
       symbol: "arrow.clockwise", toolTip: "Refresh now", diameter: 26,
       spinningSince: isRefreshing ? now.timeIntervalSince(refreshStartedAt ?? now) : nil,
@@ -340,13 +332,11 @@ private final class DashboardHeaderView: NSView {
     let more = DashboardMenuButton(actions: actions)
     more.identifier = NSUserInterfaceItemIdentifier("more-actions")
     let top = NSStackView.row(
-      [wordmark, NSStackView.spacer(), freshness, refresh, more], spacing: 7)
-    let secondary = ReserveLabel(
-      headline.secondary, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
-    ).flexible()
-    secondary.toolTip = headline.secondary
-    secondary.clockText = { date in AllowanceBuilder.headline(for: summaries.map { $0.at(date) }, now: date).secondary }
-    let stack = NSStackView.column([top, conclusionRow, secondary], spacing: 5)
+      [wordmark, NSStackView.spacer(), refresh, more], spacing: 7)
+    conclusion.clockText = { date in
+      AllowanceBuilder.headline(for: summaries.map { $0.at(date) }, now: date).primary
+    }
+    let stack = NSStackView.column([top, conclusionRow], spacing: 5)
     stack.setCustomSpacing(10, after: top)
     stack.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(stack)
@@ -360,26 +350,6 @@ private final class DashboardHeaderView: NSView {
   }
 
   required init?(coder: NSCoder) { nil }
-
-  private static func freshness(
-    summaries: [ProviderSummary],
-    isRefreshing: Bool,
-    now: Date
-  ) -> String {
-    if isRefreshing { return "Updating…" }
-    if summaries.contains(where: { $0.error != nil || $0.paceState == .stale }) {
-      return "Some data unavailable"
-    }
-    if summaries.contains(where: \.detailedUsageUnavailable) {
-      return "Some details unavailable"
-    }
-    guard summaries.allSatisfy({ $0.lastUpdated != nil }),
-      let oldest = summaries.compactMap(\.lastUpdated).min()
-    else {
-      return "Waiting for the first update"
-    }
-    return DashboardFormat.updated(oldest, now: now)
-  }
 }
 
 /// Secondary actions live behind one control so the footer stays about usage.

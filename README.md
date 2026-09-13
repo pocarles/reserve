@@ -33,8 +33,9 @@ source build is ad-hoc signed and is intended only for the Mac that built it.
 
 ## Provider requirements
 
-Choose **Connect** on a provider card. Reserve first checks for an existing
-sign-in, then guides you through only the steps that are needed in one window.
+Open **Settings > Providers** and choose **Connect** beside a provider. Reserve
+first checks for an existing sign-in, then guides you through only the steps
+that are needed in one window.
 If a helper needs installation or an update, Reserve explains the change and
 waits for your approval. Browser sign-in opens on the provider's website in
 your regular Chrome profile, with your existing sessions and saved passwords.
@@ -85,10 +86,11 @@ quota-only local file and does not read Claude’s sign-in. Updates arrive after
 Claude Code responds, so they pause while it is idle. The existing status line
 is preserved; turning the option off restores it. No conversation text is saved.
 
-Local history is off by default. Enable **Include activity from this Mac** in
-General to use it. Only enabled providers are scanned, and history work begins
-when Insights is requested. Normal quota checks skip detailed Cursor history,
-reuse plan metadata, and check at most two providers concurrently in a sweep.
+Local history is available by default and can be turned off with **Include
+activity from this Mac** in General. Only enabled providers are scanned, and
+history work begins when Insights is requested. Normal quota checks skip
+detailed Cursor history, reuse plan metadata, and check at most two providers
+concurrently in a sweep.
 
 See [provider support](docs/PROVIDER_SUPPORT.md) for the data contracts and
 remaining provider verification limits.
@@ -165,7 +167,7 @@ It labels the amount as last known and never projects a forecast from it. These 
 this version does not make an authenticated live usage request. Windsurf token
 counts, transcript estimates, and subscription price guesses are not included.
 
-The optional savings view is an API-equivalent estimate, not a provider bill.
+The optional comparable-value view is an API-equivalent estimate, not a provider bill.
 OpenAI and Anthropic use the observed input/cache/output mix when available;
 Grok exposes an aggregate token count, so its comparison is approximate.
 Subscription prices remain user-editable. Details distinguish reported, typical,

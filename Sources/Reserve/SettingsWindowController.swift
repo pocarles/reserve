@@ -358,18 +358,22 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let rows = ProviderID.allCases.filter { self.store.isEnabled($0) }.map(self.insightRow)
     let states = ProviderID.allCases.compactMap { self.store.states[$0] }
       .filter { self.store.isEnabled($0.provider) }
-    let measured = states.filter { $0.localUsage != nil }
-    let origins = Set(measured.compactMap { $0.localUsage?.origin })
-    let apiValue = measured.reduce(0.0) { $0 + ($1.localUsage?.apiEquivalentCostUSD ?? 0) }
-    let plans = measured.compactMap { self.store.monthlySubscriptionCost(for: $0.provider) }
+    let measured = states.filter { Self.activity(for: $0) != nil }
+    let origins = Set(states.compactMap { $0.localUsage?.origin })
+    let apiValue = states.reduce(0.0) { $0 + ($1.localUsage?.apiEquivalentCostUSD ?? 0) }
+    let plans = states.compactMap { self.store.monthlySubscriptionCost(for: $0.provider) }
     let planTotal = plans.reduce(0, +)
+    let coverage = "\(measured.count) provider\(measured.count == 1 ? "" : "s") with history"
+    let trackedPlans = "\(plans.count) plan\(plans.count == 1 ? "" : "s") with known costs"
     let total = SettingsLabel(
       measured.isEmpty
-        ? "No usage history available"
+        ? (plans.isEmpty
+          ? "No usage history or monthly costs available"
+          : "No usage history yet · \(DashboardFormat.money(planTotal))/month across \(trackedPlans)")
         : plans.isEmpty
-          ? "\(DashboardFormat.money(apiValue)) of API-equivalent usage"
-          : "\(DashboardFormat.money(apiValue)) of API-equivalent usage against "
-            + "\(DashboardFormat.money(planTotal)) in monthly costs",
+          ? "\(DashboardFormat.money(apiValue)) estimated API value · \(coverage)"
+          : "\(DashboardFormat.money(apiValue)) estimated API value from \(coverage) · "
+            + "\(DashboardFormat.money(planTotal))/month across \(trackedPlans)",
       size: 13, weight: .medium, color: .labelColor)
     total.identifier = NSUserInterfaceItemIdentifier("insights-total")
 
@@ -388,8 +392,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
 
     let activityFooter: String
-    if states.contains(where: { $0.snapshot?.accountTokenActivity != nil }) {
-      activityFooter = "OpenAI reports account token totals without a price or token-type breakdown. Other rows identify local or provider-reported history."
+    if states.contains(where: {
+      $0.provider == .openAI && $0.localUsage == nil
+        && $0.snapshot?.accountTokenActivity?.dailyUsageBuckets?.isEmpty == false
+    }) {
+      activityFooter = "OpenAI uses provider-reported account history when available. Local rows cover activity on this Mac."
     } else if origins.contains(.localDevice), origins.contains(.providerAccount) {
       activityFooter = "OpenAI, Claude, and Grok use session logs on this Mac. Cursor uses "
         + "provider-reported account totals, which can include other devices."
@@ -417,9 +424,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
               + "per-day breakdown.",
           rows: charts.isEmpty ? [SettingsLabel("—", size: 12, color: .tertiaryLabelColor)] : charts),
         self.section(
-          title: "Estimated plan value",
+          title: "Comparable value and cost",
           footer: "Reserve cannot know whether these tokens would otherwise have been bought "
-            + "through an API. Treat this as an estimate of comparable value, not money saved.",
+            + "through an API. Usage coverage and tracked monthly cost are stated separately.",
           rows: [total]),
       ])
   }
@@ -747,7 +754,21 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     disclose.state = self.expandedProviders.contains(provider) ? .on : .off
     disclose.setAccessibilityLabel("Show \(provider.displayName) details")
 
-    let row = NSStackView(views: [checkbox, logo, name, plan, status, updated, spacer, disclose])
+    var views: [NSView] = [checkbox, logo, name, plan, status, updated, spacer]
+    let providerState = self.store.states[provider] ?? ProviderViewState(provider: provider)
+    if !self.store.isEnabled(provider) || AllowanceBuilder.setupAction(for: providerState) != nil {
+      let quickSetup = NSButton(
+        title: self.store.isEnabled(provider) ? "Reconnect" : "Connect",
+        target: self,
+        action: #selector(self.setupProviderClicked(_:)))
+      quickSetup.identifier = NSUserInterfaceItemIdentifier("provider-quick-setup-\(provider.rawValue)")
+      quickSetup.bezelStyle = .rounded
+      quickSetup.controlSize = .small
+      quickSetup.toolTip = "Connect \(provider.displayName) to Reserve"
+      views.append(quickSetup)
+    }
+    views.append(disclose)
+    let row = NSStackView(views: views)
     row.identifier = NSUserInterfaceItemIdentifier("settings-provider-\(provider.rawValue)")
     row.orientation = .horizontal
     row.alignment = .centerY
@@ -909,29 +930,19 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let logo = SettingsProviderLogo(provider: provider)
     let name = SettingsLabel(provider.displayName, size: 13, color: .labelColor)
     name.widthAnchor.constraint(equalToConstant: 92).isActive = true
-    let usage = self.store.states[provider]?.localUsage
-    if let activity = self.store.states[provider]?.snapshot?.accountTokenActivity {
-      let total = SettingsLabel(activity.lifetimeTokens.map {
-        "\(DashboardFormat.tokens($0)) lifetime tokens"
-      } ?? "Account activity", size: 12, color: .secondaryLabelColor)
-      let source = SettingsLabel("Reported by OpenAI", size: 11, color: .tertiaryLabelColor)
-      let row = NSStackView.row([logo, name, total, NSStackView.spacer(), source], spacing: 8)
-      row.identifier = NSUserInterfaceItemIdentifier("insight-\(provider.rawValue)")
-      row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
-      return row
-    }
+    let activity = self.store.states[provider].flatMap(Self.activity)
     let today = SettingsLabel(
-      usage.map { "\(DashboardFormat.tokens($0.todayTokens)) today" }
+      activity.map { "\(DashboardFormat.tokens($0.today)) today" }
         ?? (self.store.states[provider]?.snapshot?.detailedUsageUnavailable == true
           ? "Details unavailable" : "No usage data"),
       size: 12, color: .secondaryLabelColor)
     today.widthAnchor.constraint(equalToConstant: 130).isActive = true
     let rolling = SettingsLabel(
-      usage.map { "\(DashboardFormat.tokens($0.totalTokens)) in 30 days" } ?? "—",
+      activity.map { "\(DashboardFormat.tokens($0.rolling)) in 30 days" } ?? "—",
       size: 12, color: .secondaryLabelColor)
     rolling.widthAnchor.constraint(equalToConstant: 150).isActive = true
     let value = SettingsLabel(
-      usage.map { DashboardFormat.money($0.apiEquivalentCostUSD) } ?? "—",
+      activity?.value.map(DashboardFormat.money) ?? "—",
       size: 12, weight: .medium, color: .labelColor)
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -942,6 +953,31 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     row.spacing = 8
     row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
     return row
+  }
+
+  private static func activity(for state: ProviderViewState) -> (
+    today: Int64, rolling: Int64, value: Double?
+  )? {
+    if let usage = state.localUsage {
+      return (usage.todayTokens, usage.totalTokens, usage.apiEquivalentCostUSD)
+    }
+    guard let daily = state.snapshot?.accountTokenActivity?.dailyUsageBuckets, !daily.isEmpty else {
+      return nil
+    }
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let formatter = DateFormatter()
+    formatter.calendar = calendar
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = calendar.timeZone
+    formatter.dateFormat = "yyyy-MM-dd"
+    let todayKey = formatter.string(from: Date())
+    let recent = daily.sorted { $0.day < $1.day }.suffix(30)
+    let rolling = recent.reduce(Int64(0)) { total, item in
+      let (sum, overflow) = total.addingReportingOverflow(item.tokens)
+      return overflow ? Int64.max : sum
+    }
+    return (recent.first(where: { $0.day == todayKey })?.tokens ?? 0, rolling, nil)
   }
 
   private func appearanceModeControl() -> NSView {
@@ -1129,8 +1165,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func setupProviderClicked(_ sender: NSButton) {
-    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(
-      of: "provider-setup-", with: "")
+    let raw = (sender.identifier?.rawValue ?? "")
+      .replacingOccurrences(of: "provider-quick-setup-", with: "")
+      .replacingOccurrences(of: "provider-setup-", with: "")
     guard let provider = ProviderID(rawValue: raw) else { return }
     self.setupProvider(provider)
   }
@@ -1482,6 +1519,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let keychainAccessIsHiddenUntilExpanded =
       !providerIDs.contains("settings-keychain-anthropic")
       && !providerIDs.contains("settings-keychain-cursor")
+    let quickProvider = ProviderID.copilot
+    let quickProviderWasEnabled = self.store.isEnabled(quickProvider)
+    self.store.setEnabled(quickProvider, enabled: false, refreshImmediately: false)
+    self.applyPane(animated: false)
+    let disconnectedProviderOffersConnect = identifiers().contains(
+      "provider-quick-setup-\(quickProvider.rawValue)")
+      && descendants().compactMap { $0 as? NSButton }.contains { $0.title == "Connect" }
+    self.store.setEnabled(quickProvider, enabled: quickProviderWasEnabled, refreshImmediately: false)
+    self.applyPane(animated: false)
     self.expandedProviders = [.anthropic, .cursor]
     self.applyPane(animated: false)
     let expandedIDs = identifiers()
@@ -1515,6 +1561,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && expandedIDs.contains("renewal.anthropic")
       && expandedIDs.contains("provider-detail-anthropic")
       && providerStatusesAreTruthful
+      && disconnectedProviderOffersConnect
       && renewalInputWorks
     self.expandedProviders = []
 

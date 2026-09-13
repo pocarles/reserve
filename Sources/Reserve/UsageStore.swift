@@ -1096,7 +1096,10 @@ final class UsageStore {
 
   private func registerDefaults() {
     self.defaults.register(defaults: [
-      "history.localEnabled": false,
+      // Insights used local history before 1.3.0. Keep it available after an
+      // update unless the person explicitly turned it off. Scans still only
+      // run while Insights is visible, so this does not add background work.
+      "history.localEnabled": true,
       "provider.openAI.enabled": BinaryLocator.find("codex") != nil,
       "provider.anthropic.enabled": BinaryLocator.find("claude") != nil,
       "provider.grok.enabled": BinaryLocator.find("grok") != nil,
