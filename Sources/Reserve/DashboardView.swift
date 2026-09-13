@@ -670,9 +670,11 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     if let setupAction = summary.setupAction,
       !summary.isConnecting
     {
+      // Setup is not capacity risk. Orange is reserved for an allowance that
+      // may run out, so a setup action takes the ordinary accent.
       let connect = ReserveTextButton(
         title: setupAction.buttonTitle,
-        size: ReserveType.metadata, color: ReserveColor.warning, filled: true,
+        size: ReserveType.metadata, color: ReserveColor.accent, filled: true,
         minimumWidth: 64, height: 24,
         action: { connectProvider(summary.provider) })
       connect.identifier = NSUserInterfaceItemIdentifier("connect-\(summary.provider.rawValue)")
@@ -718,9 +720,11 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     } else {
       message = summary.error ?? "Sign in to read plan limits"
     }
+    // Setup and permission guidance is neutral. Only an allowance that may run
+    // out or is out earns the deficit colour, and this row never carries one.
     let label = ReserveLabel(
       message, font: ReserveFont.sans(ReserveType.metadata),
-      color: summary.needsConnection ? ReserveColor.warning : ReserveColor.muted
+      color: ReserveColor.muted
     ).flexible()
     label.toolTip = summary.error ?? message
     let row = NSStackView.row([label], spacing: 0)
@@ -1141,7 +1145,9 @@ private final class UsageDetailGrid: NSView {
       rows.append(
         Self.cell(
           accountData ? "Usage value" : "Estimated API value",
-          DashboardFormat.money(usage.apiEquivalentCostUSD)))
+          // API-equivalent value is modeled from token counts either way, so it
+          // carries the approximation mark.
+          "≈ \(DashboardFormat.money(usage.apiEquivalentCostUSD))"))
     }
     if let cost = summary.subscriptionCostUSD {
       rows.append(Self.cell(summary.subscriptionCostLabel ?? "Monthly cost", DashboardFormat.money(cost)))
@@ -1360,9 +1366,6 @@ enum DashboardFormat {
     return formatter
   }
 
-  private static let clockFormatter: DateFormatter = {
-    Self.localizedDateFormatter(template: "jm")
-  }()
   private static let weekdayFormatter: DateFormatter = {
     Self.localizedDateFormatter(template: "EEEjm")
   }()
@@ -1413,7 +1416,11 @@ enum DashboardFormat {
   static func showsForecast(
     _ allowance: Allowance, paceState: UsagePaceState, observationTimeKnown: Bool
   ) -> Bool {
-    observationTimeKnown && (paceState == .exhausted || allowance.windowMinutes != nil || allowance.projection != nil)
+    // A stale card already says so three times: the freshness banner, the tinted
+    // surface, and the "last known" capacity label. A fourth line adds nothing.
+    guard paceState != .stale else { return false }
+    return observationTimeKnown
+      && (paceState == .exhausted || allowance.windowMinutes != nil || allowance.projection != nil)
   }
 
   static func forecast(
@@ -1471,12 +1478,12 @@ enum DashboardFormat {
     return "resets \(self.moment(reset, now: now))"
   }
 
-  /// A localized weekday and time inside a week, or date and time beyond it.
+  /// A countdown within half a day, then a localized weekday and time inside a
+  /// week, then date and time beyond it. Close to a reset, "in 1h 20m" answers
+  /// the question a clock time makes the reader compute.
   static func moment(_ date: Date, now: Date) -> String {
     let interval = date.timeIntervalSince(now)
-    if interval < 12 * 3600 {
-      return "at \(self.clockFormatter.string(from: date))"
-    }
+    if interval < 12 * 3600 { return self.countdown(to: date, now: now) }
     return interval < 6 * 86400
       ? self.weekdayFormatter.string(from: date)
       : self.fullMomentFormatter.string(from: date)

@@ -138,7 +138,7 @@ enum ProviderSetupAction: String, Equatable {
 
   var buttonTitle: String {
     switch self {
-    case .install: "Connect"
+    case .install: "Set up"
     case .update: "Update"
     case .signIn: "Sign in"
     case .allowAccess: "Allow access"
@@ -147,7 +147,7 @@ enum ProviderSetupAction: String, Equatable {
 
   func message(for provider: ProviderID) -> String {
     switch self {
-    case .install: "Connect \(provider.displayName) to show plan limits"
+    case .install: "Set up \(provider.displayName) to show plan limits"
     case .update: "Update \(provider.displayName) to resume plan limits"
     case .signIn: "Sign in to \(provider.displayName) to show plan limits"
     case .allowAccess: "Waiting for permission to read usage"
@@ -341,7 +341,6 @@ enum AllowanceBuilder {
       return ("Connect a provider in Settings", "", .unknown)
     }
     let stale = summaries.filter { $0.paceState == .stale }
-    let unknown = summaries.filter { $0.paceState == .unknown }
     let exhausted = summaries.filter { $0.paceState == .exhausted }
     let deficits = summaries.filter {
       if case .deficit = $0.paceState { return true }
@@ -361,28 +360,31 @@ enum AllowanceBuilder {
         .exhausted)
     }
     if !deficits.isEmpty {
-      let worst = deficits.max {
-        ($0.paceState.deficitPercent ?? 0) < ($1.paceState.deficitPercent ?? 0)
+      // The plan whose capacity disappears first is the one to act on. A larger
+      // percentage gap matters less than running out sooner.
+      let soonest = deficits.min { lhs, rhs in
+        let lhsRunsOut = lhs.primary?.runsOutAt ?? .distantFuture
+        let rhsRunsOut = rhs.primary?.runsOutAt ?? .distantFuture
+        if lhsRunsOut != rhsRunsOut { return lhsRunsOut < rhsRunsOut }
+        return (lhs.paceState.deficitPercent ?? 0) > (rhs.paceState.deficitPercent ?? 0)
       }!
       let detail: String
-      if let runsOut = worst.primary?.runsOutAt, let reset = worst.primary?.resetsAt,
+      if let runsOut = soonest.primary?.runsOutAt, let reset = soonest.primary?.resetsAt,
         runsOut < reset
       {
         detail = "may run out \(DashboardFormat.gap(from: runsOut, to: reset)) before reset"
-      } else if let reset = worst.primary?.resetsAt, reset > now {
+      } else if let reset = soonest.primary?.resetsAt, reset > now {
         detail = "resets \(DashboardFormat.countdown(to: reset, now: now))"
       } else {
         detail = "reset time unavailable"
       }
+      let others = deficits.count - 1
       return (
-        "\(worst.provider.displayName) \(detail)",
+        "\(soonest.provider.displayName) \(detail)"
+          + (others > 0 ? " · \(others) more at risk" : ""),
         "",
-        worst.paceState)
+        soonest.paceState)
     }
-    let reset = Self.nextReset(in: summaries, now: now)
-    let nextReset = reset.map {
-      "Next reset: \($0.provider.displayName) \(DashboardFormat.countdown(to: $0.date, now: now))"
-    } ?? "Next reset unavailable"
     if !stale.isEmpty {
       let names = stale.prefix(2).map { $0.provider.displayName }
       let subject = names.joined(separator: " and ")
@@ -391,46 +393,26 @@ enum AllowanceBuilder {
         "\(subject) need\(stale.count == 1 ? "s" : "") fresh data",
         "", .stale)
     }
-    if !unknown.isEmpty {
-      let subject = unknown.count == 1
-        ? unknown[0].provider.displayName
-        : "\(unknown.count) plans"
-      return (
-        "\(subject) \(unknown.count == 1 ? "has" : "have") no pace forecast yet",
-        "", .unknown)
-    }
+    // A plan without a forecast never outranks a conclusion about the plans that
+    // do have one. Provider names keep their own capitalisation.
+    let nextReset = Self.nextReset(in: summaries, now: now).map {
+      "\($0.provider.displayName) resets \(DashboardFormat.countdown(to: $0.date, now: now))"
+    } ?? "next reset unavailable"
+    // "All plans" is only claimed when every plan has a forecast; otherwise
+    // say what is actually known, which is that none is at risk.
+    let hasUnknown = summaries.contains { $0.paceState == .unknown }
     if !onPace.isEmpty {
-      return ("All tracked plans are usable · \(nextReset.lowercased())", "", .onPace)
+      return (
+        hasUnknown ? "No plan at risk · \(nextReset)" : "All plans on track · \(nextReset)",
+        "", .onPace)
     }
     if !reserve.isEmpty {
-      return ("All tracked plans have reserve · \(nextReset.lowercased())", "", .reserve(percent: 0))
+      return (
+        hasUnknown ? "No plan at risk · \(nextReset)" : "All plans have reserve · \(nextReset)",
+        "", .reserve(percent: 0))
     }
-    return (
-      "Current pace is unavailable", "", .unknown)
-  }
-
-  /// "1 plan has reserve" / "2 other plans remain on pace".
-  private static func plans(_ count: Int, singular: String, plural: String, other: Bool = false)
-    -> String
-  {
-    "\(count)\(other ? " other" : "") plan\(count == 1 ? "" : "s") \(count == 1 ? singular : plural)"
-  }
-
-  private static func healthySummary(reserve: Int, onPace: Int, other: Bool) -> String? {
-    if reserve == 0, onPace == 0 { return nil }
-    if reserve == 0 {
-      return Self.plans(onPace, singular: "remains on pace", plural: "remain on pace", other: other)
-    }
-    if onPace == 0 {
-      return Self.plans(reserve, singular: "has reserve", plural: "have reserve", other: other)
-    }
-    return Self.plans(reserve, singular: "has reserve", plural: "have reserve", other: other)
-      + " · \(onPace) \(onPace == 1 ? "is" : "are") on pace"
-  }
-
-  private static func paceUnavailable(_ count: Int, other: Bool = false) -> String {
-    Self.plans(
-      count, singular: "has no pace forecast", plural: "have no pace forecast", other: other)
+    // Nothing is exhausted, behind, stale or healthy: every plan is unknown.
+    return ("No pace forecast yet · \(nextReset)", "", .unknown)
   }
 
   private static func nextReset(in summaries: [ProviderSummary], now: Date) -> (

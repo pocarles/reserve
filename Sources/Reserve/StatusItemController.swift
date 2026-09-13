@@ -226,9 +226,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && staleSummary.secondary.isEmpty
       && oneHealthyStale.primary.hasSuffix("needs fresh data")
       && mixedStale.primary.hasSuffix("needs fresh data")
-      && mixedHealthy.primary.hasPrefix("All tracked plans are usable")
-      && freshWithoutForecast.primary.contains(previewSummaries[0].provider.displayName)
-      && freshWithoutForecast.primary.hasSuffix("has no pace forecast yet")
+      && mixedHealthy.primary.hasPrefix("All plans on track")
+      // A plan without a forecast never takes the headline from plans that are fine.
+      && freshWithoutForecast.primary.hasPrefix("No plan at risk")
+      && !freshWithoutForecast.primary.contains("No pace forecast")
       && freshWithoutForecast.secondary.isEmpty
     let forecastNow = Date(timeIntervalSinceReferenceDate: 800_000_000)
     let forecastReset = forecastNow.addingTimeInterval(4 * 86_400 + 2 * 3_600)
@@ -1284,7 +1285,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     tick(fresh, later)
     guard let afterMarker = meter.paceRemainingPercentForTesting,
       afterMarker < beforeMarker, reset.stringValue != beforeReset,
-      reset.stringValue.hasPrefix("resets at ") else { return false }
+      // The daily window crossed the twelve-hour line, so its reset is now a
+      // countdown rather than a clock time.
+      reset.stringValue.hasPrefix("resets in ") else { return false }
     tick(fresh, now.addingTimeInterval(31 * 60))
     guard meter.paceRemainingPercentForTesting == nil,
       (meter.accessibilityValue() as? String ?? "").contains("last known") else { return false }
@@ -1334,7 +1337,34 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       snapshot: UsageSnapshot(provider: .openAI, windows: [
         UsageWindow(id: "session", label: "5 hours", usedPercent: 5, windowMinutes: 300,
           resetsAt: now.addingTimeInterval(295 * 60))], source: "UI early fixture")), now: now)
-    return !collapsed.contains { $0.identifier?.rawValue == "secondary-build-share" }
+    // A reset within half a day reads as a countdown; beyond it, as a weekday or
+    // a date.
+    let soon = Allowance(id: "soon", title: "Weekly limit", usedPercent: 50,
+      resetsAt: now.addingTimeInterval(80 * 60), projection: nil, isPrimary: true,
+      paceState: .onPace)
+    let far = Allowance(id: "far", title: "Weekly limit", usedPercent: 50,
+      resetsAt: now.addingTimeInterval(2 * 86_400), projection: nil, isPrimary: true,
+      paceState: .onPace)
+    let relativeResetsRead =
+      DashboardFormat.limitLine(soon, now: now) == "Weekly limit · resets in 1h 20m"
+      && DashboardFormat.resetLine(soon, now: now) == "Resets in 1h 20m"
+      && DashboardFormat.secondaryDetail(soon, now: now) == "resets in 1h 20m"
+      && !DashboardFormat.limitLine(far, now: now).contains("resets in ")
+      && DashboardFormat.limitLine(far, now: now).hasPrefix("Weekly limit · resets ")
+    // The pace marker is the one element whose meaning is not written beside it.
+    let markedMeter = ReserveMeter(remainingPercent: 40, paceRemainingPercent: 58,
+      label: "Weekly limit", color: ReserveColor.onPace)
+    let unmarkedMeter = ReserveMeter(remainingPercent: 40, paceRemainingPercent: nil,
+      label: "Weekly limit", color: ReserveColor.onPace)
+    let markerIsExplained =
+      markedMeter.toolTip
+        == "Marker: capacity that should remain now at an even pace (58%)"
+      && (markedMeter.accessibilityValue() as? String ?? "").contains("40 percent left")
+      && (markedMeter.accessibilityValue() as? String ?? "").contains("even pace (58%)")
+      && unmarkedMeter.toolTip == nil
+      && unmarkedMeter.accessibilityValue() as? String == "40 percent left"
+    return relativeResetsRead && markerIsExplained && Self.headlineChoiceChecks()
+      && !collapsed.contains { $0.identifier?.rawValue == "secondary-build-share" }
       && expanded.contains { $0.identifier?.rawValue == "secondary-build-share" }
       && expandedLabels.contains("90% of pool used")
       && !expandedLabels.contains("10% left")
@@ -1342,9 +1372,68 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && forecastLabels(card(noPeriodSummary)).isEmpty
       && forecastLabels(card(exhaustedSummary)).contains { $0.hasPrefix("Limit exhausted · resets") }
       && forecastLabels(card(earlySummary)) == ["Too early to forecast"]
-      && forecastLabels(stale) == ["Update needed for a forecast"]
+      // The freshness banner, the tinted surface and the "last known" label are
+      // the staleness signals; the forecast line is not a fourth one.
+      && forecastLabels(stale).isEmpty
       && ProviderSetupAction.install.toolTip(for: .copilot) == "Open official installation instructions for Copilot"
       && ProviderSetupAction.update.toolTip(for: .copilot) == "Open official update instructions for Copilot"
+  }
+
+  /// The headline chooser, checked against the two cases that used to mislead:
+  /// the loudest deficit outranking the soonest run-out, and a plan without a
+  /// forecast outranking plans that are fine.
+  private static func headlineChoiceChecks() -> Bool {
+    let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    func plan(
+      _ provider: ProviderID, usedPercent: Double, resetsInDays: Double,
+      windowMinutes: Int? = 10_080
+    ) -> ProviderSummary {
+      AllowanceBuilder.summary(
+        for: ProviderViewState(
+          provider: provider,
+          snapshot: UsageSnapshot(
+            provider: provider,
+            windows: [
+              UsageWindow(
+                id: "weekly", label: "Weekly", usedPercent: usedPercent,
+                windowMinutes: windowMinutes,
+                resetsAt: now.addingTimeInterval(resetsInDays * 86_400))
+            ],
+            fetchedAt: now, source: "headline fixture")),
+        now: now)
+    }
+    // Grok is 23 points behind pace and runs out tomorrow. OpenAI is 31 points
+    // behind and runs out later, so the larger gap must not take the headline.
+    let soonest = plan(.grok, usedPercent: 80, resetsInDays: 3)
+    let loudest = plan(.openAI, usedPercent: 60, resetsInDays: 5)
+    guard let soonestRunsOut = soonest.primary?.runsOutAt,
+      let loudestRunsOut = loudest.primary?.runsOutAt,
+      soonestRunsOut < loudestRunsOut,
+      let soonestGap = soonest.paceState.deficitPercent,
+      let loudestGap = loudest.paceState.deficitPercent,
+      soonestGap < loudestGap
+    else { return false }
+    let reserve = plan(.anthropic, usedPercent: 20, resetsInDays: 2)
+    let onPace = plan(.cursor, usedPercent: 57, resetsInDays: 3)
+    let unknown = plan(.copilot, usedPercent: 40, resetsInDays: 6, windowMinutes: nil)
+    guard reserve.paceState.reservePercent != nil, onPace.paceState == .onPace,
+      unknown.paceState == .unknown
+    else { return false }
+    let twoDeficits = AllowanceBuilder.headline(for: [loudest, soonest], now: now)
+    let oneDeficit = AllowanceBuilder.headline(for: [soonest], now: now)
+    let unknownBesideHealthy = AllowanceBuilder.headline(for: [unknown, reserve], now: now)
+    let mixedHealthy = AllowanceBuilder.headline(for: [reserve, onPace], now: now)
+    let onlyUnknown = AllowanceBuilder.headline(for: [unknown], now: now)
+    return twoDeficits.primary == "Grok may run out 2d 0h before reset · 1 more at risk"
+      && twoDeficits.state == soonest.paceState
+      && oneDeficit.primary == "Grok may run out 2d 0h before reset"
+      // Provider names keep their own capitalisation in the reset phrase.
+      && unknownBesideHealthy.primary == "No plan at risk · Claude resets in 2d 0h"
+      && unknownBesideHealthy.state == .reserve(percent: 0)
+      && mixedHealthy.primary == "All plans on track · Claude resets in 2d 0h"
+      && mixedHealthy.state == .onPace
+      && onlyUnknown.primary == "No pace forecast yet · Copilot resets in 6d 0h"
+      && onlyUnknown.state == .unknown
   }
 
   private static func descendants(of view: NSView) -> [NSView] {
