@@ -1378,6 +1378,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     if state?.snapshot?.observationTimeKnown == false, state?.error == nil {
       return ("Using saved usage", .secondaryLabelColor)
     }
+    if provider == .windsurf, state?.error != nil {
+      // The desktop app refreshes its cache only while its settings panel is
+      // open. That is a step for the user, not a failed connection.
+      return ("Open Devin Settings to refresh", .systemOrange)
+    }
     if state?.requiresKeychainAccess == true { return ("Permission needed", .systemOrange) }
     if state?.usageAccessDenied == true { return ("Usage access denied", .systemOrange) }
     if state?.isConnecting == true { return ("Connecting", .secondaryLabelColor) }

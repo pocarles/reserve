@@ -354,7 +354,7 @@ final class ProviderConnectionPanel: NSPanel {
       self.closeButton.title = "Close"
     case .waitingForDesktop:
       self.heading.stringValue = "Open your Windsurf usage"
-      self.message.stringValue = "In Devin Desktop or Windsurf, sign in and open your usage settings. Then return here and choose Check again."
+      self.message.stringValue = "In Devin Desktop or Windsurf, sign in and open Devin Settings. Then return here and choose Check again."
       self.privacy.stringValue = "Reserve reads only the plan usage saved by the desktop app. It does not access your password or protected sign-in."
       action = "Check again"
     }
@@ -372,7 +372,7 @@ final class ProviderConnectionPanel: NSPanel {
     if self.provider == .windsurf {
       switch phase {
       case .needsInstall, .needsUpdate:
-        self.message.stringValue = "Install or update Devin Desktop, then sign in and open its usage settings."
+        self.message.stringValue = "Install or update Devin Desktop, then sign in and open Devin Settings."
         self.privacy.stringValue = "Opens the official download page. Return here after setup."
         action = "Open download page"
       case .connected:
@@ -380,7 +380,7 @@ final class ProviderConnectionPanel: NSPanel {
         self.message.stringValue = "Reserve can read usage saved by Devin Desktop. Refresh your usage in the desktop app to update these numbers."
         self.privacy.stringValue = "Cached usage can be older than your account page. Reserve marks old observations as stale."
       case .unavailable:
-        self.message.stringValue = "The saved usage is missing or expired. Open usage settings in Devin Desktop, then check again here."
+        self.message.stringValue = "The saved usage is missing or older than its last reset. Devin Desktop refreshes it only while Devin Settings is open. Open that panel, then check again here."
         action = "Open Devin Desktop"
       default: break
       }

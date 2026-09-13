@@ -125,7 +125,10 @@ public struct WindsurfProvider: UsageProvider {
   }
 
   private static func stale() -> UsageProviderError {
-    .unavailable("Windsurf's saved usage has expired. Open Devin Desktop's usage settings, then check again in Reserve.")
+    // Devin Desktop rewrites this cache only while its Devin Settings panel is
+    // open, so once every saved window has passed its reset there is nothing
+    // current to show until the user opens that panel again.
+    .unavailable("Windsurf's saved usage is older than its last reset. In Devin Desktop, open Devin Settings, then check again in Reserve.")
   }
 }
 
@@ -179,6 +182,6 @@ enum WindsurfPlanCache {
   }
 
   private static func missing() -> UsageProviderError {
-    .credentialsNotFound("Open Devin Desktop or Windsurf and view your usage settings, then choose Check again in Reserve.")
+    .credentialsNotFound("In Devin Desktop or Windsurf, sign in and open Devin Settings, then choose Check again in Reserve.")
   }
 }

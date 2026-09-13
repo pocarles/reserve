@@ -53,7 +53,7 @@ start enabled only when their helper is already installed. Saved choices are pre
 - Grok Build 1.0.0 or newer, signed into an X.AI subscription; and
 - `cursor-agent`, authenticated with `cursor-agent login`, for an individual
   Cursor account. Teams and Enterprise Admin API keys are not supported;
-- Devin Desktop or legacy Windsurf, signed in with its usage settings opened,
+- Devin Desktop or legacy Windsurf, signed in with its Devin Settings panel opened,
   for cached Windsurf plan usage;
 - Copilot CLI, signed into GitHub. Setup opens GitHub’s installation instructions
   if the helper is missing.

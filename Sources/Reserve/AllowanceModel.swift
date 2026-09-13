@@ -153,13 +153,13 @@ enum ProviderSetupAction: String, Equatable {
     case .update: "Update \(provider.displayName) to resume plan limits"
     case .signIn: "Sign in to \(provider.displayName) to show plan limits"
     case .allowAccess: "Waiting for permission to read usage"
-    case .openDesktop: "Open Devin Desktop's usage settings, then check again"
+    case .openDesktop: "Open Devin Settings in Devin Desktop, then check again"
     }
   }
 
   func toolTip(for provider: ProviderID) -> String {
     if provider == .windsurf {
-      return "Open Devin Desktop or Windsurf, view usage settings, then check again in Reserve"
+      return "Open Devin Settings in Devin Desktop or Windsurf, then check again in Reserve"
     }
     if !ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation {
       if self == .install { return "Open official installation instructions for \(provider.displayName)" }
