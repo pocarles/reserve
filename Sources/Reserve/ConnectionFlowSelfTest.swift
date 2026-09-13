@@ -64,7 +64,6 @@ enum ConnectionFlowSelfTest {
     let responses = ConnectionTestResponses()
     var openedBrowserCount = 0
     var lastOpenedBrowserURL: URL?
-    var openedDesktopCount = 0
     let store = UsageStore(
       defaults: defaults, startAutomatically: false, cache: cache,
       fetchOverride: { provider, allowAccess in
@@ -73,33 +72,27 @@ enum ConnectionFlowSelfTest {
       loginCommandOverride: { _ in
         ("/bin/sh", [directory.appendingPathComponent("login.sh").path])
       },
-      openLoginURL: { url in openedBrowserCount += 1; lastOpenedBrowserURL = url; return true },
-      openWindsurfApplication: { openedDesktopCount += 1; return true })
+      openLoginURL: { url in openedBrowserCount += 1; lastOpenedBrowserURL = url; return true })
     let coordinator = ProviderSetupCoordinator(store: store)
     defer { coordinator.close() }
 
-    expect(!store.isEnabled(.windsurf), "Windsurf did not start disabled")
-    await responses.set(.signedOut)
-    coordinator.start(.windsurf)
-    await settle { coordinator.phase == .waitingForDesktop }
-    expect(coordinator.phase == .waitingForDesktop && openedDesktopCount == 1,
-      "Windsurf setup did not open the desktop app and wait for Check again")
-    expect(openedBrowserCount == 0 && !store.keychainReadAllowed(for: .windsurf),
-      "Windsurf cache setup opened browser sign-in or enabled Keychain access")
+    // A manually installed helper starts disabled, and a failed refresh must
+    // keep the last good snapshot while disconnect clears it.
+    expect(!store.isEnabled(.copilot), "Copilot did not start disabled")
     await responses.set(.success)
-    click("connection-primary", in: coordinator.panel)
-    await settle { coordinator.phase == .connected }
-    expect(coordinator.phase == .connected, "Windsurf Check again did not load usage")
-    let windsurfSnapshot = store.states[.windsurf]?.snapshot
-    coordinator.close()
+    store.setEnabled(.copilot, enabled: true, refreshImmediately: false)
+    store.refresh(.copilot)
+    await settle { store.states[.copilot]?.isRefreshing == false }
+    let copilotSnapshot = store.states[.copilot]?.snapshot
+    expect(copilotSnapshot != nil, "an enabled provider did not load usage from its fixture")
     await responses.set(.offline)
-    store.refresh(.windsurf)
-    await settle { store.states[.windsurf]?.isRefreshing == false }
-    expect(store.states[.windsurf]?.snapshot == windsurfSnapshot && store.states[.windsurf]?.error != nil,
-      "Failed Windsurf refresh discarded the last good snapshot")
-    store.disconnect(.windsurf)
-    expect(!store.isEnabled(.windsurf) && store.states[.windsurf]?.snapshot == nil,
-      "Windsurf disconnect did not clear the cached snapshot")
+    store.refresh(.copilot)
+    await settle { store.states[.copilot]?.isRefreshing == false }
+    expect(store.states[.copilot]?.snapshot == copilotSnapshot && store.states[.copilot]?.error != nil,
+      "a failed refresh discarded the last good snapshot")
+    store.disconnect(.copilot)
+    expect(!store.isEnabled(.copilot) && store.states[.copilot]?.snapshot == nil,
+      "disconnect did not clear the cached snapshot")
 
     await responses.set(.missingHelper)
     coordinator.start(.openAI)
@@ -256,6 +249,28 @@ enum ConnectionFlowSelfTest {
       "failed login retried automatically instead of offering an explicit retry")
     coordinator.close()
 
+    // A helper can report an error after the account was already connected in
+    // the browser. Usage decides whether the sign-in finished, not the exit
+    // status, and the browser must not open a second time to prove it.
+    do {
+      try "#!/bin/sh\necho https://auth.openai.com/reserve-test\nsleep 1\nexit 1\n".write(
+        to: directory.appendingPathComponent("login.sh"), atomically: true, encoding: .utf8)
+    } catch { failures.append("verified-login fixture could not be saved") }
+    await responses.set(.signedOut)
+    openedBrowserCount = 0
+    coordinator.start(.openAI)
+    await settle { store.canReopenLoginBrowser(.openAI) }
+    await responses.set(.success)
+    await settle { coordinator.phase == .connected }
+    expect(coordinator.phase == .connected && openedBrowserCount == 1,
+      "a completed sign-in was discarded because its helper exited with an error")
+    expect(store.states[.openAI]?.requiresConnection == false
+      && store.states[.openAI]?.isConnecting == false
+      && store.states[.openAI]?.error == nil,
+      "verified sign-in left the account marked as unfinished")
+    coordinator.close()
+    openedBrowserCount = 0
+
     // Cursor prints a storage error but exits zero. Also cover a successful
     // exit whose subsequent status check still finds no saved session.
     for diagnostic in ["Failed to store authentication tokens. Please try again.", ""] {
@@ -329,17 +344,17 @@ enum ConnectionFlowSelfTest {
       do { try preview.render(to: evidence.appendingPathComponent("\(name).png")) }
       catch { failures.append("\(name) screenshot could not be saved") }
     }
-    let desktopPreview = ProviderConnectionPanel(provider: .windsurf)
-    defer { desktopPreview.close() }
+    let manualPreview = ProviderConnectionPanel(provider: .copilot)
+    defer { manualPreview.close() }
     for (name, phase) in [
-      ("windsurf-install", ProviderSetupCoordinator.Phase.needsInstall),
-      ("windsurf-desktop", .waitingForDesktop), ("windsurf-connected", .connected),
-      ("windsurf-unavailable", .unavailable),
+      ("copilot-install", ProviderSetupCoordinator.Phase.needsInstall),
+      ("copilot-manual-setup", .waitingForManualSetup), ("copilot-connected", .connected),
+      ("copilot-unavailable", .unavailable),
     ] {
-      desktopPreview.update(phase: phase)
-      desktopPreview.show()
+      manualPreview.update(phase: phase)
+      manualPreview.show()
       try? await Task.sleep(for: .milliseconds(50))
-      if let root = desktopPreview.contentView {
+      if let root = manualPreview.contentView {
         for field in LifecycleSelfTest.descendants(of: root).compactMap({ $0 as? NSTextField }) {
           let cellHeight = field.cell?.cellSize(forBounds:
             NSRect(x: 0, y: 0, width: field.bounds.width, height: 1000)).height ?? 0
@@ -347,7 +362,7 @@ enum ConnectionFlowSelfTest {
           expect(root.bounds.contains(field.convert(field.bounds, to: root)), "\(name) text exceeds window")
         }
       }
-      do { try desktopPreview.render(to: evidence.appendingPathComponent("\(name).png")) }
+      do { try manualPreview.render(to: evidence.appendingPathComponent("\(name).png")) }
       catch { failures.append("\(name) screenshot could not be saved") }
     }
     return failures
@@ -371,8 +386,7 @@ enum ConnectionFlowSelfTest {
         fetchOverride: { provider, allowAccess in
           try await probe.fetch(provider, allowAccess: allowAccess)
         },
-        openLoginURL: { _ in failures.append("\(scenario): unexpectedly opened sign-in"); return false },
-        openWindsurfApplication: { false })
+        openLoginURL: { _ in failures.append("\(scenario): unexpectedly opened sign-in"); return false })
       for provider in ProviderID.allCases {
         store.setEnabled(provider, enabled: false, refreshImmediately: false)
       }
@@ -395,7 +409,7 @@ enum ConnectionFlowSelfTest {
           failures.append("explicit access did not finish cleanly while a sweep waited")
         }
       } else if scenario == "bounded-sweep" {
-        let enabled: Set<ProviderID> = [.openAI, .grok, .cursor, .windsurf]
+        let enabled: Set<ProviderID> = [.openAI, .grok, .cursor, .copilot]
         for provider in enabled {
           store.setEnabled(provider, enabled: true, refreshImmediately: false)
         }

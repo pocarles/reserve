@@ -135,7 +135,6 @@ enum ProviderSetupAction: String, Equatable {
   case update
   case signIn
   case allowAccess
-  case openDesktop
 
   var buttonTitle: String {
     switch self {
@@ -143,7 +142,6 @@ enum ProviderSetupAction: String, Equatable {
     case .update: "Update"
     case .signIn: "Sign in"
     case .allowAccess: "Allow access"
-    case .openDesktop: "Open app"
     }
   }
 
@@ -153,14 +151,10 @@ enum ProviderSetupAction: String, Equatable {
     case .update: "Update \(provider.displayName) to resume plan limits"
     case .signIn: "Sign in to \(provider.displayName) to show plan limits"
     case .allowAccess: "Waiting for permission to read usage"
-    case .openDesktop: "Open Devin Desktop's usage settings, then check again"
     }
   }
 
   func toolTip(for provider: ProviderID) -> String {
-    if provider == .windsurf {
-      return "Open Devin Desktop or Windsurf, view usage settings, then check again in Reserve"
-    }
     if !ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation {
       if self == .install { return "Open official installation instructions for \(provider.displayName)" }
       if self == .update { return "Open official update instructions for \(provider.displayName)" }
@@ -174,8 +168,6 @@ enum ProviderSetupAction: String, Equatable {
       "Sign in with \(provider.displayName) in your browser"
     case .allowAccess:
       "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
-    case .openDesktop:
-      "Open the desktop app to update saved usage"
     }
   }
 }
@@ -262,7 +254,6 @@ enum AllowanceBuilder {
   }
 
   private static func connectionToolAvailable(for provider: ProviderID) -> Bool {
-    if provider == .windsurf { return WindsurfProvider.installedApplicationURL() != nil }
     let executable = ProviderDescriptor.forProvider(provider).helper.executable
     return BinaryLocator.find(executable) != nil
   }
@@ -307,7 +298,6 @@ enum AllowanceBuilder {
     if state.requiresUpdate { return .update }
     if state.requiresInstallation { return .install }
     if state.requiresConnection { return .signIn }
-    if state.provider == .windsurf, state.error != nil { return .openDesktop }
     guard state.snapshot == nil, state.error == nil else { return nil }
     let available = connectionToolAvailable ?? Self.connectionToolAvailable(for: state.provider)
     return available ? .signIn : .install

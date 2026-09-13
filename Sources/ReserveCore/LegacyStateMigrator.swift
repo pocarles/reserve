@@ -155,7 +155,7 @@ public enum LegacyStateMigrator {
   private static func validSnapshots(_ data: Data) -> Bool {
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = .iso8601
-    guard let snapshots = try? decoder.decode([UsageSnapshot].self, from: data),
+    guard let snapshots = try? UsageSnapshot.decodePersistedList(data, using: decoder),
       snapshots.count <= 32
     else { return false }
     return snapshots.allSatisfy { $0.windows.count <= UsageSnapshot.maximumWindows }

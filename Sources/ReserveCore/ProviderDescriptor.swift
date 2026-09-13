@@ -4,7 +4,7 @@ import Foundation
 /// stays in its adapter; shared setup and presentation facts live here.
 public struct ProviderDescriptor: Sendable {
   public enum StatusFormat: Sendable { case statuspage, rss }
-  public enum AuthenticationStrategy: Sendable { case cliOAuth, protectedSession, desktopCache }
+  public enum AuthenticationStrategy: Sendable { case cliOAuth, protectedSession }
   public enum InstallationStrategy: Sendable { case automaticHelper, manualHelper }
   public struct Capabilities: OptionSet, Sendable {
     public let rawValue: Int
@@ -13,7 +13,6 @@ public struct ProviderDescriptor: Sendable {
     public static let localHistory = Self(rawValue: 1 << 1)
     public static let accountHistory = Self(rawValue: 1 << 2)
     public static let extraSpending = Self(rawValue: 1 << 3)
-    public static let cachedAllowance = Self(rawValue: 1 << 4)
   }
 
   public let id: ProviderID
@@ -59,13 +58,6 @@ public struct ProviderDescriptor: Sendable {
         authenticationStrategy: .protectedSession,
         loginArguments: ["login"], loginDisplayName: "Cursor Agent",
         trustedLoginHosts: ["cursor.com", "auth.cursor.com", "www.cursor.com"])
-    case .windsurf:
-      Self(id: id, displayName: "Windsurf", executable: "Devin", helperName: "Devin Desktop",
-        installer: "https://windsurf.com/download", account: "https://windsurf.com/subscription/manage-plan",
-        status: "https://status.windsurf.com", capabilities: [.cachedAllowance, .extraSpending],
-        authenticationStrategy: .desktopCache, installationStrategy: .manualHelper,
-        loginArguments: [], loginDisplayName: "Devin Desktop",
-        trustedLoginHosts: ["windsurf.com", "www.windsurf.com"])
     case .copilot:
       Self(id: id, displayName: "Copilot", executable: "copilot", helperName: "Copilot CLI",
         installer: "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli",

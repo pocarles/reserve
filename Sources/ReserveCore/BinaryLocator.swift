@@ -104,6 +104,40 @@ public enum BinaryLocator {
     return permissions.uint16Value & 0o002 != 0
   }
 
+  /// The keys a helper Reserve starts on its own initiative is allowed to see.
+  /// `LC_*` is matched by prefix in addition to these.
+  private static let minimalEnvironmentKeys = [
+    "HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "SHELL", "LANG", "TERM",
+  ]
+
+  /// The environment for a helper Reserve starts by itself, such as a session
+  /// renewal: an allowlist rather than a filter.
+  ///
+  /// `childEnvironment` only removes the dynamic-linker controls, so every
+  /// unrelated API key in Reserve's own environment reached the helper. A
+  /// renewal is not a user-initiated command, so it gets only what a CLI needs
+  /// to find the user's own configuration, plus the keys the caller names.
+  public static func minimalChildEnvironment(
+    from environment: [String: String] = ProcessInfo.processInfo.environment,
+    keeping additionalKeys: [String] = []
+  ) -> [String: String] {
+    var result: [String: String] = [:]
+    for key in Self.minimalEnvironmentKeys + additionalKeys {
+      if let value = environment[key], !value.isEmpty { result[key] = value }
+    }
+    for (key, value) in environment where key.hasPrefix("LC_") && !value.isEmpty {
+      result[key] = value
+    }
+    // A helper that cannot find the home directory would look signed out.
+    if result["HOME"] == nil {
+      result["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
+    }
+    if result["PATH"] == nil {
+      result["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+    }
+    return result
+  }
+
   /// The environment a provider CLI is launched with: the user's, minus the
   /// dynamic-linker controls.
   ///

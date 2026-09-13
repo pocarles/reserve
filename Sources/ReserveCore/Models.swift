@@ -5,7 +5,6 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   case anthropic
   case grok
   case cursor
-  case windsurf
   case copilot
 
   public var id: String { self.rawValue }
@@ -259,7 +258,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
         Bool.self, forKey: .detailedUsageUnavailable) ?? false,
       creditBalanceMinorUnits: try container.decodeIfPresent(Int.self, forKey: .creditBalanceMinorUnits),
       observationTimeKnown: try container.decodeIfPresent(Bool.self, forKey: .observationTimeKnown)
-        ?? (container.decode(ProviderID.self, forKey: .provider) != .windsurf),
+        ?? true,
       checkedAt: try container.decodeIfPresent(Date.self, forKey: .checkedAt),
       availableResetCount: try container.decodeIfPresent(Int.self, forKey: .availableResetCount),
       accountTokenActivity: try container.decodeIfPresent(OpenAIAccountActivity.self, forKey: .accountTokenActivity))
@@ -309,6 +308,35 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
       creditBalanceMinorUnits: self.creditBalanceMinorUnits,
       observationTimeKnown: self.observationTimeKnown, checkedAt: self.checkedAt,
       availableResetCount: self.availableResetCount, accountTokenActivity: self.accountTokenActivity)
+  }
+}
+
+/// A persisted snapshot list can name a provider this build no longer supports.
+/// Those entries are skipped so one retired provider cannot discard a whole
+/// cache file. Any other malformed entry still fails the file.
+private struct PersistedSnapshotEntry: Decodable {
+  let snapshot: UsageSnapshot?
+
+  private enum CodingKeys: String, CodingKey { case provider }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let raw = try container.decode(String.self, forKey: .provider)
+    guard ProviderID(rawValue: raw) != nil else {
+      self.snapshot = nil
+      return
+    }
+    self.snapshot = try UsageSnapshot(from: decoder)
+  }
+}
+
+extension UsageSnapshot {
+  /// Reads a persisted snapshot list, keeping every entry whose provider this
+  /// build still supports.
+  public static func decodePersistedList(_ data: Data, using decoder: JSONDecoder) throws
+    -> [UsageSnapshot]
+  {
+    try decoder.decode([PersistedSnapshotEntry].self, from: data).compactMap(\.snapshot)
   }
 }
 

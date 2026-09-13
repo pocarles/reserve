@@ -26,7 +26,9 @@ public actor SnapshotCache {
       [.posixPermissions: NSNumber(value: Int16(0o600))],
       ofItemAtPath: self.fileURL.path)
     guard let data = BoundedFileReader.read(self.fileURL, maximumBytes: self.maximumBytes),
-      let snapshots = try? self.decoder.decode([UsageSnapshot].self, from: data)
+      // A file written by an older Reserve can still name a retired provider.
+      // Those entries are skipped so the remaining snapshots survive.
+      let snapshots = try? UsageSnapshot.decodePersistedList(data, using: self.decoder)
     else { return [:] }
     var newestByProvider: [ProviderID: UsageSnapshot] = [:]
     for snapshot in snapshots {

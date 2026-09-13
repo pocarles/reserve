@@ -23,12 +23,11 @@ struct ReserveProbe {
     case "anthropic", "claude": selected = [.anthropic]
     case "grok": selected = [.grok]
     case "cursor": selected = [.cursor]
-    case "windsurf", "devin": selected = [.windsurf]
     case "copilot": selected = [.copilot]
     case nil, "all": selected = ProviderID.allCases
     default:
       FileHandle.standardError.write(
-        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|windsurf|copilot|local|all] [--insights]\n".utf8))
+        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|copilot|local|all] [--insights]\n".utf8))
       exit(64)
     }
 
@@ -41,7 +40,6 @@ struct ReserveProbe {
         case .anthropic: AnthropicProvider(allowKeychainRead: allowClaudeKeychainRead)
         case .grok: GrokProvider()
         case .cursor: CursorProvider(allowKeychainRead: allowCursorKeychainRead, includeAccountUsage: includeInsights)
-        case .windsurf: WindsurfProvider()
         case .copilot: CopilotProvider()
         }
       do {

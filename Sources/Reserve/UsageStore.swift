@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import ReserveCore
 
@@ -72,7 +71,6 @@ final class UsageStore {
   private let fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)?
   private let loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))?
   private let openLoginURL: (URL) -> Bool
-  private let openWindsurfApplication: () -> Bool
   private let localUsageScanner = LocalUsageScanner()
   private let serviceStatusClient = ServiceStatusClient()
   private let defaults: UserDefaults
@@ -86,6 +84,7 @@ final class UsageStore {
   private var loginOutputs: [ProviderID: Pipe] = [:]
   private var claudeBrowserPipe: ClaudeLoginBrowserPipe?
   private var loginStorageFailures: Set<ProviderID> = []
+  private var loginTimeoutMessages: [ProviderID: String] = [:]
   private var loginOutputBuffers: [ProviderID: Data] = [:]
   private var loginOutputGates: [ProviderID: BoundedOutputGate] = [:]
   private var loginGenerations: [ProviderID: Int] = [:]
@@ -152,17 +151,12 @@ final class UsageStore {
     cache: SnapshotCache = SnapshotCache(),
     fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
-    openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) },
-    openWindsurfApplication: @escaping () -> Bool = {
-      guard let app = WindsurfProvider.installedApplicationURL() else { return false }
-      return NSWorkspace.shared.open(app)
-    }
+    openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) }
   ) {
     self.cache = cache
     self.fetchOverride = fetchOverride
     self.loginCommandOverride = loginCommandOverride
     self.openLoginURL = openLoginURL
-    self.openWindsurfApplication = openWindsurfApplication
     self.defaults = defaults
     self.automaticRefreshEnabled = startAutomatically
     self.notifications = ReserveNotifications(
@@ -458,6 +452,8 @@ final class UsageStore {
       guard let raw = self.defaults.string(forKey: "menuBar.provider"), raw != "reserve" else {
         return nil
       }
+      // A pin saved for a provider this build no longer supports falls back to
+      // the automatic choice rather than pinning nothing at all.
       return ProviderID(rawValue: raw)
     }
     set {
@@ -585,14 +581,6 @@ final class UsageStore {
   }
 
   func connect(_ provider: ProviderID, forceSignIn: Bool = false, onFinished: (() -> Void)? = nil) {
-    if provider == .windsurf {
-      if !self.openWindsurfApplication() {
-        self.states[provider]?.error = "Devin Desktop could not open. Open it from Applications, then check again."
-        self.changed()
-      }
-      onFinished?()
-      return
-    }
     if !forceSignIn, self.states[provider]?.requiresKeychainAccess == true
     {
       self.allowKeychainAccess(for: provider, onFinished: onFinished)
@@ -654,7 +642,11 @@ final class UsageStore {
       }
       // Supply the optional welcome confirmation before launching. A delayed
       // write can otherwise reach a cancelled or already-exited login process.
-      try input.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
+      // Claude Code reads its stdin as a pasted authorization code and answers
+      // an empty line with "Invalid code", so it is left alone.
+      if provider != .anthropic {
+        try input.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
+      }
       try process.run()
       self.loginProcesses[provider] = process
       self.loginInputs[provider] = input
@@ -700,18 +692,18 @@ final class UsageStore {
       self.states[provider]?.requiresConnection = false
       self.changed()
       self.loginTimeoutTasks[provider]?.cancel()
+      self.loginTimeoutMessages.removeValue(forKey: provider)
       self.loginTimeoutTasks[provider] = Task { [weak self, weak process] in
         try? await Task.sleep(for: .seconds(300))
         guard !Task.isCancelled, process?.isRunning == true else { return }
-        if let process { ProcessRunner.stop(process) }
         await MainActor.run {
           guard self?.loginGenerations[provider] == generation else { return }
-          self?.states[provider]?.error =
+          // Stopping the helper ends in finishLogin, which checks usage before
+          // calling the sign-in lost. The timeout only supplies the wording.
+          self?.loginTimeoutMessages[provider] =
             "\(configuration.displayName) sign-in timed out. Use Sign in to try again."
-          self?.states[provider]?.requiresConnection = true
-          self?.states[provider]?.isConnecting = false
-          self?.changed()
         }
+        if let process { ProcessRunner.stop(process) }
       }
     } catch {
       if provider == .anthropic {
@@ -1072,20 +1064,6 @@ final class UsageStore {
     self.states[.cursor]?.serviceStatus = ProviderServiceStatus(
       provider: .cursor, health: .operational, detail: "All systems operational",
       pageURL: URL(string: "https://status.cursor.com")!)
-    self.states[.windsurf] = ProviderViewState(
-      provider: .windsurf,
-      snapshot: UsageSnapshot(
-        provider: .windsurf, planName: "Pro",
-        windows: [
-          UsageWindow(id: "weekly", label: "Weekly", usedPercent: 32,
-            windowMinutes: 10_080, resetsAt: now.addingTimeInterval(3 * 86_400)),
-          UsageWindow(id: "daily", label: "Daily", usedPercent: 20,
-            windowMinutes: 1_440, resetsAt: now.addingTimeInterval(12 * 3_600)),
-        ], fetchedAt: now.addingTimeInterval(-120), source: "Devin Desktop account cache",
-        creditBalanceMinorUnits: 1_000, observationTimeKnown: false, checkedAt: now))
-    self.states[.windsurf]?.serviceStatus = ProviderServiceStatus(
-      provider: .windsurf, health: .operational, detail: "All systems operational",
-      pageURL: URL(string: "https://status.windsurf.com")!)
     self.states[.copilot] = ProviderViewState(provider: .copilot,
       snapshot: UsageSnapshot(provider: .copilot, planName: "Pro", windows: [
         UsageWindow(id: "premium_interactions", label: "Premium usage", usedPercent: 18,
@@ -1104,7 +1082,6 @@ final class UsageStore {
       "provider.anthropic.enabled": BinaryLocator.find("claude") != nil,
       "provider.grok.enabled": BinaryLocator.find("grok") != nil,
       "provider.cursor.enabled": false,
-      "provider.windsurf.enabled": false,
       "provider.copilot.enabled": false,
       // Reading Claude Code's Keychain item is another application's OAuth
       // token, so it is opt-in and stays off until asked for.
@@ -1178,18 +1155,41 @@ final class UsageStore {
         }
         completion?()
       }) { self.changed() }
+    } else if self.isEnabled(provider) {
+      // A helper can exit with an error after the account was already
+      // connected in the browser, and Grok's own log shows exactly that.
+      // The usage check decides, not the exit status.
+      if !self.refresh(provider, queueIfBusy: true, onFinished: { [weak self] in
+        guard let self else {
+          completion?()
+          return
+        }
+        if self.states[provider]?.requiresConnection == true {
+          self.markLoginNotCompleted(provider)
+        }
+        completion?()
+      }) { self.changed() }
     } else {
-      self.states[provider]?.requiresConnection = true
-      self.states[provider]?.requiresInstallation = false
-      self.states[provider]?.requiresUpdate = false
-      self.states[provider]?.usageAccessDenied = false
-      if self.states[provider]?.error == nil {
-        self.states[provider]?.error =
-          "\(provider.displayName) sign-in was not completed. Try again when you are ready."
-      }
-      self.changed()
+      self.markLoginNotCompleted(provider)
       completion?()
     }
+  }
+
+  /// The verified failure state: the helper ended badly and no usable session
+  /// was found afterwards.
+  private func markLoginNotCompleted(_ provider: ProviderID) {
+    let timeoutMessage = self.loginTimeoutMessages.removeValue(forKey: provider)
+    self.states[provider]?.requiresConnection = true
+    self.states[provider]?.requiresInstallation = false
+    self.states[provider]?.requiresUpdate = false
+    self.states[provider]?.usageAccessDenied = false
+    // A protected sign-in that only needs permission keeps its own explanation
+    // and its Allow access action.
+    if self.states[provider]?.requiresKeychainAccess != true {
+      self.states[provider]?.error = timeoutMessage
+        ?? "\(provider.displayName) sign-in was not completed. Try again when you are ready."
+    }
+    self.changed()
   }
 
   private func cleanUpLogin(_ provider: ProviderID) {
@@ -1475,7 +1475,6 @@ final class UsageStore {
           allowKeychainRead: self.cursorKeychainReadAllowed,
           allowKeychainInteraction: allowKeychainInteraction,
           includeAccountUsage: includeInsights)
-      case .windsurf: WindsurfProvider()
       case .copilot: CopilotProvider()
       }
     let previousHealth = self.states[provider]?.serviceStatus?.health

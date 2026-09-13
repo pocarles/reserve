@@ -2,7 +2,7 @@
 
 Reserve welcomes focused fixes and improvements that preserve its purpose: a
 small, local-first macOS capacity monitor for Codex, Claude, Grok, Cursor, and
-Windsurf.
+Copilot.
 
 ## Before opening a pull request
 

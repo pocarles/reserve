@@ -436,7 +436,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let fifthProviderReachable: Bool
     if let scroll = compactViews.compactMap({ $0 as? NSScrollView }).first,
       let document = scroll.documentView,
-      let fifth = compactViews.first(where: { $0.identifier?.rawValue == "provider-card-windsurf" })
+      let fifth = compactViews.first(where: { $0.identifier?.rawValue == "provider-card-copilot" })
     {
       document.layoutSubtreeIfNeeded()
       let fifthRect = fifth.convert(fifth.bounds, to: document)
@@ -1197,6 +1197,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.bringReserveWindowToFront(forClickedWindow: self.settingsWindow)
   }
 
+  /// Insights lives in the Settings window. Opened from the dashboard it must
+  /// come in front of the popover exactly as Settings does, or it lands behind.
+  private func showInsights() {
+    self.openInsights()
+    self.bringReserveWindowToFront(forClickedWindow: self.settingsWindow)
+  }
+
   private func connectProvider(_ provider: ProviderID) {
     self.popover.performClose(nil)
     DispatchQueue.main.async { [weak self] in self?.setupProvider(provider) }
@@ -1213,7 +1220,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           self?.store.selectMenuBarProvider(provider)
         },
         openSettings: { [weak self] in self?.showSettings() },
-        openInsights: { [weak self] in self?.openInsights() },
+        openInsights: { [weak self] in self?.showInsights() },
         dismiss: { [weak self] in self?.popover.performClose(nil) },
         toggleProviderDetail: { [weak self] provider in
           guard let self else { return }
@@ -1309,11 +1316,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         return (node as? NSTextField)?.stringValue
       }
     }
-    let savedSummary = AllowanceBuilder.summary(for: ProviderViewState(provider: .windsurf,
-      snapshot: UsageSnapshot(provider: .windsurf, windows: [weekly], fetchedAt: now,
+    // A snapshot whose observation time the provider did not report must not
+    // be given a forecast, whichever provider supplied it.
+    let savedSummary = AllowanceBuilder.summary(for: ProviderViewState(provider: .cursor,
+      snapshot: UsageSnapshot(provider: .cursor, windows: [weekly], fetchedAt: now,
         source: "UI saved fixture", observationTimeKnown: false)), now: now)
     let saved = card(savedSummary)
-    let savedLabels = Self.descendants(of: saved).compactMap { ($0 as? NSTextField)?.stringValue }
     let noPeriodSummary = AllowanceBuilder.summary(for: ProviderViewState(provider: .copilot,
       snapshot: UsageSnapshot(provider: .copilot, windows: [
         UsageWindow(id: "premium", label: "Premium requests", usedPercent: 40,
@@ -1331,7 +1339,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && expandedLabels.contains("90% of pool used")
       && !expandedLabels.contains("10% left")
       && forecastLabels(saved).isEmpty
-      && savedLabels.contains("Saved usage · age unknown")
       && forecastLabels(card(noPeriodSummary)).isEmpty
       && forecastLabels(card(exhaustedSummary)).contains { $0.hasPrefix("Limit exhausted · resets") }
       && forecastLabels(card(earlySummary)) == ["Too early to forecast"]

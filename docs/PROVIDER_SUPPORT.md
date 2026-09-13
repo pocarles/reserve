@@ -8,7 +8,7 @@ Start with a read operation that reports an account allowance and can run withou
 
 `ProviderDescriptor` contains the fixed provider names, helper definitions, account and status links, and capabilities. Add the provider identity and descriptor together, then implement its `UsageProvider` adapter and connection flow. Keep authentication specific to the provider. Shared contract tests should cover malformed values, stale data, cancellation, and the meaning of each displayed limit.
 
-Prefer an existing signed-in app. Make helper installation explicit, retain the last usable snapshot after a failed refresh, and explain how to recover. Do not request broader billing permissions merely to show an allowance. Do not treat a helper's process exit as proof that its account is connected.
+Prefer an existing signed-in app. Make helper installation explicit, retain the last usable snapshot after a failed refresh, and explain how to recover. Do not request broader billing permissions merely to show an allowance. Do not treat a helper's process exit as proof that its account is connected, in either direction: a sign-in helper that exits with an error may still have completed the sign-in, so a usage check decides. Let the provider's own helper renew its session and read the result from that helper's store; never perform its token exchange and never write its credentials.
 
 ## Existing providers
 
@@ -27,14 +27,48 @@ Pro/Max accounts. [Status-line documentation](https://code.claude.com/docs/en/st
 The direct connection remains available. Reserve retains explicit consent when
 macOS temporarily needs interaction; only a user choice revokes that consent.
 
+A stored access token lasts hours, and Claude Code renews it only when it runs.
+Rather than asking for a new browser sign-in, Reserve starts Claude Code's
+documented non-interactive login (`claude auth login --claudeai`) with the
+stored refresh token and scopes in an allowlisted environment that carries no
+unrelated API key, no browser hook, no inherited stdin, and its output
+discarded. Claude Code performs the refresh
+grant, rotates the token, and writes the result to its own store; Reserve
+re-reads that store and keeps the session in memory only. Reserve never
+performs the exchange itself and never writes a credential. Attempts are
+serialised with a 120-second cooldown, a 60-second time limit, and a ten-minute
+back-off after a failure, so a revoked session cannot turn every refresh into a
+helper launch. A renewal is skipped when its result would land in a Keychain
+item this pass did not read, whether because access was never granted or
+because the item was locked; the access request stays the answer there, and a
+browser sign-in is never proposed for a session Claude Code is still using.
+A rejected usage request triggers at most one renewal and one retry.
+[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+
 ### Grok
 
-Reserve caches the helper version until the executable changes. A billing 401
-causes one credential reread and one retry only if Grok has already renewed the
-same user's token. It does not start a speculative refresh command. Grok's
-source warns that terminating refresh-token rotation can orphan the saved
-session. A safe public renewal operation must be established before Reserve
-can initiate silent renewal itself. [Official refresh implementation](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-login/src/manager/remedy.rs)
+Reserve caches the helper version until the executable changes. Credentials are
+read from the CLI's own auth file, resolved from `GROK_AUTH_PATH`, then
+`GROK_HOME`, then the home directory.
+
+Access tokens live six hours and the CLI renews them only when it runs. When
+Reserve finds a stored token that is expired, or inside the CLI's own
+300-second early-invalidation window, and a refresh token is present, it runs
+the public headless command `grok models` so the CLI performs its own silent
+renewal and rewrites its auth file, in the same allowlisted environment plus the
+CLI's own auth overrides. Reserve then re-reads that file. It never
+performs the exchange itself: Grok's source warns that terminating refresh-token
+rotation can orphan the saved session, since the old refresh token is gone
+before the new one is stored. The renewal command therefore gets a generous
+45-second budget and runs at most once per 60 seconds, serialised; its output is
+discarded and its exit status is ignored, because only the rewritten file
+matters. A billing 401 still causes one credential reread and one retry when
+Grok has already renewed the same user's token; only when the stored token is
+unchanged does Reserve ask the CLI to renew, and it retries once. Every step of
+that recovery stays inside the account whose token was rejected: if the stored
+session has become another account's, Reserve reports an expired sign-in rather
+than renewing or reading usage that is not the rejected account's.
+[Official refresh implementation](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-login/src/manager/remedy.rs)
 
 ### OpenAI
 
@@ -53,12 +87,6 @@ isolated by credential and billing cycle. A usable, consented Keychain session
 avoids a helper launch. Missing or rejected credentials may invoke one bounded
 recovery path; a locked Keychain does not trigger an unrelated login. Detailed
 history failures preserve quota and keep the history's original timestamp.
-
-### Windsurf
-
-Saved usage has no trustworthy observation timestamp. Reserve records when it
-checked the file separately, labels the amount as last known, and suppresses
-forecasts and quota-crossing alerts from unknown-age observations.
 
 ## Copilot
 

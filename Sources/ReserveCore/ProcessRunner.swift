@@ -22,6 +22,7 @@ public enum ProcessRunner {
     executable: String,
     arguments: [String],
     environment: [String: String],
+    standardInput: FileHandle? = nil,
     timeout: Duration = .seconds(3)
   ) async throws -> String {
     try Task.checkCancellation()
@@ -31,6 +32,9 @@ public enum ProcessRunner {
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
     process.environment = environment
+    // A helper that prompts on stdin must not inherit Reserve's own input and
+    // wait forever for a line that never arrives.
+    if let standardInput { process.standardInput = standardInput }
     process.standardOutput = stdout
     process.standardError = stderr
     let deadline = ProcessDeadlineState()
