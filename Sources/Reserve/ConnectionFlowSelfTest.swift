@@ -256,6 +256,28 @@ enum ConnectionFlowSelfTest {
       "failed login retried automatically instead of offering an explicit retry")
     coordinator.close()
 
+    // A helper can report an error after the account was already connected in
+    // the browser. Usage decides whether the sign-in finished, not the exit
+    // status, and the browser must not open a second time to prove it.
+    do {
+      try "#!/bin/sh\necho https://auth.openai.com/reserve-test\nsleep 1\nexit 1\n".write(
+        to: directory.appendingPathComponent("login.sh"), atomically: true, encoding: .utf8)
+    } catch { failures.append("verified-login fixture could not be saved") }
+    await responses.set(.signedOut)
+    openedBrowserCount = 0
+    coordinator.start(.openAI)
+    await settle { store.canReopenLoginBrowser(.openAI) }
+    await responses.set(.success)
+    await settle { coordinator.phase == .connected }
+    expect(coordinator.phase == .connected && openedBrowserCount == 1,
+      "a completed sign-in was discarded because its helper exited with an error")
+    expect(store.states[.openAI]?.requiresConnection == false
+      && store.states[.openAI]?.isConnecting == false
+      && store.states[.openAI]?.error == nil,
+      "verified sign-in left the account marked as unfinished")
+    coordinator.close()
+    openedBrowserCount = 0
+
     // Cursor prints a storage error but exits zero. Also cover a successful
     // exit whose subsequent status check still finds no saved session.
     for diagnostic in ["Failed to store authentication tokens. Please try again.", ""] {

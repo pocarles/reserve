@@ -14,6 +14,10 @@ public struct AnthropicProvider: UsageProvider {
   private let passiveStatusline: Bool
   private let requestHandler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
   private let rateLimitGate: ClaudeRateLimitGate
+  private let renewer: ClaudeSessionRenewalHook
+  private let ineffectiveRenewal: ClaudeIneffectiveRenewalHook
+  private let keychainCandidateLoader: ClaudeKeychainCandidateLoader?
+  private let credentialFileURLs: [URL]?
 
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -32,14 +36,24 @@ public struct AnthropicProvider: UsageProvider {
         for: $0, using: session, maximumBytes: 1_048_576)
     }
     self.rateLimitGate = .shared
+    self.renewer = ClaudeSessionRenewer.hook
+    self.ineffectiveRenewal = ClaudeSessionRenewer.ineffectiveRenewalHook
+    self.keychainCandidateLoader = nil
+    self.credentialFileURLs = nil
   }
 
+  /// The renewal and Keychain hooks exist so tests never launch Claude Code or
+  /// touch the real Keychain.
   init(
     environment: [String: String],
     allowKeychainRead: Bool,
     allowKeychainInteraction: Bool = false,
     requestHandler: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse),
-    rateLimitGate: ClaudeRateLimitGate
+    rateLimitGate: ClaudeRateLimitGate,
+    renewer: ClaudeSessionRenewalHook? = nil,
+    ineffectiveRenewal: ClaudeIneffectiveRenewalHook? = nil,
+    keychainCandidateLoader: ClaudeKeychainCandidateLoader? = nil,
+    credentialFileURLs: [URL]? = nil
   ) {
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
@@ -47,6 +61,10 @@ public struct AnthropicProvider: UsageProvider {
     self.passiveStatusline = false
     self.requestHandler = requestHandler
     self.rateLimitGate = rateLimitGate
+    self.renewer = renewer ?? ClaudeSessionRenewer.hook
+    self.ineffectiveRenewal = ineffectiveRenewal ?? ClaudeSessionRenewer.ineffectiveRenewalHook
+    self.keychainCandidateLoader = keychainCandidateLoader
+    self.credentialFileURLs = credentialFileURLs
   }
 
   public func fetch() async throws -> UsageSnapshot {
@@ -62,20 +80,28 @@ public struct AnthropicProvider: UsageProvider {
     if let retryAt = await self.rateLimitGate.activeBlock(), retryAt > Date() {
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     }
-    let credentials = try await ClaudeCredentialLoader.load(
-      environment: self.environment, allowKeychainRead: self.allowKeychainRead,
-      allowKeychainInteraction: self.allowKeychainInteraction)
+    let credentials: ClaudeCredentials
     let response: ClaudeUsageResponse
     do {
-      response = try await self.fetchUsage(accessToken: credentials.accessToken)
+      let stored = try await self.loadCredentials()
+      do {
+        response = try await self.fetchUsage(accessToken: stored.accessToken)
+        credentials = stored
+      } catch UsageProviderError.unauthorized {
+        // The stored token can be rejected before its recorded expiry, for
+        // example after Claude Code rotated it elsewhere. Let Claude Code renew
+        // its own session once, then retry exactly once.
+        let renewed = try await self.renewedCredentials(after: stored)
+        response = try await self.fetchUsage(accessToken: renewed.accessToken)
+        credentials = renewed
+      }
     } catch UsageProviderError.unauthorized where !self.allowKeychainRead {
       #if canImport(Security)
         if ClaudeCredentialLoader.keychainItemExistsWithoutPrompt() {
           throw UsageProviderError.keychainConsentRequired(.anthropic)
         }
       #endif
-      throw UsageProviderError.unauthorized(
-        "Claude authentication expired. Use Sign in to authenticate again.")
+      throw Self.signInExpired
     }
 
     var windows: [UsageWindow] = []
@@ -121,6 +147,44 @@ public struct AnthropicProvider: UsageProvider {
       windows: windows,
       source: credentials.source,
       includedSpend: response.extraUsage?.includedSpend)
+  }
+
+  static let signInExpired = UsageProviderError.unauthorized(
+    "Claude sign-in expired. Use Sign in to reconnect.")
+
+  /// The same explanation for the credential-loading path, which reports a
+  /// missing usable session rather than a rejected request.
+  static let signInExpiredCredentials = UsageProviderError.credentialsNotFound(
+    "Claude sign-in expired. Use Sign in to reconnect.")
+
+  private func loadCredentials() async throws -> ClaudeCredentials {
+    try await ClaudeCredentialLoader.load(
+      environment: self.environment, allowKeychainRead: self.allowKeychainRead,
+      allowKeychainInteraction: self.allowKeychainInteraction,
+      keychainCandidateLoader: self.keychainCandidateLoader,
+      credentialFileURLs: self.credentialFileURLs,
+      renewer: self.renewer,
+      ineffectiveRenewal: self.ineffectiveRenewal)
+  }
+
+  /// Reserve never performs the refresh grant itself. Claude Code's documented
+  /// non-interactive login does it and stores the rotated credential in its own
+  /// store, which Reserve then re-reads.
+  private func renewedCredentials(
+    after credentials: ClaudeCredentials
+  ) async throws -> ClaudeCredentials {
+    guard let refreshToken = credentials.refreshToken, credentials.canRenew(),
+      await self.renewer(refreshToken, credentials.scopes, self.environment)
+    else { throw Self.signInExpired }
+    guard let renewed = try? await self.loadCredentials(),
+      renewed.accessToken != credentials.accessToken
+    else {
+      // Claude Code reported success without publishing a session Reserve can
+      // use. Repeating that on the next refresh would only relaunch the helper.
+      await self.ineffectiveRenewal()
+      throw Self.signInExpired
+    }
+    return renewed
   }
 
   /// A deliberate user refresh is a recovery action: it clears a persisted
@@ -169,8 +233,7 @@ public struct AnthropicProvider: UsageProvider {
     case 200:
       await self.rateLimitGate.clear()
     case 401:
-      throw UsageProviderError.unauthorized(
-        "Claude authentication expired. Use Sign in to authenticate again.")
+      throw Self.signInExpired
     case 403:
       throw UsageProviderError.accessDenied(
         "Anthropic denied access to usage data. Check your Claude account permissions.")
@@ -248,72 +311,261 @@ actor ClaudeRateLimitGate {
 
 struct ClaudeCredentials: Sendable {
   let accessToken: String
+  let expiresAt: Date?
+  let refreshToken: String?
+  let refreshTokenExpiresAt: Date?
+  let scopes: [String]?
   let subscriptionType: String?
   let rateLimitTier: String?
   let source: String
+
+  func canRenew(now: Date = Date()) -> Bool {
+    guard let refreshToken, !refreshToken.isEmpty else { return false }
+    guard let refreshTokenExpiresAt else { return true }
+    return refreshTokenExpiresAt > now
+  }
 }
+
+/// Everything one store holds, including a session that can no longer be used
+/// as it stands. Renewal decisions need the unusable shape too.
+struct ClaudeCredentialCandidate: Sendable {
+  let accessToken: String?
+  let refreshToken: String?
+  let expiresAt: Date?
+  let refreshTokenExpiresAt: Date?
+  let scopes: [String]?
+  let subscriptionType: String?
+  let rateLimitTier: String?
+  let source: String
+
+  /// A token that expires within the next minute is treated as spent: the
+  /// usage request would otherwise race its own expiry.
+  func hasUsableAccessToken(now: Date = Date()) -> Bool {
+    guard let accessToken, !accessToken.isEmpty else { return false }
+    guard let expiresAt else { return true }
+    return expiresAt > now.addingTimeInterval(60)
+  }
+
+  func canRenew(now: Date = Date()) -> Bool {
+    guard let refreshToken, !refreshToken.isEmpty else { return false }
+    guard let refreshTokenExpiresAt else { return true }
+    return refreshTokenExpiresAt > now
+  }
+
+  var credentials: ClaudeCredentials? {
+    guard let accessToken, !accessToken.isEmpty else { return nil }
+    return ClaudeCredentials(
+      accessToken: accessToken,
+      expiresAt: self.expiresAt,
+      refreshToken: self.refreshToken,
+      refreshTokenExpiresAt: self.refreshTokenExpiresAt,
+      scopes: self.scopes,
+      subscriptionType: self.subscriptionType,
+      rateLimitTier: self.rateLimitTier,
+      source: self.source)
+  }
+}
+
+/// Reads one candidate from Claude Code's protected store. `allowInteraction`
+/// mirrors `keychainCredentials`.
+typealias ClaudeKeychainCandidateLoader =
+  @Sendable (Bool) async throws -> ClaudeCredentialCandidate?
+
+/// Asks Claude Code to renew its own session with a refresh token and scopes.
+/// Returns whether the helper reported success.
+typealias ClaudeSessionRenewalHook =
+  @Sendable (String, [String]?, [String: String]) async -> Bool
+
+/// Reports back that a renewal the helper called successful did not produce a
+/// session Reserve can use, so it must not be repeated on the next refresh.
+typealias ClaudeIneffectiveRenewalHook = @Sendable () async -> Void
 
 enum ClaudeCredentialLoader {
   static func load(
     environment: [String: String],
     allowKeychainRead: Bool,
-    allowKeychainInteraction: Bool = false
+    allowKeychainInteraction: Bool = false,
+    now: Date = Date(),
+    keychainCandidateLoader: ClaudeKeychainCandidateLoader? = nil,
+    keychainItemExists: (@Sendable () -> Bool)? = nil,
+    credentialFileURLs: [URL]? = nil,
+    renewer: ClaudeSessionRenewalHook? = nil,
+    ineffectiveRenewal: ClaudeIneffectiveRenewalHook? = nil
   ) async throws -> ClaudeCredentials {
-    #if canImport(Security)
-      var keychainError: Error?
-      if allowKeychainRead {
-        do {
-          if let credentials = try await self.keychainCredentials(
-            allowInteraction: allowKeychainInteraction)
-          {
-            // Claude Code writes a completed browser sign-in to Keychain. Prefer
-            // it over legacy credential files that may remain after reauthenticating.
-            return credentials
-          }
-        } catch {
-          // A valid file remains a safe fallback when macOS cannot reveal the
-          // Keychain item without interaction during a background refresh.
-          keychainError = error
-        }
-      }
-    #endif
+    var collected = await self.candidates(
+      environment: environment, allowKeychainRead: allowKeychainRead,
+      allowKeychainInteraction: allowKeychainInteraction,
+      keychainCandidateLoader: keychainCandidateLoader,
+      credentialFileURLs: credentialFileURLs)
+    // Claude Code writes a completed browser sign-in to its protected store.
+    // That store keeps precedence over legacy credential files left behind by
+    // an earlier sign-in, which is why collection order decides here.
+    if let usable = collected.usableCredentials(now: now) { return usable }
 
-    for url in self.credentialURLs(environment: environment) {
-      if let data = BoundedFileReader.read(url, maximumBytes: 1_048_576),
-        let credentials = try? self.decode(data: data, source: "Claude OAuth file")
-      {
-        return credentials
-      }
+    // The protected store holds the session Claude Code itself uses. When it is
+    // present but this pass could not read it, the answer is the user's explicit
+    // Allow access: a renewal would land in the same unreadable item, and a
+    // browser sign-in would replace the session the CLI is still using.
+    let consentIsPending = self.keychainConsentIsPending(
+      allowKeychainRead: allowKeychainRead,
+      keychainCandidateFound: collected.keychainCandidateFound,
+      itemExists: keychainItemExists)
+
+    if !consentIsPending, let renewable = Self.renewalCandidate(in: collected.all, now: now),
+      let refreshToken = renewable.refreshToken,
+      await (renewer ?? ClaudeSessionRenewer.hook)(
+        refreshToken, renewable.scopes, environment)
+    {
+      collected = await self.candidates(
+        environment: environment, allowKeychainRead: allowKeychainRead,
+        allowKeychainInteraction: allowKeychainInteraction,
+        keychainCandidateLoader: keychainCandidateLoader,
+        credentialFileURLs: credentialFileURLs)
+      if let usable = collected.usableCredentials(now: now) { return usable }
+      // The helper exited successfully and still no usable session appeared.
+      // Without this the ordinary cooldown would relaunch it every refresh.
+      await (ineffectiveRenewal ?? ClaudeSessionRenewer.ineffectiveRenewalHook)()
     }
 
     #if canImport(Security)
-      if let keychainError { throw keychainError }
-      if self.keychainItemExistsWithoutPrompt() {
-        throw UsageProviderError.keychainConsentRequired(.anthropic)
-      }
+      if let keychainError = collected.keychainError { throw keychainError }
+      if consentIsPending { throw UsageProviderError.keychainConsentRequired(.anthropic) }
     #endif
+    guard collected.all.isEmpty else { throw AnthropicProvider.signInExpiredCredentials }
     throw UsageProviderError.credentialsNotFound(
       "Claude OAuth credentials were not found. Use Sign in to authenticate.")
   }
 
+  /// What one pass over the stores found, including whether the protected store
+  /// actually answered. A pass that could not read it is not the same as a pass
+  /// that read an unusable session out of it.
+  private struct CollectedCandidates {
+    var all: [ClaudeCredentialCandidate] = []
+    var keychainCandidateFound = false
+    var keychainError: Error?
+
+    func usableCredentials(now: Date) -> ClaudeCredentials? {
+      self.all.first(where: { $0.hasUsableAccessToken(now: now) })?.credentials
+    }
+  }
+
+  /// Claude Code's own sign-in exists, but this pass holds nothing from it.
+  private static func keychainConsentIsPending(
+    allowKeychainRead: Bool,
+    keychainCandidateFound: Bool,
+    itemExists: (@Sendable () -> Bool)? = nil
+  ) -> Bool {
+    #if canImport(Security)
+      guard !allowKeychainRead || !keychainCandidateFound else { return false }
+      return itemExists?() ?? self.keychainItemExistsWithoutPrompt()
+    #else
+      return false
+    #endif
+  }
+
+  /// Every store that holds something, protected store first.
+  private static func candidates(
+    environment: [String: String],
+    allowKeychainRead: Bool,
+    allowKeychainInteraction: Bool,
+    keychainCandidateLoader: ClaudeKeychainCandidateLoader?,
+    credentialFileURLs: [URL]?
+  ) async -> CollectedCandidates {
+    var collected = CollectedCandidates()
+    let keychainLoader: ClaudeKeychainCandidateLoader?
+    #if canImport(Security)
+      keychainLoader = keychainCandidateLoader ?? { allowInteraction in
+        try await self.keychainCredentials(allowInteraction: allowInteraction)
+      }
+    #else
+      keychainLoader = keychainCandidateLoader
+    #endif
+    if allowKeychainRead, let keychainLoader {
+      do {
+        if let candidate = try await keychainLoader(allowKeychainInteraction) {
+          collected.all.append(candidate)
+          collected.keychainCandidateFound = true
+        }
+      } catch {
+        // A valid file remains a safe fallback when macOS cannot reveal the
+        // Keychain item without interaction during a background refresh.
+        collected.keychainError = error
+      }
+    }
+    for url in credentialFileURLs ?? self.credentialURLs(environment: environment) {
+      if let data = BoundedFileReader.read(url, maximumBytes: 1_048_576),
+        let candidate = try? self.decodeCandidate(data: data, source: "Claude OAuth file")
+      {
+        collected.all.append(candidate)
+      }
+    }
+    return collected
+  }
+
+  /// The renewable session with the most recent access-token expiry; the
+  /// protected store wins a tie because it is collected first.
+  static func renewalCandidate(
+    in candidates: [ClaudeCredentialCandidate],
+    now: Date
+  ) -> ClaudeCredentialCandidate? {
+    var best: ClaudeCredentialCandidate?
+    for candidate in candidates where candidate.canRenew(now: now) {
+      guard let current = best else {
+        best = candidate
+        continue
+      }
+      if (candidate.expiresAt ?? .distantPast) > (current.expiresAt ?? .distantPast) {
+        best = candidate
+      }
+    }
+    return best
+  }
+
   static func decode(data: Data, source: String, now: Date = Date()) throws -> ClaudeCredentials {
-    let root = try JSONDecoder().decode(ClaudeCredentialRoot.self, from: data)
-    let oauth = root.claudeAiOauth ?? root.oauth
-    guard let token = oauth?.accessToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-      !token.isEmpty
-    else {
+    let candidate = try self.decodeCandidate(data: data, source: source)
+    guard let credentials = candidate.credentials else {
       throw UsageProviderError.credentialsNotFound(
         "Claude credentials do not contain a subscription OAuth token.")
     }
-    if let expiresAt = oauth?.expiresAt {
-      let expiration = Date(timeIntervalSince1970: expiresAt / 1_000)
-      guard expiration > now else {
-        throw UsageProviderError.credentialsNotFound(
-          "Claude sign-in expired. Use Sign in to reconnect.")
-      }
+    guard candidate.hasUsableAccessToken(now: now) else {
+      throw AnthropicProvider.signInExpiredCredentials
     }
-    return ClaudeCredentials(
-      accessToken: token,
+    return credentials
+  }
+
+  /// Tolerant on purpose: a store can hold blank tokens, omit `scopes` or
+  /// `refreshTokenExpiresAt`, and carry unrelated top-level keys such as
+  /// `mcpOAuth`. Only unreadable JSON, or a record with neither token, fails.
+  static func decodeCandidate(
+    data: Data,
+    source: String
+  ) throws -> ClaudeCredentialCandidate {
+    guard let root = try? JSONDecoder().decode(ClaudeCredentialRoot.self, from: data) else {
+      throw UsageProviderError.credentialsNotFound(
+        "Claude credentials could not be read.")
+    }
+    let oauth = root.claudeAiOauth ?? root.oauth
+    func trimmed(_ value: String?) -> String? {
+      let value = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+      return value?.isEmpty == false ? value : nil
+    }
+    func date(_ milliseconds: Double?) -> Date? {
+      guard let milliseconds, milliseconds.isFinite, milliseconds > 0 else { return nil }
+      return Date(timeIntervalSince1970: milliseconds / 1_000)
+    }
+    let accessToken = trimmed(oauth?.accessToken)
+    let refreshToken = trimmed(oauth?.refreshToken)
+    guard accessToken != nil || refreshToken != nil else {
+      throw UsageProviderError.credentialsNotFound(
+        "Claude credentials do not contain a subscription OAuth token.")
+    }
+    let scopes = oauth?.scopes?.compactMap(trimmed)
+    return ClaudeCredentialCandidate(
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      expiresAt: date(oauth?.expiresAt),
+      refreshTokenExpiresAt: date(oauth?.refreshTokenExpiresAt),
+      scopes: scopes?.isEmpty == false ? scopes : nil,
       subscriptionType: oauth?.subscriptionType,
       rateLimitTier: oauth?.rateLimitTier,
       source: source)
@@ -381,7 +633,7 @@ enum ClaudeCredentialLoader {
           executable: executable, arguments: arguments, environment: environment,
           timeout: timeout)
       }
-    ) async throws -> ClaudeCredentials? {
+    ) async throws -> ClaudeCredentialCandidate? {
       let itemIsPresent = itemExists?()
         ?? (allowInteraction
           ? self.keychainItemExistsWithoutPrompt()
@@ -408,7 +660,7 @@ enum ClaudeCredentialLoader {
           "The Claude Keychain item is larger than Reserve can safely read.")
       }
       do {
-        return try self.decode(data: data, source: "Claude Keychain")
+        return try self.decodeCandidate(data: data, source: "Claude Keychain")
       } catch {
         throw UsageProviderError.credentialsNotFound(
           "The Claude Keychain item does not contain a usable subscription sign-in.")
@@ -427,6 +679,88 @@ struct ClaudeOAuthCredential: Decodable {
   let expiresAt: Double?
   let rateLimitTier: String?
   let subscriptionType: String?
+  let refreshToken: String?
+  let refreshTokenExpiresAt: Double?
+  let scopes: [String]?
+}
+
+/// Runs Claude Code's documented non-interactive refresh-token login. Claude
+/// Code owns the grant and the rotated credential; Reserve only starts it.
+/// Attempts are serialised, rate limited, and backed off after a failure so a
+/// revoked session cannot turn every refresh into a helper launch.
+actor ClaudeSessionRenewer {
+  static let shared = ClaudeSessionRenewer()
+  static let defaultScopes = [
+    "user:file_upload", "user:inference", "user:mcp_servers", "user:profile",
+    "user:sessions:claude_code",
+  ]
+  static let timeout: Duration = .seconds(60)
+  static let cooldown: TimeInterval = 120
+  static let failureBackoff: TimeInterval = 600
+  private var lastAttemptAt: Date?
+  private var lastFailureAt: Date?
+
+  /// The hooks the providers use by default.
+  static let hook: ClaudeSessionRenewalHook = { refreshToken, scopes, environment in
+    await ClaudeSessionRenewer.shared.renew(
+      refreshToken: refreshToken, scopes: scopes, environment: environment)
+  }
+
+  static let ineffectiveRenewalHook: ClaudeIneffectiveRenewalHook = {
+    await ClaudeSessionRenewer.shared.noteIneffectiveRenewal()
+  }
+
+  /// Claude Code exiting zero is not proof that a usable session was stored.
+  /// An attempt the caller could not observe counts as a failure, so it takes
+  /// the ten-minute back-off instead of the ordinary cooldown.
+  func noteIneffectiveRenewal(now: Date = Date()) {
+    self.lastFailureAt = now
+  }
+
+  func renew(
+    refreshToken: String,
+    scopes: [String]?,
+    environment: [String: String],
+    now: Date = Date(),
+    locator: @Sendable ([String: String]) -> String? = {
+      BinaryLocator.find("claude", environment: $0)
+    },
+    runner: @Sendable (String, [String], [String: String], Duration) async throws -> Void = {
+      executable, arguments, environment, timeout in
+      _ = try await ProcessRunner.output(
+        executable: executable, arguments: arguments, environment: environment,
+        standardInput: FileHandle.nullDevice, timeout: timeout)
+    }
+  ) async -> Bool {
+    if Self.isWithin(Self.failureBackoff, of: self.lastFailureAt, now: now) { return false }
+    if Self.isWithin(Self.cooldown, of: self.lastAttemptAt, now: now) { return false }
+    guard let executable = locator(environment) else { return false }
+    self.lastAttemptAt = now
+    // This login must stay non-interactive, and it is Reserve's own initiative
+    // rather than a command the user typed. The allowlisted environment leaves
+    // out unrelated API keys along with any browser handoff or Reserve login
+    // pipe, no stdin is inherited, and the output is never read.
+    var childEnvironment = BinaryLocator.minimalChildEnvironment(
+      from: environment, keeping: ["CLAUDE_CONFIG_DIR"])
+    childEnvironment["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"] = refreshToken
+    childEnvironment["CLAUDE_CODE_OAUTH_SCOPES"] =
+      (scopes?.isEmpty == false ? scopes! : Self.defaultScopes).joined(separator: " ")
+    do {
+      try await runner(
+        executable, ["auth", "login", "--claudeai"], childEnvironment, Self.timeout)
+      self.lastFailureAt = nil
+      return true
+    } catch {
+      self.lastFailureAt = now
+      return false
+    }
+  }
+
+  private static func isWithin(_ interval: TimeInterval, of date: Date?, now: Date) -> Bool {
+    guard let date else { return false }
+    let elapsed = now.timeIntervalSince(date)
+    return elapsed >= 0 && elapsed < interval
+  }
 }
 
 enum ClaudePlanFormatter {

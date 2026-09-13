@@ -3,48 +3,75 @@ import Foundation
 public struct GrokProvider: UsageProvider {
   public let id: ProviderID = .grok
   private let environment: [String: String]
-  private let session: URLSession
+  private let renewer: @Sendable (String, [String: String]) async -> Void
+  private let locator: @Sendable ([String: String]) -> String?
+  private let versionProbe: @Sendable (String) async throws -> SemanticVersion
+  private let requestHandler: @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     session: URLSession? = nil
   ) {
+    self.init(environment: environment, session: session, renewer: nil)
+  }
+
+  /// The renewal, lookup, version and request hooks exist so tests never launch
+  /// the real CLI or reach the network.
+  init(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    session: URLSession? = nil,
+    renewer: (@Sendable (String, [String: String]) async -> Void)?,
+    executableLocator: (@Sendable ([String: String]) -> String?)? = nil,
+    versionProbe: (@Sendable (String) async throws -> SemanticVersion)? = nil,
+    requestHandler: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil
+  ) {
+    let session = session ?? ProviderHTTPSession.shared
     self.environment = environment
-    self.session = session ?? ProviderHTTPSession.shared
+    self.renewer = renewer ?? { executable, environment in
+      await GrokSessionRenewer.shared.renew(executable: executable, environment: environment)
+    }
+    self.locator = executableLocator ?? { BinaryLocator.find("grok", environment: $0) }
+    self.versionProbe = versionProbe ?? { executable in
+      try await GrokVersionCache.shared.version(executable: executable) {
+        try await ProcessRunner.output(executable: executable, arguments: ["--version"],
+          environment: BinaryLocator.childEnvironment(environment))
+      }
+    }
+    self.requestHandler = requestHandler ?? {
+      try await ProviderHTTPSession.boundedData(
+        for: $0, using: session, maximumBytes: 1_048_576)
+    }
   }
 
   public func fetch() async throws -> UsageSnapshot {
-    guard let executable = BinaryLocator.find("grok", environment: self.environment) else {
+    guard let executable = self.locator(self.environment) else {
       throw UsageProviderError.executableNotFound("Grok Build CLI")
     }
-    let version = try await GrokVersionCache.shared.version(executable: executable) {
-      try await ProcessRunner.output(executable: executable, arguments: ["--version"],
-        environment: BinaryLocator.childEnvironment(self.environment))
-    }
+    let version = try await self.versionProbe(executable)
 
-    // Grok Build 1.x does not expose x.ai/billing through its ACP agent. Calling
-    // that method first starts a large, short-lived agent only to receive
-    // "method not found". Use the authenticated billing request implemented by
-    // the official CLI directly instead.
-    let credentials = try GrokCredentialLoader.load(environment: self.environment)
+    // A stored access token lives six hours and is renewed only when the CLI
+    // itself runs. Ask the CLI to renew first, rather than reporting a working
+    // sign-in as lost every few hours.
+    let credentials = try await self.currentCredentials(executable: executable)
     async let remoteTier = self.fetchSubscriptionTier(
       version: version.headerValue, credentials: credentials)
     let response: GrokBillingEnvelope
+    var billingCredentials = credentials
     do {
       response = try await self.fetchThroughOfficialCLIProxy(
         version: version.headerValue, credentials: credentials)
     } catch UsageProviderError.unauthorized {
-      // Another running Grok client may have renewed the session while this
-      // request was in flight. Adopt its token once without starting a login.
-      let renewed = try GrokCredentialLoader.load(environment: self.environment)
-      guard renewed.key != credentials.key, renewed.userID == credentials.userID else {
-        throw UsageProviderError.unauthorized(
-          "Grok could not renew this session. Open Grok, then refresh Reserve.")
-      }
-      response = try await self.fetchThroughOfficialCLIProxy(
-        version: version.headerValue, credentials: renewed)
+      (response, billingCredentials) = try await self.fetchAfterRejectedToken(
+        version: version.headerValue, credentials: credentials, executable: executable)
     }
-    let fetchedTier = await remoteTier
+    var fetchedTier = await remoteTier
+    if billingCredentials.key != credentials.key {
+      // The parallel lookup used a token the billing endpoint then rejected, so
+      // its answer may describe nothing at all. Ask again with the credential
+      // that actually produced these numbers.
+      fetchedTier = await self.fetchSubscriptionTier(
+        version: version.headerValue, credentials: billingCredentials)
+    }
 
     guard let config = response.config ?? response.legacyConfig else {
       throw UsageProviderError.unavailable("Grok did not return personal subscription usage.")
@@ -108,10 +135,74 @@ public struct GrokProvider: UsageProvider {
     return (27 * 24 * 60)...(32 * 24 * 60) ~= minutes
   }
 
+  /// Reserve never performs the refresh-token exchange itself: the CLI rotates
+  /// its refresh token, and a half-finished rotation started by another process
+  /// orphans the saved session. `grok models` is a public, headless command that
+  /// makes the CLI renew and rewrite its own auth.json.
+  private func currentCredentials(
+    executable: String,
+    now: Date = Date()
+  ) async throws -> GrokCredentials {
+    let candidate = try GrokCredentialLoader.load(environment: self.environment, now: now)
+    guard let expiresAt = candidate.expiresAt,
+      expiresAt <= now.addingTimeInterval(GrokCredentialLoader.earlyRenewalWindow)
+    else { return candidate.credentials }
+    guard candidate.canRenew else { throw Self.signInExpired }
+    await self.renewer(executable, self.environment)
+    guard let renewed = try? GrokCredentialLoader.load(environment: self.environment, now: now),
+      renewed.expiresAt.map({ $0 > now }) ?? true
+    else { throw Self.signInExpired }
+    return renewed.credentials
+  }
+
+  /// A rejected token is first explained by another Grok client having renewed
+  /// the session already. Only when the stored token is unchanged does Reserve
+  /// ask the CLI to renew, and it retries at most once either way. Every step
+  /// stays inside the account whose token was rejected: if the stored session
+  /// now belongs to somebody else, Reserve reports an expired sign-in instead of
+  /// renewing and reading another account's usage.
+  private func fetchAfterRejectedToken(
+    version: String,
+    credentials: GrokCredentials,
+    executable: String,
+    now: Date = Date()
+  ) async throws -> (GrokBillingEnvelope, GrokCredentials) {
+    guard let reread = try? GrokCredentialLoader.load(environment: self.environment, now: now),
+      reread.credentials.userID == credentials.userID
+    else { throw Self.signInExpired }
+    if reread.credentials.key != credentials.key {
+      // Another running Grok client renewed this same account while the request
+      // was in flight. Adopt its token once without starting anything.
+      return (
+        try await self.fetchThroughOfficialCLIProxy(
+          version: version, credentials: reread.credentials),
+        reread.credentials
+      )
+    }
+    guard reread.canRenew else { throw Self.signInExpired }
+    await self.renewer(executable, self.environment)
+    guard let renewed = try? GrokCredentialLoader.load(environment: self.environment, now: now),
+      renewed.credentials.userID == credentials.userID,
+      renewed.credentials.key != credentials.key
+    else { throw Self.signInExpired }
+    return (
+      try await self.fetchThroughOfficialCLIProxy(
+        version: version, credentials: renewed.credentials),
+      renewed.credentials
+    )
+  }
+
+  static let signInExpired = UsageProviderError.unauthorized(
+    "Grok sign-in expired. Use Sign in to reconnect.")
+
   private func fetchThroughOfficialCLIProxy(
     version: String,
     credentials: GrokCredentials
   ) async throws -> GrokBillingEnvelope {
+    // Grok Build 1.x does not expose x.ai/billing through its ACP agent. Calling
+    // that method first starts a large, short-lived agent only to receive
+    // "method not found". Use the authenticated billing request implemented by
+    // the official CLI directly instead.
     guard let url = URL(string: "https://cli-chat-proxy.grok.com/v1/billing?format=credits") else {
       throw UsageProviderError.invalidResponse("invalid Grok CLI proxy endpoint")
     }
@@ -128,8 +219,7 @@ public struct GrokProvider: UsageProvider {
 
     let (data, urlResponse): (Data, URLResponse)
     do {
-      (data, urlResponse) = try await ProviderHTTPSession.boundedData(
-        for: request, using: self.session, maximumBytes: 1_048_576)
+      (data, urlResponse) = try await self.requestHandler(request)
     } catch {
       if let error = error as? URLError, error.code == .timedOut {
         throw UsageProviderError.timedOut("Grok billing request")
@@ -143,8 +233,7 @@ public struct GrokProvider: UsageProvider {
     switch http.statusCode {
     case 200: break
     case 401:
-      throw UsageProviderError.unauthorized(
-        "Grok authentication expired. Run `grok login` and refresh.")
+      throw Self.signInExpired
     case 403:
       throw UsageProviderError.accessDenied(
         "Grok denied access to billing data. Check your Grok account permissions.")
@@ -181,8 +270,7 @@ public struct GrokProvider: UsageProvider {
     request.setValue("headless", forHTTPHeaderField: "x-grok-client-mode")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     do {
-      let (data, response) = try await ProviderHTTPSession.boundedData(
-        for: request, using: self.session, maximumBytes: 1_048_576)
+      let (data, response) = try await self.requestHandler(request)
       guard (response as? HTTPURLResponse)?.statusCode == 200,
         let settings = try? JSONDecoder().decode(GrokRemoteSettings.self, from: data)
       else { return nil }
@@ -263,43 +351,88 @@ struct GrokCredentials: Sendable {
   let userID: String
 }
 
+/// The stored entry Reserve would use, together with what it can still do
+/// about an expiry. `canRenew` means the CLI kept a refresh token, so asking it
+/// to renew is worthwhile.
+struct GrokCredentialCandidate: Sendable {
+  let credentials: GrokCredentials
+  let expiresAt: Date?
+  let canRenew: Bool
+}
+
 enum GrokCredentialLoader {
-  static func load(environment: [String: String]) throws -> GrokCredentials {
+  /// The CLI's own `GROK_AUTH_EARLY_INVALIDATION_SECS` default: it treats a
+  /// token inside this window as already expired and renews it.
+  static let earlyRenewalWindow: TimeInterval = 300
+
+  /// The CLI resolves its credential file from `GROK_AUTH_PATH` first, then
+  /// `GROK_HOME`, then the home directory.
+  static func authFileURL(environment: [String: String]) -> URL {
+    if let configured = environment["GROK_AUTH_PATH"], !configured.isEmpty {
+      return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+    }
     let root: URL
     if let configured = environment["GROK_HOME"], !configured.isEmpty {
       root = URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
     } else {
       root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok")
     }
-    let url = root.appendingPathComponent("auth.json")
+    return root.appendingPathComponent("auth.json")
+  }
+
+  static func load(
+    environment: [String: String],
+    now: Date = Date()
+  ) throws -> GrokCredentialCandidate {
+    let url = self.authFileURL(environment: environment)
     guard let data = BoundedFileReader.read(url, maximumBytes: 1_048_576),
       let entries = try? JSONDecoder().decode([String: GrokCredentialEntry].self, from: data)
     else {
       throw UsageProviderError.credentialsNotFound(
-        "Grok credentials were not found. Run `grok login` first.")
+        "Grok credentials were not found. Use Sign in to connect Grok.")
     }
-    guard let credentials = self.select(entries: entries, now: Date()) else {
-      throw UsageProviderError.unauthorized(
-        "Grok authentication expired. Run `grok login` and refresh.")
+    guard let candidate = self.candidate(entries: entries, now: now) else {
+      throw GrokProvider.signInExpired
     }
-    return credentials
+    return candidate
   }
 
-  static func select(entries: [String: GrokCredentialEntry], now: Date) -> GrokCredentials? {
+  /// Prefers a usable entry with today's ordering, and otherwise reports the
+  /// most recent expired entry so the caller can decide whether to renew.
+  static func candidate(
+    entries: [String: GrokCredentialEntry],
+    now: Date
+  ) -> GrokCredentialCandidate? {
     let ordered = entries.sorted { lhs, rhs in
       let lhsIsPreferred = lhs.key.hasPrefix("https://auth.x.ai::")
       let rhsIsPreferred = rhs.key.hasPrefix("https://auth.x.ai::")
       if lhsIsPreferred != rhsIsPreferred { return lhsIsPreferred }
       return lhs.key < rhs.key
     }
+    var expired: GrokCredentialCandidate?
     for entry in ordered.map(\.value) {
-      if let expiresAt = UsageDateParser.iso8601(entry.expiresAt), expiresAt <= now { continue }
       guard let key = entry.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty,
         let userID = entry.userID?.trimmingCharacters(in: .whitespacesAndNewlines), !userID.isEmpty
       else { continue }
-      return GrokCredentials(key: key, userID: userID)
+      let expiresAt = UsageDateParser.iso8601(entry.expiresAt)
+      let refreshToken = entry.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines)
+      let candidate = GrokCredentialCandidate(
+        credentials: GrokCredentials(key: key, userID: userID),
+        expiresAt: expiresAt,
+        canRenew: refreshToken?.isEmpty == false)
+      guard let expiresAt, expiresAt <= now else { return candidate }
+      if let current = expired?.expiresAt, current >= expiresAt { continue }
+      expired = candidate
     }
-    return nil
+    return expired
+  }
+
+  /// Retained for the callers and checks that only accept a currently valid
+  /// token; renewal decisions use `candidate` instead.
+  static func select(entries: [String: GrokCredentialEntry], now: Date) -> GrokCredentials? {
+    guard let candidate = self.candidate(entries: entries, now: now) else { return nil }
+    if let expiresAt = candidate.expiresAt, expiresAt <= now { return nil }
+    return candidate.credentials
   }
 }
 
@@ -307,11 +440,58 @@ struct GrokCredentialEntry: Decodable {
   let key: String?
   let userID: String?
   let expiresAt: String?
+  let refreshToken: String?
+
+  init(key: String?, userID: String?, expiresAt: String?, refreshToken: String? = nil) {
+    self.key = key
+    self.userID = userID
+    self.expiresAt = expiresAt
+    self.refreshToken = refreshToken
+  }
 
   enum CodingKeys: String, CodingKey {
     case key
     case userID = "user_id"
     case expiresAt = "expires_at"
+    case refreshToken = "refresh_token"
+  }
+}
+
+/// Runs the CLI's own headless renewal. Attempts are serialised and rate
+/// limited: killing a rotation halfway through can orphan the saved session,
+/// and the CLI is the only component allowed to rotate its refresh token.
+actor GrokSessionRenewer {
+  static let shared = GrokSessionRenewer()
+  static let timeout: Duration = .seconds(45)
+  static let cooldown: TimeInterval = 60
+  private var lastAttemptAt: Date?
+
+  func renew(
+    executable: String,
+    environment: [String: String],
+    now: Date = Date(),
+    runner: @Sendable (String, [String], [String: String], Duration) async throws -> Void = {
+      executable, arguments, environment, timeout in
+      _ = try await ProcessRunner.output(
+        executable: executable, arguments: arguments, environment: environment,
+        standardInput: FileHandle.nullDevice, timeout: timeout)
+    }
+  ) async {
+    if let lastAttemptAt, now.timeIntervalSince(lastAttemptAt) < Self.cooldown,
+      now >= lastAttemptAt
+    {
+      return
+    }
+    self.lastAttemptAt = now
+    // `grok models` is public, prints a short model list, and exits quickly.
+    // Its output is never read: the renewed session is read back from
+    // auth.json, and the exit status says nothing about renewal. The helper
+    // sees only an allowlisted environment plus the CLI's own auth overrides.
+    try? await runner(
+      executable, ["models"],
+      BinaryLocator.minimalChildEnvironment(
+        from: environment, keeping: ["GROK_HOME", "GROK_AUTH_PATH"]),
+      Self.timeout)
   }
 }
 

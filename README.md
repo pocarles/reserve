@@ -50,13 +50,21 @@ start enabled only when their helper is already installed. Saved choices are pre
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
-- Grok Build 1.0.0 or newer, authenticated with `grok login`; and
+- Grok Build 1.0.0 or newer, signed into an X.AI subscription; and
 - `cursor-agent`, authenticated with `cursor-agent login`, for an individual
   Cursor account. Teams and Enterprise Admin API keys are not supported;
 - Devin Desktop or legacy Windsurf, signed in with its usage settings opened,
   for cached Windsurf plan usage;
 - Copilot CLI, signed into GitHub. Setup opens GitHub’s installation instructions
   if the helper is missing.
+
+A saved sign-in expires on its own after a few hours. When Reserve finds one
+that is expired or about to expire, it asks the provider's official helper to
+renew its own session: `grok models` for Grok, and Claude Code's documented
+refresh-token login for Claude. Reserve then reads the result from that
+helper's own store. It never performs the token exchange and never writes a
+provider's credentials. Browser sign-in is asked for only when nothing can be
+renewed, or when the helper refuses the renewal.
 
 Windsurf setup opens the installed desktop app. Sign in there, open its usage
 settings, then choose **Check again** in Reserve. Reserve reads only the saved
@@ -225,7 +233,8 @@ Local totals come from session logs under `~/.claude/projects`,
 `~/.codex/sessions`, and `~/.grok/sessions`; only bounded daily aggregates are
 retained. Reserve never scans Cursor transcripts or prompt text. It may read
 `~/.claude/.credentials.json` and
-`~/.grok/auth.json` when present. Claude Code can instead keep its sign-in in
+`~/.grok/auth.json` when present (`GROK_AUTH_PATH` and `GROK_HOME` are
+honoured, in that order). Claude Code can instead keep its sign-in in
 Keychain; Reserve reads it only after the user chooses **Allow access**, through
 the signed macOS `security` tool, and retains it in memory only. Reserve starts
 that tool directly, captures bounded output through a private pipe, and never
@@ -234,6 +243,17 @@ its Keychain access list after browser sign-in; macOS can still require access
 approval when its security settings change. A
 current protected sign-in takes precedence over legacy credential files left
 behind by Claude Code.
+
+Renewal is always performed by the provider's own helper, started without a
+shell, with no browser handoff, with no inherited input, and with its output
+discarded. Because Reserve starts it on its own initiative, the helper receives
+an allowlisted environment — the user's home, shell, locale, temporary
+directory, search path, and the provider's own configuration variables — so
+unrelated API keys in Reserve's environment never reach it. For Grok that is the public `grok models` command; for Claude it is
+Claude Code's documented refresh-token login, which receives the refresh token
+and scopes in its environment and stores the rotated credential in its own
+store. Reserve reads the renewed session back from that store, holds it in
+memory only, and never writes, prints, or caches a token.
 
 For Cursor, Reserve first runs the official
 `cursor-agent status --format json` command with strict time and output limits

@@ -86,6 +86,7 @@ final class UsageStore {
   private var loginOutputs: [ProviderID: Pipe] = [:]
   private var claudeBrowserPipe: ClaudeLoginBrowserPipe?
   private var loginStorageFailures: Set<ProviderID> = []
+  private var loginTimeoutMessages: [ProviderID: String] = [:]
   private var loginOutputBuffers: [ProviderID: Data] = [:]
   private var loginOutputGates: [ProviderID: BoundedOutputGate] = [:]
   private var loginGenerations: [ProviderID: Int] = [:]
@@ -654,7 +655,11 @@ final class UsageStore {
       }
       // Supply the optional welcome confirmation before launching. A delayed
       // write can otherwise reach a cancelled or already-exited login process.
-      try input.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
+      // Claude Code reads its stdin as a pasted authorization code and answers
+      // an empty line with "Invalid code", so it is left alone.
+      if provider != .anthropic {
+        try input.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
+      }
       try process.run()
       self.loginProcesses[provider] = process
       self.loginInputs[provider] = input
@@ -700,18 +705,18 @@ final class UsageStore {
       self.states[provider]?.requiresConnection = false
       self.changed()
       self.loginTimeoutTasks[provider]?.cancel()
+      self.loginTimeoutMessages.removeValue(forKey: provider)
       self.loginTimeoutTasks[provider] = Task { [weak self, weak process] in
         try? await Task.sleep(for: .seconds(300))
         guard !Task.isCancelled, process?.isRunning == true else { return }
-        if let process { ProcessRunner.stop(process) }
         await MainActor.run {
           guard self?.loginGenerations[provider] == generation else { return }
-          self?.states[provider]?.error =
+          // Stopping the helper ends in finishLogin, which checks usage before
+          // calling the sign-in lost. The timeout only supplies the wording.
+          self?.loginTimeoutMessages[provider] =
             "\(configuration.displayName) sign-in timed out. Use Sign in to try again."
-          self?.states[provider]?.requiresConnection = true
-          self?.states[provider]?.isConnecting = false
-          self?.changed()
         }
+        if let process { ProcessRunner.stop(process) }
       }
     } catch {
       if provider == .anthropic {
@@ -1178,18 +1183,41 @@ final class UsageStore {
         }
         completion?()
       }) { self.changed() }
+    } else if self.isEnabled(provider) {
+      // A helper can exit with an error after the account was already
+      // connected in the browser, and Grok's own log shows exactly that.
+      // The usage check decides, not the exit status.
+      if !self.refresh(provider, queueIfBusy: true, onFinished: { [weak self] in
+        guard let self else {
+          completion?()
+          return
+        }
+        if self.states[provider]?.requiresConnection == true {
+          self.markLoginNotCompleted(provider)
+        }
+        completion?()
+      }) { self.changed() }
     } else {
-      self.states[provider]?.requiresConnection = true
-      self.states[provider]?.requiresInstallation = false
-      self.states[provider]?.requiresUpdate = false
-      self.states[provider]?.usageAccessDenied = false
-      if self.states[provider]?.error == nil {
-        self.states[provider]?.error =
-          "\(provider.displayName) sign-in was not completed. Try again when you are ready."
-      }
-      self.changed()
+      self.markLoginNotCompleted(provider)
       completion?()
     }
+  }
+
+  /// The verified failure state: the helper ended badly and no usable session
+  /// was found afterwards.
+  private func markLoginNotCompleted(_ provider: ProviderID) {
+    let timeoutMessage = self.loginTimeoutMessages.removeValue(forKey: provider)
+    self.states[provider]?.requiresConnection = true
+    self.states[provider]?.requiresInstallation = false
+    self.states[provider]?.requiresUpdate = false
+    self.states[provider]?.usageAccessDenied = false
+    // A protected sign-in that only needs permission keeps its own explanation
+    // and its Allow access action.
+    if self.states[provider]?.requiresKeychainAccess != true {
+      self.states[provider]?.error = timeoutMessage
+        ?? "\(provider.displayName) sign-in was not completed. Try again when you are ready."
+    }
+    self.changed()
   }
 
   private func cleanUpLogin(_ provider: ProviderID) {
