@@ -54,7 +54,6 @@ enum ProviderArtwork {
       case .anthropic: "A"
       case .grok: "G"
       case .cursor: "C"
-      case .windsurf: "W"
       case .copilot: "C"
       }
     let size = NSSize(width: 18, height: 18)

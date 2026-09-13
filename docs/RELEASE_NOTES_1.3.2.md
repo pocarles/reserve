@@ -11,6 +11,11 @@ This release keeps Claude and Grok connected between sign-ins.
   provider's helper ends with an error. Reserve checks your usage before it
   says the sign-in did not finish.
 - Claude's sign-in no longer reports a stray "Invalid code" while connecting.
+- Windsurf support was removed. Reserve could only read a plan record that Devin
+  Desktop wrote while its own plan settings were open, and current Devin builds
+  no longer show that section, so the saved numbers could never be brought up to
+  date. Its card, settings row, and saved usage are gone; the other five
+  providers are unchanged.
 
 Browser sign-in is still needed when there is nothing left to renew, or when a
 renewal is refused. Reserve never writes a provider's credentials: renewal is

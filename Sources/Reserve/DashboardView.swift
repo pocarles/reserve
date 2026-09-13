@@ -451,7 +451,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
         summary: summary, isSelectedForMenuBar: isSelectedForMenuBar,
         isExpanded: isExpanded, connectProvider: connectProvider, toggleDetail: toggleDetail)
     ]
-    if self.hasUnavailableLiveData || summary.provider == .windsurf {
+    if self.hasUnavailableLiveData {
       rows.append(ProviderFreshnessBanner(summary: summary, now: now))
     }
     if let primary = summary.primary {
@@ -598,9 +598,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
       "\(DashboardFormat.remainingPercent(primary.remainingPercent)) percent \(summary.paceState == .stale ? "last known" : "left")",
       summary.paceState.label,
     ]
-    if !summary.observationTimeKnown {
-      parts.append("Provider update time unknown")
-    } else if summary.paceState == .stale, let updated = summary.lastUpdated {
+    if summary.paceState == .stale, let updated = summary.lastUpdated {
       parts.append(DashboardFormat.updated(updated, now: now))
     }
     if let reset = primary.resetsAt, reset > now {
@@ -753,11 +751,6 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
     } else if summary.requiresKeychainAccess {
       state = "Waiting for permission"
       fullState = state
-    } else if summary.setupAction == .openDesktop {
-      // Devin Desktop rewrites its saved usage only from its own settings
-      // panel. Reserve cannot ask for that, so say what is being waited on.
-      state = "Saved usage out of date"
-      fullState = "Devin Desktop has not refreshed its saved usage since before its last reset"
     } else if summary.needsConnection {
       state = "Sign-in needed"
       fullState = state
@@ -765,20 +758,13 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
       state = "Usage unavailable"
       fullState = "Usage temporarily unavailable"
     } else {
-      state = summary.observationTimeKnown ? "Cached" : "Saved usage"
+      state = "Cached"
       fullState = "Cached data"
     }
-    let waitingForDesktop = summary.setupAction == .openDesktop
-    let age = waitingForDesktop
-      ? "waiting for Devin Desktop"
-      : !summary.observationTimeKnown && summary.lastUpdated != nil
-      ? "age unknown" : summary.lastUpdated.map {
+    let age = summary.lastUpdated.map {
       "last checked \(Self.compactAge(since: $0, now: now))"
     } ?? "not checked yet"
-    let fullAge = waitingForDesktop
-      ? "Devin Desktop refreshes it only from its own settings; Reserve cannot request that"
-      : !summary.observationTimeKnown && summary.lastUpdated != nil
-      ? "saved by the provider app; exact update time unknown" : summary.lastUpdated.map {
+    let fullAge = summary.lastUpdated.map {
       DashboardFormat.updated($0, now: now).replacingOccurrences(
         of: "Updated", with: "last updated")
     } ?? "never updated"
@@ -796,21 +782,15 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
       message, font: ReserveFont.sans(ReserveType.metadata, .medium), color: ReserveColor.muted
     ).flexible()
     label.clockText = { date in
-      let age = waitingForDesktop
-        ? "waiting for Devin Desktop"
-        : !summary.observationTimeKnown && summary.lastUpdated != nil
-        ? "age unknown" : summary.lastUpdated.map {
-          "last checked \(Self.compactAge(since: $0, now: date))"
-        } ?? "not checked yet"
+      let age = summary.lastUpdated.map {
+        "last checked \(Self.compactAge(since: $0, now: date))"
+      } ?? "not checked yet"
       return "\(state) · \(age)"
     }
     self.spokenClock = { date in
-      let age = waitingForDesktop
-        ? "Devin Desktop refreshes it only from its own settings; Reserve cannot request that"
-        : !summary.observationTimeKnown && summary.lastUpdated != nil
-        ? "saved by the provider app; exact update time unknown" : summary.lastUpdated.map {
-          DashboardFormat.updated($0, now: date).replacingOccurrences(of: "Updated", with: "last updated")
-        } ?? "never updated"
+      let age = summary.lastUpdated.map {
+        DashboardFormat.updated($0, now: date).replacingOccurrences(of: "Updated", with: "last updated")
+      } ?? "never updated"
       return "\(fullState) · \(age)"
     }
     label.identifier = NSUserInterfaceItemIdentifier(

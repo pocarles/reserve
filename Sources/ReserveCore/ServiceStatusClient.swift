@@ -83,7 +83,7 @@ public actor ServiceStatusClient {
     guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count <= 512_000
     else { throw StatusError.invalidResponse }
     switch provider {
-    case .openAI, .anthropic, .cursor, .windsurf, .copilot:
+    case .openAI, .anthropic, .cursor, .copilot:
       return try Self.decodeStatuspage(data, provider: provider, now: now)
     case .grok:
       return Self.decodeXAI(data, now: now)

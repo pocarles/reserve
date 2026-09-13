@@ -216,22 +216,19 @@ import Testing
       }
     }
     #expect(!ProviderDescriptor.forProvider(.copilot).supportsAutomaticHelperInstallation)
-    #expect(!ProviderDescriptor.forProvider(.windsurf).supportsAutomaticHelperInstallation)
     #expect(!ProviderDescriptor.forProvider(.copilot).capabilities.contains(.localHistory))
-    #expect(ProviderDescriptor.forProvider(.windsurf).capabilities.contains(.cachedAllowance))
     #expect(ProviderDescriptor.forProvider(.grok).statusFormat == .rss)
   }
 
   @Test func authenticationAndInstallerStrategiesKeepExistingBoundaries() {
     #expect(ProviderDescriptor.forProvider(.anthropic).authenticationStrategy == .protectedSession)
     #expect(ProviderDescriptor.forProvider(.cursor).authenticationStrategy == .protectedSession)
-    #expect(ProviderDescriptor.forProvider(.windsurf).authenticationStrategy == .desktopCache)
     #expect(ProviderDescriptor.forProvider(.copilot).authenticationStrategy == .cliOAuth)
     #expect(ProviderDescriptor.forProvider(.grok).loginArguments == ["login", "--device-auth"])
     #expect(ProviderDescriptor.forProvider(.anthropic).loginArguments == ["auth", "login", "--claudeai"])
     #expect(ProviderDescriptor.forProvider(.copilot).trustedLoginHosts == ["github.com"])
     #expect(ProviderDescriptor.forProvider(.copilot).installationStrategy == .manualHelper)
-    #expect(ProviderDescriptor.forProvider(.windsurf).helper.updateArguments.isEmpty)
+    #expect(ProviderDescriptor.forProvider(.copilot).helper.updateArguments.isEmpty)
     #expect(ProviderDescriptor.forProvider(.openAI).helper.updateArguments == ["update"])
   }
 }

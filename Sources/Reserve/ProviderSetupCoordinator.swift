@@ -8,7 +8,9 @@ final class ProviderSetupCoordinator {
     case checking, needsInstall, needsUpdate, installing, updating
     case needsSignIn, signingIn, needsAccess, grantingAccess, accessNotGranted, signInNotSaved
     case connected, unavailable, accessDenied, failed
-    case waitingForDesktop
+    /// A provider whose helper Reserve cannot install waits here while the
+    /// person finishes the official installation themselves.
+    case waitingForManualSetup
   }
 
   private let store: UsageStore
@@ -103,7 +105,7 @@ final class ProviderSetupCoordinator {
     case .needsInstall, .needsUpdate:
       if !ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation {
         _ = LoginBrowser.open(ProviderHelperCatalog.definition(for: provider).installerURL)
-        self.present(.waitingForDesktop)
+        self.present(.waitingForManualSetup)
         return
       }
       let installing = self.phase == .needsInstall
@@ -127,12 +129,6 @@ final class ProviderSetupCoordinator {
         }
       }
     case .needsSignIn, .accessNotGranted:
-      if ProviderDescriptor.forProvider(provider).authenticationStrategy == .desktopCache {
-        self.loginAttempted = true
-        self.store.connect(provider)
-        self.present(.waitingForDesktop)
-        return
-      }
       let forceSignIn = self.phase == .accessNotGranted
       self.loginAttempted = true
       self.present(.signingIn)
@@ -156,11 +152,8 @@ final class ProviderSetupCoordinator {
         self.didCheck()
       }
     case .failed, .unavailable, .accessDenied:
-      if ProviderDescriptor.forProvider(provider).authenticationStrategy == .desktopCache {
-        self.store.connect(provider)
-        self.present(.waitingForDesktop)
-      } else { self.check() }
-    case .waitingForDesktop:
+      self.check()
+    case .waitingForManualSetup:
       self.check()
     case .connected:
       self.close()
@@ -179,7 +172,7 @@ final class ProviderSetupCoordinator {
     let provider = self.activeProvider
     let cancelledSetup = !self.wasEnabled && [Phase.checking, .needsInstall, .needsUpdate,
       .needsSignIn, .signingIn, .needsAccess, .grantingAccess, .accessNotGranted,
-      .waitingForDesktop].contains(self.phase)
+      .waitingForManualSetup].contains(self.phase)
     self.activeProvider = nil
     self.generation += 1
     if let observer { self.store.removeObserver(observer) }
@@ -352,10 +345,10 @@ final class ProviderConnectionPanel: NSPanel {
       self.message.stringValue = "Reserve could not finish setting up \(name). Check your connection, then try again."
       action = "Try again"
       self.closeButton.title = "Close"
-    case .waitingForDesktop:
-      self.heading.stringValue = "Open your Windsurf usage"
-      self.message.stringValue = "In Devin Desktop or Windsurf, sign in and open Devin Settings. Then return here and choose Check again."
-      self.privacy.stringValue = "Reserve reads only the plan usage saved by the desktop app. It does not access your password or protected sign-in."
+    case .waitingForManualSetup:
+      self.heading.stringValue = "Finish installing \(name)"
+      self.message.stringValue = "Reserve opened the official \(helper.displayName) instructions. Return here once it is installed, then choose Check again."
+      self.privacy.stringValue = "Reserve never installs this helper for you and downloads nothing itself."
       action = "Check again"
     }
     if self.provider == .copilot {
@@ -363,26 +356,10 @@ final class ProviderConnectionPanel: NSPanel {
       if phase == .needsInstall || phase == .needsUpdate {
         self.message.stringValue = "Install or update the official Copilot CLI, then return here."
         action = "Open download page"
-      } else if phase == .waitingForDesktop {
+      } else if phase == .waitingForManualSetup {
         self.heading.stringValue = "Finish installing Copilot"
         self.message.stringValue = "Return here when the official Copilot CLI is installed."
         action = "Check again"
-      }
-    }
-    if self.provider == .windsurf {
-      switch phase {
-      case .needsInstall, .needsUpdate:
-        self.message.stringValue = "Install or update Devin Desktop, then sign in and open Devin Settings."
-        self.privacy.stringValue = "Opens the official download page. Return here after setup."
-        action = "Open download page"
-      case .connected:
-        self.heading.stringValue = "Windsurf cache connected"
-        self.message.stringValue = "Reserve can read usage saved by Devin Desktop. Refresh your usage in the desktop app to update these numbers."
-        self.privacy.stringValue = "Cached usage can be older than your account page. Reserve marks old observations as stale."
-      case .unavailable:
-        self.message.stringValue = "The saved usage is missing or older than its last reset. Devin Desktop refreshes it only while Devin Settings is open. Open that panel, then check again here."
-        action = "Open Devin Desktop"
-      default: break
       }
     }
     self.spinner.isHidden = !busy

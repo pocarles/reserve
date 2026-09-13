@@ -88,12 +88,6 @@ avoids a helper launch. Missing or rejected credentials may invoke one bounded
 recovery path; a locked Keychain does not trigger an unrelated login. Detailed
 history failures preserve quota and keep the history's original timestamp.
 
-### Windsurf
-
-Saved usage has no trustworthy observation timestamp. Reserve records when it
-checked the file separately, labels the amount as last known, and suppresses
-forecasts and quota-crossing alerts from unknown-age observations.
-
 ## Copilot
 
 The native adapter reads GitHub's documented `account.getQuota` operation. GitHub describes remaining percentage, entitlement, use, and reset date; unlimited products are identified separately. Reserve shows finite allowances and omits unlimited products from percentage bars. It does not infer a monthly price, extra charge, or forecast from a quota reset date. [Quota documentation](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/usage-and-billing)

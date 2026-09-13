@@ -1,10 +1,9 @@
 # Reserve
 
 Reserve is a native macOS menu-bar app that shows reported subscription
-capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, Windsurf, and Copilot.
+capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, and Copilot.
 Optional insights show provider-reported account activity or activity from this Mac.
-Windsurf uses usage saved by the official Devin Desktop app. Copilot support is
-experimental and still needs an authenticated release check.
+Copilot support is experimental and still needs an authenticated release check.
 
 It is deliberately small: no Reserve account, browser automation, WebView,
 cookie extraction, telemetry, crash reporting, cloud service, or third-party
@@ -45,16 +44,14 @@ You can reopen that page or cancel the login from the connection window.
 Claude and Cursor require explicit **Allow usage access** before Reserve reads
 their protected sign-in. macOS may also ask you to approve access. The window
 stays open until Reserve reads fresh usage, or explains why it could not.
-Cursor, Windsurf, and Copilot start disabled. On first launch, the other providers
+Cursor and Copilot start disabled. On first launch, the other providers
 start enabled only when their helper is already installed. Saved choices are preserved.
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
-- Grok Build 1.0.0 or newer, signed into an X.AI subscription; and
+- Grok Build 1.0.0 or newer, signed into an X.AI subscription;
 - `cursor-agent`, authenticated with `cursor-agent login`, for an individual
-  Cursor account. Teams and Enterprise Admin API keys are not supported;
-- Devin Desktop or legacy Windsurf, signed in with its Devin Settings panel opened,
-  for cached Windsurf plan usage;
+  Cursor account. Teams and Enterprise Admin API keys are not supported; and
 - Copilot CLI, signed into GitHub. Setup opens GitHub’s installation instructions
   if the helper is missing.
 
@@ -65,11 +62,6 @@ refresh-token login for Claude. Reserve then reads the result from that
 helper's own store. It never performs the token exchange and never writes a
 provider's credentials. Browser sign-in is asked for only when nothing can be
 renewed, or when the helper refuses the renewal.
-
-Windsurf setup opens the installed desktop app. Sign in there, open its usage
-settings, then choose **Check again** in Reserve. Reserve reads only the saved
-plan metadata. It never reads Windsurf's protected sign-in or asks for Keychain
-access. If the desktop app is missing, setup opens its official download page.
 
 The same connection window handles installation, updates, sign-in, permission,
 and the first usage check. Provider installation and updates never
@@ -136,7 +128,6 @@ swift run reserve-probe openai
 swift run reserve-probe anthropic
 swift run reserve-probe grok
 swift run reserve-probe cursor
-swift run reserve-probe windsurf
 swift run reserve-probe local
 ```
 
@@ -161,19 +152,6 @@ totals. Hobby, Pro, Pro Plus, and Ultra default to $0, $20, $60, and $200 per
 month; Cursor's reported plan price and renewal date take precedence when
 available. On-demand spending is shown literally as disabled, unlimited, or a
 dollar amount used against its configured cap.
-
-Windsurf shows saved daily and weekly remaining allowances, their reset times,
-plan name, renewal date, and extra usage balance when present. Its source is
-labelled **Devin Desktop account cache**. Expired windows are omitted; expired
-billing periods and caches with no current windows produce an error while
-Reserve keeps the last valid snapshot visible. Multiple saved accounts are
-rejected rather than guessing which account is active.
-
-The desktop cache has no exact observation timestamp. Reserve conservatively
-keeps the time it checked the cache separate from the unknown observation time.
-It labels the amount as last known and never projects a forecast from it. These numbers can lag the Windsurf account page;
-this version does not make an authenticated live usage request. Windsurf token
-counts, transcript estimates, and subscription price guesses are not included.
 
 The optional comparable-value view is an API-equivalent estimate, not a provider bill.
 OpenAI and Anthropic use the observed input/cache/output mix when available;

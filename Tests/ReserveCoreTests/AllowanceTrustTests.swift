@@ -24,10 +24,10 @@ struct AllowanceTrustTests {
   @Test func cachedObservationCannotTriggerUsageAlerts() {
     let now = Date()
     let reset = now.addingTimeInterval(3 * 86_400)
-    let previous = UsageSnapshot(provider: .windsurf, windows: [
+    let previous = UsageSnapshot(provider: .cursor, windows: [
       UsageWindow(id: "weekly", label: "Weekly", usedPercent: 10, windowMinutes: 10_080, resetsAt: reset)],
       source: "fixture")
-    let current = UsageSnapshot(provider: .windsurf, windows: [
+    let current = UsageSnapshot(provider: .cursor, windows: [
       UsageWindow(id: "weekly", label: "Weekly", usedPercent: 100, windowMinutes: 10_080, resetsAt: reset)],
       source: "fixture", observationTimeKnown: false)
     #expect(SmartAlertDetector.deficitAlerts(previous: previous, current: current, now: now).isEmpty)
@@ -47,10 +47,38 @@ struct AllowanceTrustTests {
     #expect(restored.availableResetCount == 2)
   }
 
-  @Test func oldWindsurfCacheMigratesAsUnknownAge() throws {
-    let data = Data(#"{"provider":"windsurf","windows":[],"fetchedAt":800000000,"source":"fixture"}"#.utf8)
+  @Test func snapshotWithoutAnObservationFlagCountsAsObserved() throws {
+    let data = Data(#"{"provider":"openAI","windows":[],"fetchedAt":800000000,"source":"fixture"}"#.utf8)
     let snapshot = try JSONDecoder().decode(UsageSnapshot.self, from: data)
-    #expect(!snapshot.observationTimeKnown)
+    #expect(snapshot.observationTimeKnown)
     #expect(snapshot.checkedAt == snapshot.fetchedAt)
+  }
+
+  /// A cache written by an older Reserve can still name a provider this build
+  /// dropped. That entry is skipped; the supported ones must still load.
+  @Test func cachedSnapshotsSurviveARetiredProviderEntry() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reserve-cache-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let fileURL = directory.appendingPathComponent("snapshots.json")
+    try Data("""
+      [
+        {"provider":"windsurf","fetchedAt":"2026-09-01T00:00:00Z","source":"retired","windows":[]},
+        {"provider":"openAI","fetchedAt":"2026-09-02T00:00:00Z","source":"kept","windows":[]}
+      ]
+      """.utf8).write(to: fileURL)
+    let loaded = await SnapshotCache(fileURL: fileURL).load()
+    #expect(Array(loaded.keys) == [.openAI])
+    #expect(loaded[.openAI]?.source == "kept")
+  }
+
+  @Test func aMalformedCachedEntryStillFailsTheWholeFile() throws {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let data = Data(#"[{"provider":"openAI","source":"no windows or time"}]"#.utf8)
+    #expect(throws: (any Error).self) {
+      try UsageSnapshot.decodePersistedList(data, using: decoder)
+    }
   }
 }
