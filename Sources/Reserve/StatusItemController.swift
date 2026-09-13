@@ -659,12 +659,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       // The history chart lives with the activity numbers.
       && expandedIDs.contains("usage-chart-anthropic")
       && expandedLabels.contains { $0.contains("compressed scale") }
-      // Where the numbers came from and when they were last checked.
-      && expandedIDs.contains("usage-source-anthropic")
+      // When the numbers were last checked; the transport name stays out of
+      // the card because it means nothing to most people.
       && expandedIDs.contains("usage-checked-anthropic")
-      && expandedLabels.contains("Source")
+      && !expandedIDs.contains("usage-source-anthropic")
       && expandedLabels.contains("Last checked")
-      && expandedLabels.contains { $0.hasPrefix("Claude OAuth · activity from this Mac") }
+      && !expandedLabels.contains("Source")
       // The internal provenance block is intentionally absent from every provider.
       && !expandedIDs.contains { $0.hasPrefix("sources-") }
       // Only one row opens at a time.
@@ -1327,10 +1327,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && account.texts.contains("Gathering account activity…")
       // Copilot reports neither local nor account history.
       && !never.identifiers.contains { $0.hasPrefix("usage-history-note-") }
-      // Source and freshness travel with every expanded card.
-      && waiting.identifiers.contains("usage-source-openAI")
+      // Freshness travels with every expanded card.
       && waiting.identifiers.contains("usage-checked-openAI")
-      && waiting.texts.contains("history fixture")
+      // The transport name is not shown on the card.
+      && !waiting.texts.contains("history fixture")
   }
 
   private static func dashboardClockAndDisclosureChecks() -> Bool {
@@ -1383,7 +1383,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     else { return false }
     tick(detail, later)
     let detailFreshnessFollowsClock = checkedLabel.stringValue == "7 min ago"
-      && detailViews.contains { $0.identifier?.rawValue == "usage-source-openAI" }
+      && detailViews.contains { $0.identifier?.rawValue == "usage-checked-openAI" }
 
     let fresh = card(summary(fetchedAt: now))
     let freshViews = Self.descendants(of: fresh)
