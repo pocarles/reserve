@@ -41,6 +41,9 @@ final class UsageStore {
   /// across the rebuilds a refresh triggers.
   private(set) var refreshStartedAt: Date?
   private(set) var isScanningLocalUsage = false
+  private(set) var apiConsumption: [APIConsumptionProvider: APIConsumptionSnapshot] = [:]
+  private(set) var apiConsumptionErrors: [APIConsumptionProvider: String] = [:]
+  private(set) var apiConsumptionRefreshing: Set<APIConsumptionProvider> = []
 
   /// Identifies one registered observer. Surfaces come and go, so removal has to
   /// be precise rather than "clear the callback".
@@ -183,6 +186,7 @@ final class UsageStore {
   private var pendingKeychainInteractions: Set<ProviderID> = []
   private var keychainAccessCompletions: [ProviderID: [() -> Void]] = [:]
   private var lastRefreshCompletedAt: Date?
+  private var apiConsumptionTokens: [APIConsumptionProvider: Int] = [:]
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
   /// Which provider row is open in the popover. Transient interface state, so
@@ -536,6 +540,9 @@ final class UsageStore {
   func refreshAll(manual: Bool = true) {
     guard !self.isRefreshingAll else { return }
     if !manual, ProcessInfo.processInfo.isLowPowerModeEnabled { return }
+    // A refresh means every reading on screen, so the API measurements go with
+    // the subscription round. Each provider dedupes its own in-flight read.
+    self.refreshEnabledAPIConsumption()
     self.isRefreshingAll = true
     self.refreshStartedAt = Date()
     for provider in ProviderID.allCases where self.isEnabled(provider) {
@@ -849,6 +856,58 @@ final class UsageStore {
     self.defaults.bool(forKey: "provider.\(provider.rawValue).enabled")
   }
 
+  func isAPIConsumptionEnabled(_ provider: APIConsumptionProvider) -> Bool {
+    self.defaults.bool(forKey: "apiConsumption.\(provider.rawValue).enabled")
+  }
+
+  func setAPIConsumptionEnabled(_ provider: APIConsumptionProvider, enabled: Bool) {
+    self.defaults.set(enabled, forKey: "apiConsumption.\(provider.rawValue).enabled")
+    self.changed()
+    if enabled { self.refreshAPIConsumption(provider) }
+  }
+
+  func hasAPIConsumptionKey(_ provider: APIConsumptionProvider) -> Bool {
+    APIConsumptionKeychain.hasKey(for: provider)
+  }
+
+  /// Stores a pasted key and turns measurement on. The key is written to
+  /// Keychain only; preferences record that the option is enabled.
+  func saveAPIConsumptionKey(_ key: String, for provider: APIConsumptionProvider) throws {
+    try APIConsumptionKeychain.save(key, for: provider)
+    self.defaults.set(true, forKey: "apiConsumption.\(provider.rawValue).enabled")
+    self.apiConsumptionErrors[provider] = nil
+    self.changed()
+    self.refreshAPIConsumption(provider)
+  }
+
+  func removeAPIConsumptionKey(_ provider: APIConsumptionProvider) {
+    APIConsumptionKeychain.delete(for: provider)
+    self.defaults.set(false, forKey: "apiConsumption.\(provider.rawValue).enabled")
+    self.apiConsumption[provider] = nil
+    self.apiConsumptionErrors[provider] = nil
+    self.changed()
+  }
+
+  @discardableResult
+  func refreshAPIConsumption(_ provider: APIConsumptionProvider) -> Bool {
+    guard self.isAPIConsumptionEnabled(provider), self.hasAPIConsumptionKey(provider) else {
+      return false
+    }
+    guard !self.apiConsumptionRefreshing.contains(provider) else { return false }
+    self.apiConsumptionRefreshing.insert(provider)
+    self.changed()
+    Task { [weak self] in
+      await self?.performAPIConsumptionRefresh(provider)
+    }
+    return true
+  }
+
+  func refreshEnabledAPIConsumption() {
+    for provider in APIConsumptionProvider.allCases where self.isAPIConsumptionEnabled(provider) {
+      self.refreshAPIConsumption(provider)
+    }
+  }
+
   func monthlySubscriptionCost(for provider: ProviderID) -> Double? {
     let key = "subscription.monthlyCost.\(provider.rawValue)"
     if let number = self.defaults.object(forKey: key) as? NSNumber,
@@ -1156,12 +1215,19 @@ final class UsageStore {
       "notifications.threshold90": false,
       "notifications.sound": false,
       "appearance.theme": AppearanceTheme.matrix.rawValue,
+      "apiConsumption.openAI.enabled": false,
+      "apiConsumption.anthropic.enabled": false,
+      "apiConsumption.openRouter.enabled": false,
+      "apiConsumption.xAI.enabled": false,
+      "apiConsumption.typeSafe.enabled": false,
       "appearance.mode": AppearanceMode.system.rawValue,
       "updates.automatic": true,
       "menuBar.provider": "reserve",
       "menuBar.showsRemaining": true,
       "menuBar.showsReset": true,
     ])
+    APIConsumptionKeychain.deleteLegacyTypefaceAccount()
+    self.defaults.removeObject(forKey: "apiConsumption.typeface.enabled")
   }
 
   /// Notifies every observer. A change made from inside an observer is coalesced
@@ -1334,6 +1400,7 @@ final class UsageStore {
     self.changed()
     self.startScheduler()
     self.refreshAll(manual: false)
+    self.refreshEnabledAPIConsumption()
   }
 
   /// `force` waives the scan interval. Whether a surface should scan at all is
@@ -1389,7 +1456,10 @@ final class UsageStore {
       while !Task.isCancelled {
         try? await Task.sleep(for: .seconds(minutes * 60))
         guard !Task.isCancelled else { break }
-        await MainActor.run { self?.refreshAllIfWorthwhile() }
+        await MainActor.run {
+          self?.refreshAllIfWorthwhile()
+          self?.refreshEnabledAPIConsumption()
+        }
       }
     }
   }
@@ -1662,6 +1732,35 @@ final class UsageStore {
       }
     } else if !isIncident, self.incidentProviders.remove(provider) != nil {
       self.notifications.clearIncident(provider)
+    }
+  }
+
+  private func performAPIConsumptionRefresh(_ provider: APIConsumptionProvider) async {
+    let token = (self.apiConsumptionTokens[provider] ?? 0) + 1
+    self.apiConsumptionTokens[provider] = token
+    func isCurrent() -> Bool { self.apiConsumptionTokens[provider] == token }
+    defer {
+      if isCurrent() {
+        self.apiConsumptionRefreshing.remove(provider)
+        self.changed()
+      }
+    }
+    let key: String
+    do {
+      key = try APIConsumptionKeychain.load(for: provider)
+    } catch {
+      guard isCurrent() else { return }
+      self.apiConsumptionErrors[provider] = String(error.localizedDescription.prefix(240))
+      return
+    }
+    do {
+      let snapshot = try await APIConsumptionClient().fetch(provider, apiKey: key)
+      guard isCurrent() else { return }
+      self.apiConsumption[provider] = snapshot
+      self.apiConsumptionErrors[provider] = nil
+    } catch {
+      guard isCurrent() else { return }
+      self.apiConsumptionErrors[provider] = String(error.localizedDescription.prefix(240))
     }
   }
 

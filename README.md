@@ -161,6 +161,31 @@ month; Cursor's reported plan price and renewal date take precedence when
 available. On-demand spending is shown literally as disabled, unlimited, or a
 dollar amount used against its configured cap.
 
+Settings > API measures consumption instead of subscription limits. Paste a key
+there. It stays in the macOS Keychain on this Mac and is off until you save one:
+
+- OpenAI, an organization admin key, read from the Costs API;
+- Anthropic, an organization admin key, read from the Cost Report API;
+- OpenRouter, the API key itself, read from that key's usage endpoint: today,
+  this week, this month, and the credit balance when the key is capped;
+- xAI, a management key, read from the prepaid balance API;
+- TypeSafe, the API key from the dashboard. TypeSafe publishes no spend
+  endpoint, so Reserve lists the models that key can send and the documented
+  input price. It does not call System One, which would consume the account.
+
+Where a provider groups its billing, Reserve asks for the grouping and shows
+what the spend went on: models for Anthropic, billing line items for OpenAI.
+The card names a model only when one of them is most of the bill; the full
+breakdown is in the tooltip and in Settings. A provider that will not accept
+the grouping still reports its total.
+
+Each row has **Get a key**, which opens that provider's own key page in your
+browser; the field shows the prefix to expect. Refreshing Reserve refreshes
+these measurements along with the subscription cards.
+
+Those calls report spend. They do not replace the subscription cards, and a
+key is sent only to the provider that issued it.
+
 The optional comparable-value view is an API-equivalent estimate, not a provider bill.
 OpenAI and Anthropic use the observed input/cache/output mix when available;
 Grok exposes an aggregate token count, so its comparison is approximate.

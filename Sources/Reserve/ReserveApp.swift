@@ -57,7 +57,7 @@ enum ReserveApp {
         "--self-test-ui", "--self-test-lifecycle", "--self-test-connections", "--stress-ui",
         "--render-dashboard", "--render-settings", "--render-appearance",
         "--render-about", "--render-alerts", "--render-insights",
-        "--render-providers", "--render-menu-bar", "--render-provider-setup",
+        "--render-providers", "--render-api", "--render-menu-bar", "--render-provider-setup",
         "--capture-lifecycle",
         "--verify-notifications", "--show-claude-prompt", "--show-cursor-prompt",
       ]
@@ -133,6 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let alertsRenderIndex = CommandLine.arguments.firstIndex(of: "--render-alerts")
     let insightsRenderIndex = CommandLine.arguments.firstIndex(of: "--render-insights")
     let providersRenderIndex = CommandLine.arguments.firstIndex(of: "--render-providers")
+    let apiRenderIndex = CommandLine.arguments.firstIndex(of: "--render-api")
     let menuBarRenderIndex = CommandLine.arguments.firstIndex(of: "--render-menu-bar")
     let providerSetupRenderIndex = CommandLine.arguments.firstIndex(
       of: "--render-provider-setup")
@@ -144,7 +145,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let isNotificationVerification = CommandLine.arguments.contains("--verify-notifications")
     let isAutomatedRun = isConnectionSelfTest || isUISelfTest || renderIndex != nil || settingsRenderIndex != nil
       || appearanceRenderIndex != nil || aboutRenderIndex != nil || alertsRenderIndex != nil
-      || insightsRenderIndex != nil || providersRenderIndex != nil || menuBarRenderIndex != nil
+      || insightsRenderIndex != nil || providersRenderIndex != nil || apiRenderIndex != nil
+      || menuBarRenderIndex != nil
       || providerSetupRenderIndex != nil
       || isUIStressTest || isLifecycleSelfTest || lifecycleCaptureIndex != nil
       || isNotificationVerification || isClaudePromptPreview || isCursorPromptPreview
@@ -245,6 +247,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       CommandLine.arguments.indices.contains(providersRenderIndex + 1)
     {
       self.renderProviders(path: CommandLine.arguments[providersRenderIndex + 1])
+    } else if let apiRenderIndex,
+      CommandLine.arguments.indices.contains(apiRenderIndex + 1)
+    {
+      self.renderAPI(path: CommandLine.arguments[apiRenderIndex + 1])
     } else if let menuBarRenderIndex,
       CommandLine.arguments.indices.contains(menuBarRenderIndex + 1)
     {
@@ -495,6 +501,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       Self.finishUISelfTest(success: true, details: "providers rendered to \(path)")
     } catch {
       Self.finishUISelfTest(success: false, details: "providers render failed: \(error)")
+    }
+  }
+
+  private func renderAPI(path: String) {
+    guard let settingsController = self.settingsControllerForUse() else {
+      Self.finishUISelfTest(success: false, details: "settings controller was not created")
+      return
+    }
+    do {
+      try settingsController.renderAPI(to: URL(fileURLWithPath: path))
+      Self.finishUISelfTest(success: true, details: "api rendered to \(path)")
+    } catch {
+      Self.finishUISelfTest(success: false, details: "api render failed: \(error)")
     }
   }
 

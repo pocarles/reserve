@@ -33,6 +33,12 @@ binary="$app/Contents/MacOS/Reserve"
 privacy="$app/Contents/Resources/PrivacyInfo.xcprivacy"
 resource_bundle="$app/Contents/Resources/Reserve_Reserve.bundle"
 provider_logos="$resource_bundle/ProviderLogos"
+login_helper="$resource_bundle/ClaudeLoginBrowser.sh"
+# Swift 6.2+ emits an ordinary bundle whose resources sit under Contents.
+if [[ ! -f "$provider_logos/openAI.svg" ]]; then
+  provider_logos="$resource_bundle/Contents/Resources/ProviderLogos"
+  login_helper="$resource_bundle/Contents/Resources/ClaudeLoginBrowser.sh"
+fi
 sparkle="$app/Contents/Frameworks/Sparkle.framework"
 [[ -f "$plist" && -x "$binary" && -f "$privacy" \
   && -d "$sparkle" && -x "$sparkle/Versions/B/Autoupdate" \
@@ -42,7 +48,7 @@ sparkle="$app/Contents/Frameworks/Sparkle.framework"
   && -f "$provider_logos/anthropic.svg" \
   && -f "$provider_logos/grok.svg" \
   && -f "$provider_logos/cursor.svg" \
-  && -x "$resource_bundle/ClaudeLoginBrowser.sh" ]] || {
+  && -x "$login_helper" ]] || {
   echo "error: package is missing required app files" >&2
   exit 65
 }

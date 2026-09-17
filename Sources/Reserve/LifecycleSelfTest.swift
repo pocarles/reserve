@@ -570,7 +570,7 @@ enum LifecycleSelfTest {
       actions: DashboardActions(
         refreshAll: {}, connectProvider: { _ in }, selectMenuBarProvider: { _ in },
         openSettings: {}, openInsights: {}, dismiss: {}, toggleProviderDetail: { _ in },
-        quit: {}))
+        quit: {}, apiConsumptionReadings: { [] }))
     dashboard.layoutSubtreeIfNeeded()
     guard let button = self.descendants(of: dashboard).compactMap({ $0 as? ReserveIconButton })
       .first(where: { $0.identifier?.rawValue == "refresh-all" })

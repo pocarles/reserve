@@ -26,8 +26,11 @@ before the impact and complexity are understood.
 
 Reserve is a same-user desktop utility. It reads explicitly documented local
 provider state, starts fixed provider commands, and connects to fixed provider
-and GitHub HTTPS destinations. It does not run a server, ingest untrusted remote
-documents, store credentials, or extract browser cookies.
+and GitHub HTTPS destinations. An optional API measurement stores a pasted
+OpenAI, Anthropic, OpenRouter, xAI, or TypeSafe key in the macOS Keychain and sends that
+key only to the matching provider's official billing host. It does not run a
+server, ingest untrusted remote documents, write keys to disk or preferences,
+or extract browser cookies.
 
 After a person explicitly chooses **Set up**, Reserve may download and execute
 one of four fixed provider-owned installer scripts:

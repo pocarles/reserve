@@ -23,6 +23,348 @@ private struct TestFailure: Error, CustomStringConvertible {
 }
 private func XCTFail(_ message: String) { Issue.record(TestFailure(description: message)) }
 
+@Suite
+struct APIConsumptionTests {
+  private func respond(
+    _ status: Int,
+    _ body: String,
+    to requests: ActorBox<[URLRequest]>
+  ) -> @Sendable (URLRequest) async throws -> (Data, URLResponse) {
+    { request in
+      await requests.add(request)
+      let response = HTTPURLResponse(
+        url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+      return (Data(body.utf8), response)
+    }
+  }
+
+  /// Replies in order, so a cursor walk and a rejected-then-retried request can
+  /// both be scripted. The last entry answers any further calls.
+  private func respondInSequence(
+    _ replies: [(status: Int, body: String)],
+    to requests: ActorBox<[URLRequest]>
+  ) -> @Sendable (URLRequest) async throws -> (Data, URLResponse) {
+    { request in
+      let index = await requests.value.count
+      await requests.add(request)
+      let reply = replies[min(index, replies.count - 1)]
+      let response = HTTPURLResponse(
+        url: request.url!, statusCode: reply.status, httpVersion: nil, headerFields: nil)!
+      return (Data(reply.body.utf8), response)
+    }
+  }
+
+  @Test
+  func testOpenAICostsAreSummedIntoTheCurrentMonth() async throws {
+    let requests = ActorBox<[URLRequest]>([])
+    let client = APIConsumptionClient(
+      requestHandler: self.respond(
+        200,
+        #"{"data":[{"results":[{"amount":{"value":1.25,"currency":"usd"}}]},{"results":[{"amount":{"value":0.5,"currency":"usd"}}]}]}"#,
+        to: requests),
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.openAI, apiKey: "sk-admin-test-key-value")
+    let window = try #require(snapshot.primary)
+    #expect(window.usedMinorUnits == 175)
+    #expect(window.label == "This month")
+    #expect(snapshot.source == "OpenAI Costs API")
+    let request = await requests.value.first
+    #expect(request?.url?.host == "api.openai.com")
+    #expect(request?.url?.path == "/v1/organization/costs")
+    #expect(request?.value(forHTTPHeaderField: "Authorization") == "Bearer sk-admin-test-key-value")
+  }
+
+  @Test
+  func testAnthropicCostReportReadsDecimalCents() async throws {
+    let client = APIConsumptionClient(
+      requestHandler: self.respond(
+        200,
+        #"{"data":[{"results":[{"amount":"123.45"},{"amount":"76.55"}]}]}"#,
+        to: ActorBox([])),
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.anthropic, apiKey: "sk-ant-admin-test")
+    #expect(snapshot.primary?.usedMinorUnits == 200)
+    #expect(snapshot.source == "Anthropic Cost API")
+  }
+
+  /// `limit` caps the key's credits outright, not any calendar window, so the
+  /// capped reading is the credit balance and the month stays uncapped.
+  @Test
+  func testOpenRouterKeyReportsEveryWindowAndCapsOnlyTheCredits() async throws {
+    let client = APIConsumptionClient(
+      requestHandler: self.respond(
+        200,
+        #"""
+        {"data":{"label":"laptop","usage":40.5,"usage_daily":1.5,"usage_weekly":6,\
+        "usage_monthly":12.34,"limit":50,"limit_remaining":9.5,"is_free_tier":false,\
+        "free_model_daily_requests":{"used":12,"limit":50,"remaining":38}}}
+        """#.replacingOccurrences(of: "\\\n", with: ""),
+        to: ActorBox([])),
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.openRouter, apiKey: "sk-or-v1-test-key")
+
+    func window(_ id: String) -> APIConsumptionWindow? {
+      snapshot.windows.first { $0.id == id }
+    }
+    #expect(window("today")?.usedMinorUnits == 150)
+    #expect(window("week")?.usedMinorUnits == 600)
+    #expect(window("month")?.usedMinorUnits == 1_234)
+    #expect(window("month")?.limitMinorUnits == nil)
+    // Spent is the cap less what is left, not lifetime usage.
+    #expect(window("credits")?.usedMinorUnits == 4_050)
+    #expect(window("credits")?.limitMinorUnits == 5_000)
+
+    #expect(snapshot.primary?.id == "credits")
+    #expect(window("month")?.detail?.contains("$40.50 all time") == true)
+    #expect(window("today")?.detail?.contains("12 of 50") == true)
+  }
+
+  /// An uncapped key reports a null limit, and nothing should invent a cap.
+  @Test
+  func testOpenRouterUncappedKeyLeadsWithTheMonth() async throws {
+    let client = APIConsumptionClient(
+      requestHandler: self.respond(
+        200,
+        #"{"data":{"usage":40.5,"usage_monthly":12.34,"limit":null}}"#,
+        to: ActorBox([])),
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.openRouter, apiKey: "sk-or-v1-test-key")
+    #expect(snapshot.windows.contains { $0.id == "credits" } == false)
+    #expect(snapshot.primary?.id == "month")
+    #expect(snapshot.primary?.limitMinorUnits == nil)
+  }
+
+  @Test
+  func testXAIPrepaidBalanceUsesTheValidatedTeam() async throws {
+    let requests = ActorBox<[URLRequest]>([])
+    let client = APIConsumptionClient(
+      requestHandler: { request in
+        await requests.add(request)
+        let path = request.url?.path ?? ""
+        let body =
+          path.contains("validation")
+          ? #"{"teamId":"65c1e471-205f-4566-9c5a-07198bcdf4ce","scopeId":"65c1e471-205f-4566-9c5a-07198bcdf4ce"}"#
+          : #"{"total":{"val":"7500"},"changes":[{"changeOrigin":"PURCHASE","amount":{"val":"-10000"}},{"changeOrigin":"SPEND","amount":{"val":"2500"}}]}"#
+        let response = HTTPURLResponse(
+          url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data(body.utf8), response)
+      },
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.xAI, apiKey: "xai-management-test-key")
+    #expect(snapshot.primary?.usedMinorUnits == 2_500)
+    #expect(snapshot.primary?.limitMinorUnits == 10_000)
+    let paths = await requests.value.compactMap { $0.url?.path }
+    #expect(paths == [
+      "/auth/management-keys/validation",
+      "/v1/billing/teams/65c1e471-205f-4566-9c5a-07198bcdf4ce/prepaid/balance",
+    ])
+  }
+
+  @Test
+  func testARefusedKeyDoesNotBecomeAZeroReading() async {
+    let client = APIConsumptionClient(
+      requestHandler: self.respond(401, #"{"error":"unauthorized"}"#, to: ActorBox([])))
+    do {
+      _ = try await client.fetch(.openAI, apiKey: "sk-admin-rejected")
+      Issue.record("a refused key was treated as a successful consumption read")
+    } catch let error as UsageProviderError {
+      guard case .unauthorized = error else {
+        Issue.record("expected unauthorized, got \(error)")
+        return
+      }
+    } catch {
+      Issue.record("unexpected error \(error)")
+    }
+  }
+
+  @Test
+  func testTypeSafeListsAccountModelsWithoutCallingSystemOne() async throws {
+    let requests = ActorBox<[URLRequest]>([])
+    let client = APIConsumptionClient(
+      requestHandler: { request in
+        await requests.add(request)
+        #expect(request.url?.host == "api.typesafe.ai")
+        #expect(request.url?.path == "/v1/models")
+        #expect(request.httpMethod == "GET" || request.httpMethod == nil)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer ts-test-key-value-16")
+        let body = #"{"models":[{"name":"jev-latest","description":"Current Jev","release_date":"2026-09-01"},{"name":"jev-preview","description":"Preview","release_date":"2026-09-01"}]}"#
+        let response = HTTPURLResponse(
+          url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data(body.utf8), response)
+      })
+    let snapshot = try await client.fetch(.typeSafe, apiKey: "ts-test-key-value-16")
+    #expect(snapshot.source == "TypeSafe Models API")
+    #expect(snapshot.windows.first { $0.id == "models" }?.usedMinorUnits == 2)
+    #expect(snapshot.windows.first { $0.id == "models" }?.detail == "jev-latest, jev-preview")
+    #expect(
+      snapshot.windows.first { $0.id == "price" }?.detail
+        == "$0.042 per million tokens · output free")
+    let paths = await requests.value.compactMap { $0.url?.path }
+    #expect(paths == ["/v1/models"])
+  }
+
+  /// The row hands these to the browser, so each has to be an https provider
+  /// page and each hint has to show the prefix that page issues.
+  /// The cost report returns 7 buckets unless asked otherwise, so a month has to
+  /// request 31 and follow the cursor. Without this the reading silently stops a
+  /// week into every month.
+  @Test
+  func testAnthropicAsksForAWholeMonthAndFollowsTheCursor() async throws {
+    let requests = ActorBox<[URLRequest]>([])
+    let client = APIConsumptionClient(
+      requestHandler: self.respondInSequence(
+        [
+          (
+            200,
+            #"{"data":[{"results":[{"amount":"100.00","model":"claude-opus-5"}]}],"#
+              + #""has_more":true,"next_page":"page_two"}"#
+          ),
+          (
+            200,
+            #"{"data":[{"results":[{"amount":"50.00","model":"claude-sonnet-5"}]}],"#
+              + #""has_more":false,"next_page":null}"#
+          ),
+        ],
+        to: requests),
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.anthropic, apiKey: "sk-ant-admin-test")
+
+    #expect(snapshot.primary?.usedMinorUnits == 150)
+    let sent = await requests.value
+    #expect(sent.count == 2)
+    #expect(sent.first?.url?.query?.contains("limit=31") == true)
+    #expect(sent.first?.url?.query?.contains("page=") == false)
+    #expect(sent.last?.url?.query?.contains("page=page_two") == true)
+    #expect(snapshot.breakdown.map(\.label) == ["claude-opus-5", "claude-sonnet-5"])
+    #expect(snapshot.breakdown.first?.usedMinorUnits == 100)
+  }
+
+  /// A cursor that keeps pointing at itself must not keep the app fetching.
+  @Test
+  func testARepeatingCursorStopsInsteadOfLooping() async throws {
+    let requests = ActorBox<[URLRequest]>([])
+    let client = APIConsumptionClient(
+      requestHandler: self.respondInSequence(
+        [(200, #"{"data":[{"results":[{"amount":"10.00"}]}],"has_more":true,"next_page":"same"}"#)],
+        to: requests),
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    _ = try await client.fetch(.anthropic, apiKey: "sk-ant-admin-test")
+    #expect(await requests.value.count == 2)
+  }
+
+  /// Grouping is what carries the per-model detail, but a provider that will not
+  /// accept the parameter must still yield a total rather than an error.
+  @Test
+  func testARejectedGroupingFallsBackToAPlainTotal() async throws {
+    let requests = ActorBox<[URLRequest]>([])
+    let client = APIConsumptionClient(
+      requestHandler: self.respondInSequence(
+        [
+          (400, #"{"error":{"message":"group_by is not supported"}}"#),
+          (200, #"{"data":[{"results":[{"amount":"250.00"}]}],"has_more":false}"#),
+        ],
+        to: requests),
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.anthropic, apiKey: "sk-ant-admin-test")
+
+    #expect(snapshot.primary?.usedMinorUnits == 250)
+    #expect(snapshot.breakdown.isEmpty)
+    #expect(snapshot.source == "Anthropic Cost API (ungrouped)")
+    let sent = await requests.value
+    #expect(sent.first?.url?.query?.contains("group_by") == true)
+    #expect(sent.last?.url?.query?.contains("group_by") == false)
+  }
+
+  /// A refused key is not a grouping problem, so it must surface as itself
+  /// instead of being retried into a different error.
+  @Test
+  func testARefusedKeyIsNotRetriedAsAGroupingProblem() async {
+    let requests = ActorBox<[URLRequest]>([])
+    let client = APIConsumptionClient(
+      requestHandler: self.respond(401, "{}", to: requests),
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    await #expect(throws: UsageProviderError.self) {
+      _ = try await client.fetch(.anthropic, apiKey: "sk-ant-admin-test")
+    }
+    #expect(await requests.value.count == 1)
+  }
+
+  @Test
+  func testOpenAIBreaksSpendDownByLineItem() async throws {
+    let requests = ActorBox<[URLRequest]>([])
+    let client = APIConsumptionClient(
+      requestHandler: self.respond(
+        200,
+        #"{"data":[{"results":["#
+          + #"{"amount":{"value":1.00,"currency":"usd"},"line_item":"gpt-5, input"},"#
+          + #"{"amount":{"value":3.00,"currency":"usd"},"line_item":"gpt-5, output"}"#
+          + #"]}],"has_more":false}"#,
+        to: requests),
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.openAI, apiKey: "sk-admin-test-key-value")
+
+    #expect(snapshot.primary?.usedMinorUnits == 400)
+    #expect(snapshot.breakdown.map(\.label) == ["gpt-5, output", "gpt-5, input"])
+    #expect(await requests.value.first?.url?.query?.contains("group_by=line_item") == true)
+  }
+
+  /// Naming one model at a glance is only honest when it really is most of the
+  /// spend; an even split must name nothing.
+  @Test
+  func testOnlyADominantContributorIsNamedAtAGlance() {
+    func snapshot(_ items: [(String, Int)]) -> APIConsumptionSnapshot {
+      APIConsumptionSnapshot(
+        provider: .anthropic,
+        windows: [APIConsumptionWindow(id: "month", label: "This month", usedMinorUnits: 100)],
+        breakdown: items.map { APIConsumptionItem(label: $0.0, usedMinorUnits: $0.1) },
+        source: "test")
+    }
+    #expect(snapshot([("opus", 900), ("sonnet", 100)]).dominantBreakdownItem?.label == "opus")
+    #expect(snapshot([("opus", 50), ("sonnet", 50)]).dominantBreakdownItem?.label == "opus")
+    #expect(snapshot([("opus", 40), ("sonnet", 35), ("haiku", 25)]).dominantBreakdownItem == nil)
+    #expect(snapshot([]).dominantBreakdownItem == nil)
+    // Sorted largest first and trimmed of anything that spent nothing.
+    #expect(snapshot([("a", 1), ("b", 9), ("c", 0)]).breakdown.map(\.label) == ["b", "a"])
+  }
+
+  @Test
+  func testEveryProviderOffersAnHTTPSKeyPageAndAHint() {
+    for provider in APIConsumptionProvider.allCases {
+      let url = provider.keySettingsURL
+      #expect(url.scheme == "https")
+      #expect(url.host?.isEmpty == false)
+      #expect(url.host == provider.endpointHost || url.host?.contains(".") == true)
+      #expect(provider.keyHint.isEmpty == false)
+      #expect(provider.keyKind.isEmpty == false)
+    }
+  }
+
+  @Test
+  func testPastedKeysDropWrappingWhitespace() throws {
+    let wrapped = try APIConsumptionKeychain.normalized(
+      "  xai-management-test-key\n", for: .xAI)
+    #expect(wrapped == "xai-management-test-key")
+  }
+
+  @Test
+  func testMoneyParsingRejectsMissingAndNegativeValues() {
+    #expect(APIConsumptionClient.minorUnits(from: nil) == 0)
+    #expect(APIConsumptionClient.minorUnits(from: -4) == 0)
+    #expect(APIConsumptionClient.minorUnits(from: 0.2) == 20)
+    #expect(APIConsumptionClient.minorUnits(fromDecimalCents: "0.4") == 0)
+    #expect(APIConsumptionClient.minorUnits(fromDecimalCents: "not-money") == 0)
+    #expect(APIConsumptionClient.minorUnits(fromCentString: "-1500") == 1_500)
+    #expect(APIConsumptionClient.isTeamIdentifier("../billing") == false)
+    #expect(APIConsumptionClient.isTeamIdentifier("65c1e471-205f-4566-9c5a-07198bcdf4ce"))
+  }
+}
+
+private actor ActorBox<Value> {
+  var value: Value
+  init(_ value: Value) { self.value = value }
+  func add(_ item: URLRequest) where Value == [URLRequest] { self.value.append(item) }
+}
+
 private func cleanTestDefaults(_ defaults: UserDefaults, suiteName: String) {
   defaults.removePersistentDomain(forName: suiteName)
   let plist = FileManager.default.homeDirectoryForCurrentUser

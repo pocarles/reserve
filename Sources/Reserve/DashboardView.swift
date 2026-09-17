@@ -11,6 +11,27 @@ struct DashboardActions {
   let dismiss: () -> Void
   let toggleProviderDetail: (ProviderID) -> Void
   let quit: () -> Void
+  /// Enabled API measurements. Empty unless a key has been saved, so the
+  /// section stays out of the subscription view.
+  let apiConsumptionReadings: () -> [APIConsumptionReading]
+}
+
+@MainActor
+extension APIConsumptionSnapshot {
+  /// The whole breakdown spelled out, for a tooltip where width is not scarce.
+  var breakdownSummary: String? {
+    guard !self.breakdown.isEmpty else { return nil }
+    return self.breakdown
+      .map { "\($0.label) \(DashboardFormat.money($0.usedUSD))" }
+      .joined(separator: " · ")
+  }
+}
+
+struct APIConsumptionReading {
+  let provider: APIConsumptionProvider
+  let snapshot: APIConsumptionSnapshot?
+  let error: String?
+  let isRefreshing: Bool
 }
 
 @MainActor
@@ -42,6 +63,7 @@ final class DashboardViewController: NSViewController {
     selectedMenuBarProvider: ProviderID?,
     expandedProvider: ProviderID?,
     isRefreshing: Bool,
+    apiReadings: [APIConsumptionReading] = [],
     now: Date
   ) -> String {
     var parts: [String] = [
@@ -92,6 +114,14 @@ final class DashboardViewController: NSViewController {
         parts.append(allowance.isPrimary ? "primary" : "secondary")
       }
     }
+    for reading in apiReadings {
+      parts.append("api")
+      parts.append(reading.provider.rawValue)
+      parts.append(reading.error ?? "-")
+      parts.append(reading.isRefreshing ? "measuring" : "-")
+      parts.append(reading.snapshot.map { String($0.primary?.usedMinorUnits ?? 0) } ?? "-")
+      parts.append(reading.snapshot?.breakdown.map(\.id).joined(separator: ",") ?? "-")
+    }
     return parts.joined(separator: "\u{1}")
   }
 
@@ -106,6 +136,7 @@ final class DashboardViewController: NSViewController {
       selectedMenuBarProvider: self.store.menuBarProvider,
       expandedProvider: self.store.expandedProvider,
       isRefreshing: self.store.isRefreshingAll || self.store.isScanningLocalUsage,
+      apiReadings: self.actions.apiConsumptionReadings(),
       now: now)
     if self.isViewLoaded, signature == self.lastSignature {
       for clock in Self.descendants(of: self.view).compactMap({ $0 as? any ReserveClockUpdating }) {
@@ -214,6 +245,12 @@ final class UsageDashboardView: NSView {
       let empty = EmptyProvidersView(openSettings: actions.openSettings)
       stack.addArrangedSubview(empty)
       last = empty
+    }
+    if let consumption = APIConsumptionSection(
+      readings: actions.apiConsumptionReadings(), now: now)
+    {
+      stack.addArrangedSubview(consumption)
+      last = consumption
     }
 
     let footer = DashboardFooterView(actions: actions)
@@ -404,6 +441,103 @@ final class DashboardMenuButton: NSButton {
   @objc private func openInsights() { self.actions.openInsights() }
   @objc private func openSettings() { self.actions.openSettings() }
   @objc private func quit() { self.actions.quit() }
+}
+
+/// API spend, kept apart from subscription limits. Absent unless a key was saved.
+@MainActor
+private final class APIConsumptionSection: NSView {
+  init?(readings: [APIConsumptionReading], now: Date) {
+    guard !readings.isEmpty else { return nil }
+    super.init(frame: .zero)
+    self.identifier = NSUserInterfaceItemIdentifier("api-consumption")
+    self.wantsLayer = true
+    let title = ReserveLabel(
+      "API consumption",
+      font: ReserveFont.sans(ReserveType.metadata, .semibold),
+      color: ReserveColor.muted)
+    var rows: [NSView] = [title]
+    for reading in readings {
+      rows.append(Self.row(reading, now: now))
+    }
+    let stack = NSStackView.column(rows, spacing: 7)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(stack)
+    NSLayoutConstraint.activate([
+      stack.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 12),
+      stack.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -12),
+      stack.topAnchor.constraint(equalTo: self.topAnchor, constant: 10),
+      stack.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -10),
+      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
+    ])
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func draw(_ dirtyRect: NSRect) {
+    let path = NSBezierPath(
+      roundedRect: self.bounds, xRadius: ReserveRadius.section, yRadius: ReserveRadius.section)
+    ReserveColor.section.setFill()
+    path.fill()
+  }
+
+  private static func row(_ reading: APIConsumptionReading, now: Date) -> NSView {
+    let logo = ProviderLogo(api: reading.provider)
+    let name = ReserveLabel(
+      reading.provider.displayName,
+      font: ReserveFont.sans(ReserveType.body, .medium),
+      color: ReserveColor.text
+    ).width(84)
+    let value: String
+    let detail: String
+    if reading.isRefreshing, reading.snapshot == nil {
+      value = "Measuring"
+      detail = reading.provider.keyKind
+    } else if reading.provider == .typeSafe, let snapshot = reading.snapshot {
+      value = Self.typeSafeSummary(snapshot)
+      detail = snapshot.windows.compactMap(\.detail).dropFirst().first
+        ?? snapshot.windows.compactMap(\.detail).first
+        ?? snapshot.source
+    } else if let primary = reading.snapshot?.primary {
+      value = DashboardFormat.money(primary.usedUSD)
+      var caption: String
+      if let limit = primary.limitUSD {
+        caption = "of \(DashboardFormat.money(limit)) · \(primary.label)"
+      } else if let reset = primary.resetsAt, reset > now {
+        caption = "\(primary.label) · resets \(DashboardFormat.moment(reset, now: now))"
+      } else {
+        caption = primary.label
+      }
+      // Naming the model is only worth the width when one of them dominates.
+      if let leader = reading.snapshot?.dominantBreakdownItem {
+        caption += " · mostly \(leader.label)"
+      }
+      detail = caption
+    } else {
+      value = "—"
+      detail = reading.error ?? "Waiting for the first read"
+    }
+    let amount = ReserveLabel(
+      value, font: ReserveFont.digits(ReserveType.body, .semibold), color: ReserveColor.text
+    ).fitted()
+    let caption = ReserveLabel(
+      detail, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+    ).flexible()
+    caption.toolTip = reading.error ?? reading.snapshot?.breakdownSummary ?? detail
+    let row = NSStackView.row([logo, name, amount, caption], spacing: 8)
+    row.identifier = NSUserInterfaceItemIdentifier(
+      "api-consumption-\(reading.provider.rawValue)")
+    row.widthAnchor.constraint(
+      equalToConstant: DashboardMetrics.contentWidth - 24).isActive = true
+    return row
+  }
+
+  private static func typeSafeSummary(_ snapshot: APIConsumptionSnapshot) -> String {
+    if let models = snapshot.windows.first(where: { $0.id == "models" }) {
+      let count = models.usedMinorUnits
+      return count == 1 ? "1 model" : "\(count) models"
+    }
+    return snapshot.windows.compactMap(\.detail).first ?? "Connected"
+  }
 }
 
 /// One provider, rendered with the same anatomy regardless of how many limit
@@ -1288,25 +1422,51 @@ private final class UsageDetailGrid: NSView {
 
 @MainActor
 private final class ProviderLogo: ReserveSurface {
-  init(provider: ProviderID) {
+  /// The API rows sit in a denser list than the provider cards, so the mark is
+  /// drawn smaller there but keeps the same shape and tinting rules.
+  convenience init(api provider: APIConsumptionProvider) {
+    self.init(
+      image: ProviderArtwork.image(for: provider),
+      identifier: "api-logo-\(provider.rawValue)",
+      tinted: provider != .anthropic,
+      size: 20,
+      markSize: 12)
+  }
+
+  convenience init(provider: ProviderID) {
+    self.init(
+      image: ProviderArtwork.image(for: provider),
+      identifier: "provider-logo-\(provider.rawValue)",
+      tinted: provider != .anthropic,
+      size: 26,
+      markSize: 15)
+  }
+
+  private init(
+    image source: NSImage,
+    identifier: String,
+    tinted: Bool,
+    size: CGFloat,
+    markSize: CGFloat
+  ) {
     super.init(fill: ReserveColor.elevated, fillAlpha: 0.8, radius: 8)
-    self.identifier = NSUserInterfaceItemIdentifier("provider-logo-\(provider.rawValue)")
+    self.identifier = NSUserInterfaceItemIdentifier(identifier)
     self.setAccessibilityElement(false)
-    let image = NSImageView(image: ProviderArtwork.image(for: provider))
+    let image = NSImageView(image: source)
     // The mark repeats the row's own label, so it stays silent.
     image.setAccessibilityElement(false)
     image.setAccessibilityLabel("")
-    image.contentTintColor = provider != .anthropic ? ReserveColor.text : nil
+    image.contentTintColor = tinted ? ReserveColor.text : nil
     image.imageScaling = .scaleProportionallyUpOrDown
     image.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(image)
     NSLayoutConstraint.activate([
-      self.widthAnchor.constraint(equalToConstant: 26),
-      self.heightAnchor.constraint(equalToConstant: 26),
+      self.widthAnchor.constraint(equalToConstant: size),
+      self.heightAnchor.constraint(equalToConstant: size),
       image.centerXAnchor.constraint(equalTo: self.centerXAnchor),
       image.centerYAnchor.constraint(equalTo: self.centerYAnchor),
-      image.widthAnchor.constraint(equalToConstant: 15),
-      image.heightAnchor.constraint(equalToConstant: 15),
+      image.widthAnchor.constraint(equalToConstant: markSize),
+      image.heightAnchor.constraint(equalToConstant: markSize),
     ])
   }
 
