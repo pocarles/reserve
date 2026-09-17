@@ -481,11 +481,12 @@ private final class APIConsumptionSection: NSView {
   }
 
   private static func row(_ reading: APIConsumptionReading, now: Date) -> NSView {
+    let logo = ProviderLogo(api: reading.provider)
     let name = ReserveLabel(
       reading.provider.displayName,
       font: ReserveFont.sans(ReserveType.body, .medium),
       color: ReserveColor.text
-    ).width(92)
+    ).width(84)
     let value: String
     let detail: String
     if reading.isRefreshing, reading.snapshot == nil {
@@ -522,7 +523,7 @@ private final class APIConsumptionSection: NSView {
       detail, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
     ).flexible()
     caption.toolTip = reading.error ?? reading.snapshot?.breakdownSummary ?? detail
-    let row = NSStackView.row([name, amount, caption], spacing: 8)
+    let row = NSStackView.row([logo, name, amount, caption], spacing: 8)
     row.identifier = NSUserInterfaceItemIdentifier(
       "api-consumption-\(reading.provider.rawValue)")
     row.widthAnchor.constraint(
@@ -1421,25 +1422,51 @@ private final class UsageDetailGrid: NSView {
 
 @MainActor
 private final class ProviderLogo: ReserveSurface {
-  init(provider: ProviderID) {
+  /// The API rows sit in a denser list than the provider cards, so the mark is
+  /// drawn smaller there but keeps the same shape and tinting rules.
+  convenience init(api provider: APIConsumptionProvider) {
+    self.init(
+      image: ProviderArtwork.image(for: provider),
+      identifier: "api-logo-\(provider.rawValue)",
+      tinted: provider != .anthropic,
+      size: 20,
+      markSize: 12)
+  }
+
+  convenience init(provider: ProviderID) {
+    self.init(
+      image: ProviderArtwork.image(for: provider),
+      identifier: "provider-logo-\(provider.rawValue)",
+      tinted: provider != .anthropic,
+      size: 26,
+      markSize: 15)
+  }
+
+  private init(
+    image source: NSImage,
+    identifier: String,
+    tinted: Bool,
+    size: CGFloat,
+    markSize: CGFloat
+  ) {
     super.init(fill: ReserveColor.elevated, fillAlpha: 0.8, radius: 8)
-    self.identifier = NSUserInterfaceItemIdentifier("provider-logo-\(provider.rawValue)")
+    self.identifier = NSUserInterfaceItemIdentifier(identifier)
     self.setAccessibilityElement(false)
-    let image = NSImageView(image: ProviderArtwork.image(for: provider))
+    let image = NSImageView(image: source)
     // The mark repeats the row's own label, so it stays silent.
     image.setAccessibilityElement(false)
     image.setAccessibilityLabel("")
-    image.contentTintColor = provider != .anthropic ? ReserveColor.text : nil
+    image.contentTintColor = tinted ? ReserveColor.text : nil
     image.imageScaling = .scaleProportionallyUpOrDown
     image.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(image)
     NSLayoutConstraint.activate([
-      self.widthAnchor.constraint(equalToConstant: 26),
-      self.heightAnchor.constraint(equalToConstant: 26),
+      self.widthAnchor.constraint(equalToConstant: size),
+      self.heightAnchor.constraint(equalToConstant: size),
       image.centerXAnchor.constraint(equalTo: self.centerXAnchor),
       image.centerYAnchor.constraint(equalTo: self.centerYAnchor),
-      image.widthAnchor.constraint(equalToConstant: 15),
-      image.heightAnchor.constraint(equalToConstant: 15),
+      image.widthAnchor.constraint(equalToConstant: markSize),
+      image.heightAnchor.constraint(equalToConstant: markSize),
     ])
   }
 

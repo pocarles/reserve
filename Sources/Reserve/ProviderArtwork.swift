@@ -24,6 +24,32 @@ enum ProviderArtwork {
     self.bundledImage(for: provider) != nil
   }
 
+  /// API accounts reuse the subscription mark when the same company publishes
+  /// both — Grok's bundled mark is xAI's. OpenRouter and TypeSafe get the
+  /// neutral initial rather than a mark invented for them here.
+  static func image(for provider: APIConsumptionProvider) -> NSImage {
+    let image =
+      switch provider {
+      case .openAI: self.image(for: ProviderID.openAI)
+      case .anthropic: self.image(for: ProviderID.anthropic)
+      case .xAI: self.image(for: ProviderID.grok)
+      case .openRouter: self.initialImage("OR")
+      case .typeSafe: self.initialImage("TS")
+      }
+    image.accessibilityDescription = provider.displayName
+    return image
+  }
+
+  /// True when the mark is the provider's own, false for a stand-in initial.
+  static func hasBundledMark(for provider: APIConsumptionProvider) -> Bool {
+    switch provider {
+    case .openAI: self.hasBundledMark(for: ProviderID.openAI)
+    case .anthropic: self.hasBundledMark(for: ProviderID.anthropic)
+    case .xAI: self.hasBundledMark(for: ProviderID.grok)
+    case .openRouter, .typeSafe: false
+    }
+  }
+
   private static func bundledImage(for provider: ProviderID) -> NSImage? {
     guard
       let url = Bundle.reserveResources.url(
@@ -47,13 +73,19 @@ enum ProviderArtwork {
       case .cursor: "C"
       case .copilot: "C"
       }
+    return self.initialImage(letter)
+  }
+
+  private static func initialImage(_ letters: String) -> NSImage {
     let size = NSSize(width: 18, height: 18)
+    // Two letters have to fit the same box a single one does.
+    let pointSize: CGFloat = letters.count > 1 ? 11 : 13
     let image = NSImage(size: size, flipped: false) { rect in
       let attributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+        .font: NSFont.systemFont(ofSize: pointSize, weight: .semibold),
         .foregroundColor: NSColor.black,
       ]
-      let string = NSAttributedString(string: letter, attributes: attributes)
+      let string = NSAttributedString(string: letters, attributes: attributes)
       let measured = string.size()
       string.draw(
         at: NSPoint(

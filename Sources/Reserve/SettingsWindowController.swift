@@ -977,7 +977,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       ?? status.stringValue
     status.lineBreakMode = .byTruncatingTail
     status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    let heading = NSStackView(views: [checkbox, name, kind, status])
+    let heading = NSStackView(views: [checkbox, SettingsProviderLogo(api: provider), name, kind, status])
     heading.orientation = .horizontal
     heading.alignment = .centerY
     heading.spacing = 8
@@ -2281,15 +2281,24 @@ private final class SettingsSeparator: NSView {
 
 @MainActor
 private final class SettingsProviderLogo: NSView {
-  init(provider: ProviderID) {
+  convenience init(api provider: APIConsumptionProvider) {
+    self.init(
+      image: ProviderArtwork.image(for: provider), tinted: provider != .anthropic)
+  }
+
+  convenience init(provider: ProviderID) {
+    self.init(image: ProviderArtwork.image(for: provider), tinted: provider != .anthropic)
+  }
+
+  private init(image source: NSImage, tinted: Bool) {
     super.init(frame: .zero)
     self.wantsLayer = true
     self.layer?.backgroundColor = self.resolvedCGColor(.controlBackgroundColor)
     self.layer?.cornerRadius = 5
     self.setAccessibilityElement(false)
-    let image = NSImageView(image: ProviderArtwork.image(for: provider))
+    let image = NSImageView(image: source)
     image.setAccessibilityElement(false)
-    image.contentTintColor = provider != .anthropic ? .labelColor : nil
+    image.contentTintColor = tinted ? .labelColor : nil
     image.imageScaling = .scaleProportionallyUpOrDown
     image.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(image)
