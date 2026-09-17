@@ -187,6 +187,10 @@ final class UsageStore {
   private var keychainAccessCompletions: [ProviderID: [() -> Void]] = [:]
   private var lastRefreshCompletedAt: Date?
   private var apiConsumptionTokens: [APIConsumptionProvider: Int] = [:]
+  /// Whether a key exists, remembered. The dashboard asks on every rebuild and
+  /// every minute tick, and each miss is a synchronous Keychain lookup on the
+  /// main actor for something that only changes when a key is saved or removed.
+  private var apiConsumptionKeyPresence: [APIConsumptionProvider: Bool] = [:]
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
   /// Which provider row is open in the popover. Transient interface state, so
@@ -867,13 +871,17 @@ final class UsageStore {
   }
 
   func hasAPIConsumptionKey(_ provider: APIConsumptionProvider) -> Bool {
-    APIConsumptionKeychain.hasKey(for: provider)
+    if let known = self.apiConsumptionKeyPresence[provider] { return known }
+    let present = APIConsumptionKeychain.hasKey(for: provider)
+    self.apiConsumptionKeyPresence[provider] = present
+    return present
   }
 
   /// Stores a pasted key and turns measurement on. The key is written to
   /// Keychain only; preferences record that the option is enabled.
   func saveAPIConsumptionKey(_ key: String, for provider: APIConsumptionProvider) throws {
     try APIConsumptionKeychain.save(key, for: provider)
+    self.apiConsumptionKeyPresence[provider] = true
     self.defaults.set(true, forKey: "apiConsumption.\(provider.rawValue).enabled")
     self.apiConsumptionErrors[provider] = nil
     self.changed()
@@ -882,6 +890,7 @@ final class UsageStore {
 
   func removeAPIConsumptionKey(_ provider: APIConsumptionProvider) {
     APIConsumptionKeychain.delete(for: provider)
+    self.apiConsumptionKeyPresence[provider] = false
     self.defaults.set(false, forKey: "apiConsumption.\(provider.rawValue).enabled")
     self.apiConsumption[provider] = nil
     self.apiConsumptionErrors[provider] = nil
@@ -1748,7 +1757,11 @@ final class UsageStore {
     let key: String
     do {
       key = try APIConsumptionKeychain.load(for: provider)
+      self.apiConsumptionKeyPresence[provider] = true
     } catch {
+      // The key went away behind Reserve's back, so the remembered answer is
+      // wrong and the row has to stop claiming a key is saved.
+      self.apiConsumptionKeyPresence[provider] = false
       guard isCurrent() else { return }
       self.apiConsumptionErrors[provider] = String(error.localizedDescription.prefix(240))
       return

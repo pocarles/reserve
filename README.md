@@ -168,7 +168,9 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
 - Anthropic, an organization admin key, read from the Cost Report API;
 - OpenRouter, the API key itself, read from that key's usage endpoint: today,
   this week, this month, and the credit balance when the key is capped;
-- xAI, a management key, read from the prepaid balance API;
+- xAI, a management key, read from the prepaid balance API: spend against
+  purchased credits when the transaction list explains the balance, and the
+  remaining balance on its own when it does not;
 - TypeSafe, the API key from the dashboard. TypeSafe publishes no spend
   endpoint, so Reserve lists the models that key can send and the documented
   input price. It does not call System One, which would consume the account.
