@@ -971,7 +971,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let status = SettingsLabel(
       self.apiReading(for: provider, saved: saved), size: 12, color: .secondaryLabelColor)
     status.identifier = NSUserInterfaceItemIdentifier("api-status-\(provider.rawValue)")
-    status.toolTip = self.store.apiConsumptionErrors[provider] ?? status.stringValue
+    status.toolTip =
+      self.store.apiConsumptionErrors[provider]
+      ?? self.store.apiConsumption[provider]?.breakdownSummary
+      ?? status.stringValue
     status.lineBreakMode = .byTruncatingTail
     status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     let heading = NSStackView(views: [checkbox, name, kind, status])
@@ -1048,9 +1051,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       return snapshot.windows.compactMap(\.detail).prefix(2).joined(separator: " · ")
     }
     if let primary = snapshot?.primary {
-      return primary.limitUSD.map {
-        "\(DashboardFormat.money(primary.usedUSD)) of \(DashboardFormat.money($0))"
-      } ?? "\(DashboardFormat.money(primary.usedUSD)) \(primary.label.lowercased())"
+      let reading =
+        primary.limitUSD.map {
+          "\(DashboardFormat.money(primary.usedUSD)) of \(DashboardFormat.money($0))"
+        } ?? "\(DashboardFormat.money(primary.usedUSD)) \(primary.label.lowercased())"
+      // Settings is wide enough to name what the spend went on, not just how much.
+      guard let snapshot, !snapshot.breakdown.isEmpty else { return reading }
+      let leaders = snapshot.breakdown.prefix(2)
+        .map { "\($0.label) \(DashboardFormat.money($0.usedUSD))" }
+        .joined(separator: " · ")
+      return "\(reading) — \(leaders)"
     }
     if saved {
       return self.store.isAPIConsumptionEnabled(provider) ? "Waiting for first read" : "Key saved"

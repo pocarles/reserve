@@ -166,11 +166,18 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
 
 - OpenAI, an organization admin key, read from the Costs API;
 - Anthropic, an organization admin key, read from the Cost Report API;
-- OpenRouter, the API key itself, read from that key's usage endpoint;
+- OpenRouter, the API key itself, read from that key's usage endpoint: today,
+  this week, this month, and the credit balance when the key is capped;
 - xAI, a management key, read from the prepaid balance API;
 - TypeSafe, the API key from the dashboard. TypeSafe publishes no spend
   endpoint, so Reserve lists the models that key can send and the documented
   input price. It does not call System One, which would consume the account.
+
+Where a provider groups its billing, Reserve asks for the grouping and shows
+what the spend went on: models for Anthropic, billing line items for OpenAI.
+The card names a model only when one of them is most of the bill; the full
+breakdown is in the tooltip and in Settings. A provider that will not accept
+the grouping still reports its total.
 
 Each row has **Get a key**, which opens that provider's own key page in your
 browser; the field shows the prefix to expect. Refreshing Reserve refreshes

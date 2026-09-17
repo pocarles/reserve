@@ -16,6 +16,17 @@ struct DashboardActions {
   let apiConsumptionReadings: () -> [APIConsumptionReading]
 }
 
+@MainActor
+extension APIConsumptionSnapshot {
+  /// The whole breakdown spelled out, for a tooltip where width is not scarce.
+  var breakdownSummary: String? {
+    guard !self.breakdown.isEmpty else { return nil }
+    return self.breakdown
+      .map { "\($0.label) \(DashboardFormat.money($0.usedUSD))" }
+      .joined(separator: " · ")
+  }
+}
+
 struct APIConsumptionReading {
   let provider: APIConsumptionProvider
   let snapshot: APIConsumptionSnapshot?
@@ -109,6 +120,7 @@ final class DashboardViewController: NSViewController {
       parts.append(reading.error ?? "-")
       parts.append(reading.isRefreshing ? "measuring" : "-")
       parts.append(reading.snapshot.map { String($0.primary?.usedMinorUnits ?? 0) } ?? "-")
+      parts.append(reading.snapshot?.breakdown.map(\.id).joined(separator: ",") ?? "-")
     }
     return parts.joined(separator: "\u{1}")
   }
@@ -486,13 +498,19 @@ private final class APIConsumptionSection: NSView {
         ?? snapshot.source
     } else if let primary = reading.snapshot?.primary {
       value = DashboardFormat.money(primary.usedUSD)
+      var caption: String
       if let limit = primary.limitUSD {
-        detail = "of \(DashboardFormat.money(limit)) · \(primary.label)"
+        caption = "of \(DashboardFormat.money(limit)) · \(primary.label)"
       } else if let reset = primary.resetsAt, reset > now {
-        detail = "\(primary.label) · resets \(DashboardFormat.moment(reset, now: now))"
+        caption = "\(primary.label) · resets \(DashboardFormat.moment(reset, now: now))"
       } else {
-        detail = primary.label
+        caption = primary.label
       }
+      // Naming the model is only worth the width when one of them dominates.
+      if let leader = reading.snapshot?.dominantBreakdownItem {
+        caption += " · mostly \(leader.label)"
+      }
+      detail = caption
     } else {
       value = "—"
       detail = reading.error ?? "Waiting for the first read"
@@ -503,7 +521,7 @@ private final class APIConsumptionSection: NSView {
     let caption = ReserveLabel(
       detail, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
     ).flexible()
-    caption.toolTip = reading.error ?? detail
+    caption.toolTip = reading.error ?? reading.snapshot?.breakdownSummary ?? detail
     let row = NSStackView.row([name, amount, caption], spacing: 8)
     row.identifier = NSUserInterfaceItemIdentifier(
       "api-consumption-\(reading.provider.rawValue)")
