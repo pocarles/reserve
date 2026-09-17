@@ -432,7 +432,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       isRefreshing: false, now: Date(), maximumHeight: compactCeiling,
       actions: DashboardActions(
         refreshAll: {}, connectProvider: { _ in }, selectMenuBarProvider: { _ in },
-        openSettings: {}, openInsights: {}, dismiss: {}, toggleProviderDetail: { _ in }, quit: {}))
+        openSettings: {}, openInsights: {}, dismiss: {}, toggleProviderDetail: { _ in },
+        quit: {}, apiConsumptionReadings: { [] }))
     compactDashboard.layoutSubtreeIfNeeded()
     let compactViews = Self.descendants(of: compactDashboard)
     let fifthProviderReachable: Bool
@@ -507,7 +508,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       actions: DashboardActions(
         refreshAll: {}, connectProvider: { _ in }, selectMenuBarProvider: { _ in },
         openSettings: {}, openInsights: {}, dismiss: {}, toggleProviderDetail: { _ in },
-        quit: {}))
+        quit: {}, apiConsumptionReadings: { [] }))
     refreshingView.layoutSubtreeIfNeeded()
     let busySpinner = Self.descendants(of: refreshingView).compactMap { $0 as? ReserveIconButton }
       .first { $0.identifier?.rawValue == "refresh-all" }
@@ -1210,6 +1211,19 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
   /// Insights lives in the Settings window. Opened from the dashboard it must
   /// come in front of the popover exactly as Settings does, or it lands behind.
+  private func apiConsumptionReadings() -> [APIConsumptionReading] {
+    APIConsumptionProvider.allCases.compactMap { provider in
+      guard self.store.isAPIConsumptionEnabled(provider),
+        self.store.hasAPIConsumptionKey(provider)
+      else { return nil }
+      return APIConsumptionReading(
+        provider: provider,
+        snapshot: self.store.apiConsumption[provider],
+        error: self.store.apiConsumptionErrors[provider],
+        isRefreshing: self.store.apiConsumptionRefreshing.contains(provider))
+    }
+  }
+
   private func showInsights() {
     self.openInsights()
     self.bringReserveWindowToFront(forClickedWindow: self.settingsWindow)
@@ -1244,7 +1258,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           }
           self.expandDashboard()
         },
-        quit: { NSApplication.shared.terminate(nil) }))
+        quit: { NSApplication.shared.terminate(nil) },
+        apiConsumptionReadings: { [weak self] in self?.apiConsumptionReadings() ?? [] }))
     self.dashboardController = controller
     self.popover.contentViewController = controller
     return controller

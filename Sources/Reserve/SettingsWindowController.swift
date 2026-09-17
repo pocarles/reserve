@@ -13,6 +13,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   enum Pane: String, CaseIterable {
     case general
     case providers
+    case api
     case notifications
     case appearance
     case insights
@@ -23,6 +24,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       switch self {
       case .general: "General"
       case .providers: "Providers"
+      case .api: "API"
       case .notifications: "Notifications"
       case .appearance: "Appearance"
       case .insights: "Insights"
@@ -35,6 +37,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       switch self {
       case .general: "gearshape"
       case .providers: "person.2"
+      case .api: "key"
       case .notifications: "bell"
       case .appearance: "paintpalette"
       case .insights: "chart.bar"
@@ -248,6 +251,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     switch self.pane {
     case .general: self.generalPane()
     case .providers: self.providersPane()
+    case .api: self.apiPane()
     case .notifications: self.notificationsPane()
     case .appearance: self.appearancePane()
     case .insights: self.insightsPane()
@@ -297,6 +301,25 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           title: nil,
           footer: "Reserve reuses your existing provider sign-ins. It never asks for passwords "
             + "or saves sign-ins. Claude and Cursor need your permission before Reserve can read their usage. macOS may also ask you to approve access.",
+          rows: rows)
+      ])
+  }
+
+  private func apiPane() -> NSView {
+    var rows: [NSView] = []
+    for provider in APIConsumptionProvider.allCases {
+      rows.append(self.apiProviderRow(provider))
+      if provider != APIConsumptionProvider.allCases.last {
+        rows.append(SettingsSeparator(width: SettingsLayout.contentWidth))
+      }
+    }
+    return self.pane(
+      identifier: "pane-api",
+      sections: [
+        self.section(
+          title: nil,
+          footer: "Paste a key to measure API spend. It is saved in the macOS Keychain on this "
+            + "Mac and sent only to that provider. Remove deletes it.",
           rows: rows)
       ])
   }
@@ -579,6 +602,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
               "Prompts or responses",
               "Raw provider payloads",
               "OAuth tokens, account identifiers or passwords",
+              "API keys — those stay in the macOS Keychain",
             ])
           ]),
         self.section(
@@ -587,6 +611,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           rows: [
             self.bullets([
               "Your providers, to read your limits",
+              "OpenAI, Anthropic, OpenRouter, xAI and TypeSafe APIs, only after you save a key",
               "Their official status pages",
               "GitHub, only to look for a Reserve update",
             ])
@@ -928,6 +953,162 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     return stack
   }
 
+  private func apiProviderRow(_ provider: APIConsumptionProvider) -> NSView {
+    let saved = self.store.hasAPIConsumptionKey(provider)
+    let checkbox = NSButton(
+      checkboxWithTitle: "", target: self, action: #selector(self.apiConsumptionChanged(_:)))
+    checkbox.identifier = NSUserInterfaceItemIdentifier("api-enabled-\(provider.rawValue)")
+    checkbox.state = self.store.isAPIConsumptionEnabled(provider) ? .on : .off
+    checkbox.isEnabled = saved
+    checkbox.toolTip =
+      saved
+      ? "Measure \(provider.displayName) API consumption"
+      : "Save a \(provider.keyKind.lowercased()) first"
+    checkbox.setAccessibilityLabel("Measure \(provider.displayName) API consumption")
+
+    let name = SettingsLabel(provider.displayName, size: 13, weight: .medium, color: .labelColor)
+    let kind = SettingsLabel(provider.keyKind, size: 12, color: .secondaryLabelColor)
+    let status = SettingsLabel(
+      self.apiReading(for: provider, saved: saved), size: 12, color: .secondaryLabelColor)
+    status.identifier = NSUserInterfaceItemIdentifier("api-status-\(provider.rawValue)")
+    status.toolTip = self.store.apiConsumptionErrors[provider] ?? status.stringValue
+    status.lineBreakMode = .byTruncatingTail
+    status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    let heading = NSStackView(views: [checkbox, name, kind, status])
+    heading.orientation = .horizontal
+    heading.alignment = .centerY
+    heading.spacing = 8
+
+    let tag = APIConsumptionProvider.allCases.firstIndex(of: provider) ?? 0
+    var buttons: [NSButton] = [
+      self.apiRowButton(
+        title: saved ? "Replace" : "Save",
+        identifier: "api-save-\(provider.rawValue)",
+        action: #selector(self.apiKeySubmitted(_:)),
+        tag: tag,
+        toolTip: "Save this key in the macOS Keychain",
+        accessibility: "Save \(provider.displayName) API key")
+    ]
+    if saved {
+      buttons.append(
+        self.apiRowButton(
+          title: "Remove",
+          identifier: "api-remove-\(provider.rawValue)",
+          action: #selector(self.apiKeyRemoved(_:)),
+          tag: tag,
+          toolTip: "Delete this key from the macOS Keychain",
+          accessibility: "Remove the saved \(provider.displayName) API key"))
+    }
+    // The key is created on the provider's own site, so the row hands the
+    // browser the exact page rather than leaving people to find it.
+    buttons.append(
+      self.apiRowButton(
+        title: "Get a key",
+        identifier: "api-page-\(provider.rawValue)",
+        action: #selector(self.apiKeyPageOpened(_:)),
+        tag: tag,
+        toolTip: "Open \(provider.keySettingsURL.host ?? "the provider") to create a "
+          + provider.keyKind.lowercased(),
+        accessibility: "Get a \(provider.displayName) \(provider.keyKind.lowercased())"))
+
+    let field = self.apiCredentialField(
+      identifier: "api-key-\(provider.rawValue)",
+      placeholder: saved ? "Replace key" : provider.keyHint,
+      accessibility: "\(provider.displayName) API key",
+      toolTip: "Paste a \(provider.displayName) \(provider.keyKind.lowercased()) "
+        + "(\(provider.keyHint)). Return saves it.",
+      minimumWidth: 120)
+
+    let fields = NSStackView(views: [field] + buttons)
+    fields.orientation = .horizontal
+    fields.alignment = .centerY
+    fields.spacing = 8
+    // The row is pinned to the pane; the field takes whatever the buttons leave,
+    // so a saved provider showing three buttons still lines up with the footer.
+    fields.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+    for button in buttons {
+      button.setContentHuggingPriority(.required, for: .horizontal)
+      button.setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    let row = NSStackView(views: [heading, fields])
+    row.identifier = NSUserInterfaceItemIdentifier("api-provider-\(provider.rawValue)")
+    row.orientation = .vertical
+    row.alignment = .leading
+    row.spacing = 6
+    row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+    return row
+  }
+
+  private func apiReading(for provider: APIConsumptionProvider, saved: Bool) -> String {
+    if self.store.apiConsumptionRefreshing.contains(provider) { return "Measuring…" }
+    let snapshot = self.store.apiConsumption[provider]
+    if self.store.apiConsumptionErrors[provider] != nil, snapshot == nil { return "Needs attention" }
+    if provider == .typeSafe, let snapshot {
+      return snapshot.windows.compactMap(\.detail).prefix(2).joined(separator: " · ")
+    }
+    if let primary = snapshot?.primary {
+      return primary.limitUSD.map {
+        "\(DashboardFormat.money(primary.usedUSD)) of \(DashboardFormat.money($0))"
+      } ?? "\(DashboardFormat.money(primary.usedUSD)) \(primary.label.lowercased())"
+    }
+    if saved {
+      return self.store.isAPIConsumptionEnabled(provider) ? "Waiting for first read" : "Key saved"
+    }
+    return "No key"
+  }
+
+  private func apiRowButton(
+    title: String,
+    identifier: String,
+    action: Selector,
+    tag: Int,
+    toolTip: String,
+    accessibility: String
+  ) -> NSButton {
+    let button = NSButton(title: title, target: self, action: action)
+    button.identifier = NSUserInterfaceItemIdentifier(identifier)
+    button.bezelStyle = .rounded
+    button.controlSize = .small
+    button.tag = tag
+    button.toolTip = toolTip
+    button.setAccessibilityLabel(accessibility)
+    return button
+  }
+
+  /// A normal field, not a secure one. Secure fields block paste and draw a
+  /// focus ring that does not match the rest of Settings. The value is cleared
+  /// as soon as it is saved to Keychain.
+  private func apiCredentialField(
+    identifier: String,
+    placeholder: String,
+    accessibility: String,
+    toolTip: String,
+    minimumWidth: CGFloat
+  ) -> NSTextField {
+    let field = NSTextField()
+    field.identifier = NSUserInterfaceItemIdentifier(identifier)
+    field.placeholderString = placeholder
+    field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    field.isBezeled = true
+    field.bezelStyle = .roundedBezel
+    field.lineBreakMode = .byTruncatingTail
+    field.cell?.wraps = false
+    field.cell?.isScrollable = true
+    field.maximumNumberOfLines = 1
+    field.target = self
+    field.action = #selector(self.apiKeySubmitted(_:))
+    field.toolTip = toolTip
+    field.setAccessibilityLabel(accessibility)
+    // Yields rather than breaking the row if a provider's buttons ever grow wide.
+    let floor = field.widthAnchor.constraint(greaterThanOrEqualToConstant: minimumWidth)
+    floor.priority = .defaultHigh
+    floor.isActive = true
+    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    return field
+  }
+
   private func insightRow(_ provider: ProviderID) -> NSView {
     let logo = SettingsProviderLogo(provider: provider)
     let name = SettingsLabel(provider.displayName, size: 13, color: .labelColor)
@@ -1192,6 +1373,65 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       alert.informativeText = error.localizedDescription
       alert.addButton(withTitle: "OK")
       alert.runModal()
+    }
+  }
+
+  @objc private func apiConsumptionChanged(_ sender: NSButton) {
+    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(of: "api-enabled-", with: "")
+    guard let provider = APIConsumptionProvider(rawValue: raw) else { return }
+    self.store.setAPIConsumptionEnabled(provider, enabled: sender.state == .on)
+    self.applyPane(animated: false)
+  }
+
+  @objc private func apiKeySubmitted(_ sender: NSControl) {
+    guard let provider = self.apiProvider(for: sender),
+      let field = self.apiKeyField(for: provider)
+    else { return }
+    let value = field.stringValue
+    guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    do {
+      try self.store.saveAPIConsumptionKey(value, for: provider)
+      self.clearAPICredentialFields(for: provider)
+      field.stringValue = ""
+    } catch {
+      self.presentError(error)
+    }
+    self.applyPane(animated: false)
+  }
+
+  @objc private func apiKeyPageOpened(_ sender: NSButton) {
+    guard let provider = self.apiProvider(for: sender) else { return }
+    let url = provider.keySettingsURL
+    guard url.scheme?.lowercased() == "https" else { return }
+    NSWorkspace.shared.open(url)
+  }
+
+  @objc private func apiKeyRemoved(_ sender: NSButton) {
+    guard let provider = self.apiProvider(for: sender) else { return }
+    self.store.removeAPIConsumptionKey(provider)
+    self.applyPane(animated: false)
+  }
+
+  private func apiProvider(for sender: NSControl) -> APIConsumptionProvider? {
+    if let raw = sender.identifier?.rawValue {
+      for provider in APIConsumptionProvider.allCases where raw.hasSuffix("-\(provider.rawValue)") {
+        return provider
+      }
+    }
+    let index = sender.tag
+    return APIConsumptionProvider.allCases.indices.contains(index)
+      ? APIConsumptionProvider.allCases[index] : nil
+  }
+
+  private func clearAPICredentialFields(for provider: APIConsumptionProvider) {
+    self.apiKeyField(for: provider)?.stringValue = ""
+  }
+
+  private func apiKeyField(for provider: APIConsumptionProvider) -> NSTextField? {
+    self.window?.contentView.flatMap { view in
+      Self.descendants(of: view).compactMap { $0 as? NSTextField }.first {
+        $0.identifier?.rawValue == "api-key-\(provider.rawValue)"
+      }
     }
   }
 
@@ -1564,6 +1804,25 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       && renewalInputWorks
     self.expandedProviders = []
 
+    self.pane = .api
+    self.applyPane(animated: false)
+    let apiIDs = identifiers()
+    let apiKeyEntryPresent = APIConsumptionProvider.allCases.allSatisfy {
+      apiIDs.contains("api-provider-\($0.rawValue)")
+        && apiIDs.contains("api-key-\($0.rawValue)")
+        && apiIDs.contains("api-save-\($0.rawValue)")
+        && apiIDs.contains("api-enabled-\($0.rawValue)")
+        && apiIDs.contains("api-page-\($0.rawValue)")
+    }
+    // Every key page must be an https provider URL the row can hand the browser.
+    let apiKeyPagesAreHTTPS = APIConsumptionProvider.allCases.allSatisfy {
+      $0.keySettingsURL.scheme?.lowercased() == "https" && $0.keySettingsURL.host?.isEmpty == false
+    }
+    let apiMeasurementStartsOff = APIConsumptionProvider.allCases.allSatisfy {
+      !self.store.isAPIConsumptionEnabled($0)
+    }
+    let apiSuccess = apiKeyEntryPresent && apiMeasurementStartsOff && apiKeyPagesAreHTTPS
+
     // Notifications: smart alerts first, thresholds behind Advanced.
     self.pane = .notifications
     self.applyPane(animated: false)
@@ -1675,12 +1934,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
     let success =
       isNative && usesMenuBarWindowLevel && allPanesFit && allPanesReadable && generalSuccess
-      && providersSuccess && notificationsSuccess && appearanceSuccess && insightsSuccess
+      && providersSuccess && apiSuccess && notificationsSuccess && appearanceSuccess && insightsSuccess
       && privacySuccess && aboutSuccess && closeReleasesHiddenPane && reopenRebuildsPane
     let details =
       success
       ? "settings is a native toolbar window with \(Pane.allCases.count) resizable panes, one General menu-bar model, adaptive full-surface themes with fixed quota semantics, deficit transition alerts, provider detail behind disclosure, and an About pane carrying identity, updates and links"
-      : "settings native=\(isNative), floating=\(usesMenuBarWindowLevel), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess), about=\(aboutSuccess), closeReleases=\(closeReleasesHiddenPane), reopenRebuilds=\(reopenRebuildsPane)"
+      : "settings native=\(isNative), floating=\(usesMenuBarWindowLevel), panes=[\(paneResults.joined(separator: ","))], fit=\(allPanesFit), readable=\(allPanesReadable), general=\(generalSuccess), providers=\(providersSuccess), api=\(apiSuccess), notifications=\(notificationsSuccess), appearance=\(appearanceSuccess), insights=\(insightsSuccess), privacy=\(privacySuccess), about=\(aboutSuccess), closeReleases=\(closeReleasesHiddenPane), reopenRebuilds=\(reopenRebuildsPane)"
     return (success, details)
   }
 
@@ -1692,6 +1951,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   func renderAlerts(to url: URL) throws { try self.renderPane(.notifications, to: url) }
   func renderInsights(to url: URL) throws { try self.renderPane(.insights, to: url) }
   func renderProviders(to url: URL) throws { try self.renderPane(.providers, to: url) }
+
+  func renderAPI(to url: URL) throws { try self.renderPane(.api, to: url) }
 
   private func renderPane(_ pane: Pane, to url: URL) throws {
     self.pane = pane
