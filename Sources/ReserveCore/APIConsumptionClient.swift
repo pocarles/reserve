@@ -170,6 +170,23 @@ public struct APIConsumptionItem: Codable, Equatable, Sendable, Identifiable {
   public var usedUSD: Double { Double(self.usedMinorUnits) / 100 }
 }
 
+/// What a provider reports when it publishes no spend endpoint at all. Kept out
+/// of `windows` so no display path can format a count or a balance as spend.
+public struct APIConsumptionNote: Codable, Equatable, Sendable {
+  public static let maximumHeadlineCharacters = 24
+  public static let maximumDetailCharacters = 180
+  public let headline: String
+  public let detail: String?
+
+  public init(headline: String, detail: String? = nil) {
+    self.headline = String(
+      headline.trimmingCharacters(in: .whitespacesAndNewlines)
+        .prefix(Self.maximumHeadlineCharacters))
+    let trimmed = detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    self.detail = trimmed.isEmpty ? nil : String(trimmed.prefix(Self.maximumDetailCharacters))
+  }
+}
+
 public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable {
   public static let maximumWindows = 8
   public static let maximumBreakdownItems = 6
@@ -180,6 +197,8 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
   /// What the spend went on, largest first. Empty when the provider offers no
   /// grouping, so a reader can tell "nothing to break down" from "not asked".
   public let breakdown: [APIConsumptionItem]
+  /// Set instead of `windows` when there is no spend figure to be had.
+  public let note: APIConsumptionNote?
   public let fetchedAt: Date
   public let source: String
 
@@ -187,10 +206,12 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
     provider: APIConsumptionProvider,
     windows: [APIConsumptionWindow],
     breakdown: [APIConsumptionItem] = [],
+    note: APIConsumptionNote? = nil,
     fetchedAt: Date = Date(),
     source: String
   ) {
     self.provider = provider
+    self.note = note
     self.windows = Array(windows.prefix(Self.maximumWindows))
     self.breakdown = Array(
       breakdown
@@ -202,7 +223,7 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
   }
 
   private enum CodingKeys: String, CodingKey {
-    case provider, windows, breakdown, fetchedAt, source
+    case provider, windows, breakdown, note, fetchedAt, source
   }
 
   public init(from decoder: Decoder) throws {
@@ -211,6 +232,7 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
       provider: try container.decode(APIConsumptionProvider.self, forKey: .provider),
       windows: try container.decode([APIConsumptionWindow].self, forKey: .windows),
       breakdown: try container.decodeIfPresent([APIConsumptionItem].self, forKey: .breakdown) ?? [],
+      note: try container.decodeIfPresent(APIConsumptionNote.self, forKey: .note),
       fetchedAt: try container.decode(Date.self, forKey: .fetchedAt),
       source: try container.decode(String.self, forKey: .source))
   }
@@ -579,29 +601,47 @@ public struct APIConsumptionClient: Sendable {
     }
     let balance = try await self.xAI(
       path: "/v1/billing/teams/\(team)/prepaid/balance", key: key, as: XAIBalance.self)
+
+    // `total` is the balance xAI itself reports and is the one number here that
+    // does not depend on reading a ledger correctly. The cap is only derived
+    // when the ledger fully explains that balance: an unrecognised entry means
+    // the sum is incomplete, and an incomplete sum must not become a cap.
     let remaining = Self.minorUnits(fromCentString: balance.total?.val)
     var purchased = 0
-    var spent = 0
+    var understoodEveryEntry = true
     for change in balance.changes ?? [] {
       let amount = Self.minorUnits(fromCentString: change.amount?.val)
       switch change.changeOrigin {
-      case "PURCHASE", "AUTO_PURCHASE", "REFUND":
+      case "PURCHASE", "AUTO_PURCHASE":
         purchased += amount
-      case "SPEND":
-        spent += amount
-      default:
+      case "SPEND", "REFUND", "EXPIRY", "EXPIRE", "ADJUSTMENT":
+        // Not credit added, so not part of what was bought.
         break
+      default:
+        understoodEveryEntry = false
       }
     }
-    let total = purchased > 0 ? purchased : remaining + spent
+
+    if understoodEveryEntry, purchased > 0, purchased >= remaining {
+      return APIConsumptionSnapshot(
+        provider: .xAI,
+        windows: [
+          APIConsumptionWindow(
+            id: "prepaid", label: "Prepaid credits",
+            usedMinorUnits: purchased - remaining,
+            limitMinorUnits: purchased,
+            detail: "\(Self.money(remaining)) left")
+        ],
+        fetchedAt: now,
+        source: "xAI Management API")
+    }
+    // Without a trustworthy cap, report the balance as the balance rather than
+    // inventing a spend figure to sit in a spend field.
     return APIConsumptionSnapshot(
       provider: .xAI,
-      windows: [
-        APIConsumptionWindow(
-          id: "prepaid", label: "Prepaid credits",
-          usedMinorUnits: min(spent, total),
-          limitMinorUnits: total > 0 ? total : nil)
-      ],
+      windows: [],
+      note: APIConsumptionNote(
+        headline: Self.money(remaining), detail: "prepaid credits left"),
       fetchedAt: now,
       source: "xAI Management API")
   }
@@ -643,20 +683,15 @@ public struct APIConsumptionClient: Sendable {
     guard !names.isEmpty else {
       throw UsageProviderError.unavailable("TypeSafe did not return any models for this key.")
     }
+    // No windows: a model count is not spend, and putting it in a spend field is
+    // how a count ends up rendered as a dollar amount.
     return APIConsumptionSnapshot(
       provider: .typeSafe,
-      windows: [
-        APIConsumptionWindow(
-          id: "models",
-          label: "Models",
-          usedMinorUnits: names.count,
-          detail: names.prefix(8).joined(separator: ", ")),
-        APIConsumptionWindow(
-          id: "price",
-          label: "Input price",
-          usedMinorUnits: 0,
-          detail: "$0.042 per million tokens · output free"),
-      ],
+      windows: [],
+      note: APIConsumptionNote(
+        headline: names.count == 1 ? "1 model" : "\(names.count) models",
+        detail: names.prefix(4).joined(separator: ", ")
+          + " · $0.042 per million tokens in, output free"),
       fetchedAt: now,
       source: "TypeSafe Models API")
   }

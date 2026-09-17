@@ -121,6 +121,7 @@ final class DashboardViewController: NSViewController {
       parts.append(reading.isRefreshing ? "measuring" : "-")
       parts.append(reading.snapshot.map { String($0.primary?.usedMinorUnits ?? 0) } ?? "-")
       parts.append(reading.snapshot?.breakdown.map(\.id).joined(separator: ",") ?? "-")
+      parts.append(reading.snapshot?.note?.headline ?? "-")
     }
     return parts.joined(separator: "\u{1}")
   }
@@ -492,11 +493,9 @@ private final class APIConsumptionSection: NSView {
     if reading.isRefreshing, reading.snapshot == nil {
       value = "Measuring"
       detail = reading.provider.keyKind
-    } else if reading.provider == .typeSafe, let snapshot = reading.snapshot {
-      value = Self.typeSafeSummary(snapshot)
-      detail = snapshot.windows.compactMap(\.detail).dropFirst().first
-        ?? snapshot.windows.compactMap(\.detail).first
-        ?? snapshot.source
+    } else if let note = reading.snapshot?.note {
+      value = note.headline
+      detail = note.detail ?? reading.snapshot?.source ?? ""
     } else if let primary = reading.snapshot?.primary {
       value = DashboardFormat.money(primary.usedUSD)
       var caption: String
@@ -531,13 +530,6 @@ private final class APIConsumptionSection: NSView {
     return row
   }
 
-  private static func typeSafeSummary(_ snapshot: APIConsumptionSnapshot) -> String {
-    if let models = snapshot.windows.first(where: { $0.id == "models" }) {
-      let count = models.usedMinorUnits
-      return count == 1 ? "1 model" : "\(count) models"
-    }
-    return snapshot.windows.compactMap(\.detail).first ?? "Connected"
-  }
 }
 
 /// One provider, rendered with the same anatomy regardless of how many limit

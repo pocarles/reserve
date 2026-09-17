@@ -160,6 +160,53 @@ struct APIConsumptionTests {
     ])
   }
 
+  /// An entry the ledger reader does not recognise means its sum is incomplete,
+  /// and an incomplete sum must not be presented as a spending cap.
+  @Test
+  func testXAIWillNotInventACapFromALedgerItDoesNotFullyUnderstand() async throws {
+    let client = APIConsumptionClient(
+      requestHandler: { request in
+        let path = request.url?.path ?? ""
+        let body =
+          path.contains("validation")
+          ? #"{"scopeId":"65c1e471-205f-4566-9c5a-07198bcdf4ce"}"#
+          : #"{"total":{"val":"7500"},"changes":["#
+            + #"{"changeOrigin":"PURCHASE","amount":{"val":"-10000"}},"#
+            + #"{"changeOrigin":"SOMETHING_NEW","amount":{"val":"4000"}}]}"#
+        let response = HTTPURLResponse(
+          url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data(body.utf8), response)
+      },
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.xAI, apiKey: "xai-management-test-key")
+
+    #expect(snapshot.windows.isEmpty)
+    #expect(snapshot.primary == nil)
+    #expect(snapshot.note?.headline == "$75.00")
+    #expect(snapshot.note?.detail == "prepaid credits left")
+  }
+
+  /// A balance larger than everything bought cannot be explained by the ledger,
+  /// so it is reported as a balance rather than as a negative spend.
+  @Test
+  func testXAIReportsABalanceItCannotExplainAsABalance() async throws {
+    let client = APIConsumptionClient(
+      requestHandler: { request in
+        let path = request.url?.path ?? ""
+        let body =
+          path.contains("validation")
+          ? #"{"scopeId":"65c1e471-205f-4566-9c5a-07198bcdf4ce"}"#
+          : #"{"total":{"val":"9000"},"changes":[{"changeOrigin":"PURCHASE","amount":{"val":"1000"}}]}"#
+        let response = HTTPURLResponse(
+          url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        return (Data(body.utf8), response)
+      },
+      now: { Date(timeIntervalSince1970: 1_758_067_200) })
+    let snapshot = try await client.fetch(.xAI, apiKey: "xai-management-test-key")
+    #expect(snapshot.note?.headline == "$90.00")
+    #expect(snapshot.windows.isEmpty)
+  }
+
   @Test
   func testARefusedKeyDoesNotBecomeAZeroReading() async {
     let client = APIConsumptionClient(
@@ -194,11 +241,13 @@ struct APIConsumptionTests {
       })
     let snapshot = try await client.fetch(.typeSafe, apiKey: "ts-test-key-value-16")
     #expect(snapshot.source == "TypeSafe Models API")
-    #expect(snapshot.windows.first { $0.id == "models" }?.usedMinorUnits == 2)
-    #expect(snapshot.windows.first { $0.id == "models" }?.detail == "jev-latest, jev-preview")
-    #expect(
-      snapshot.windows.first { $0.id == "price" }?.detail
-        == "$0.042 per million tokens · output free")
+    // A model count is not spend, so it must not occupy a spend field where a
+    // display path would format it as money.
+    #expect(snapshot.windows.isEmpty)
+    #expect(snapshot.primary == nil)
+    #expect(snapshot.note?.headline == "2 models")
+    #expect(snapshot.note?.detail?.contains("jev-latest, jev-preview") == true)
+    #expect(snapshot.note?.detail?.contains("$0.042 per million tokens in") == true)
     let paths = await requests.value.compactMap { $0.url?.path }
     #expect(paths == ["/v1/models"])
   }
