@@ -318,8 +318,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       sections: [
         self.section(
           title: nil,
-          footer: "Paste a key to measure API spend. It is saved in the macOS Keychain on this "
-            + "Mac and sent only to that provider. Remove deletes it.",
+          footer: "Paste a key to measure API spend or balance. It is saved in the macOS Keychain "
+            + "on this Mac and sent only to that provider. Remove deletes it. Some keys can "
+            + "also call models; for those, use one made just for Reserve.",
           rows: rows)
       ])
   }
@@ -611,7 +612,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           rows: [
             self.bullets([
               "Your providers, to read your limits",
-              "OpenAI, Anthropic, OpenRouter, xAI and TypeSafe APIs, only after you save a key",
+              "OpenAI, Anthropic, OpenRouter, xAI, TypeSafe, DeepSeek and Moonshot APIs, only after you save a key",
               "Their official status pages",
               "GitHub, only to look for a Reserve update",
             ])

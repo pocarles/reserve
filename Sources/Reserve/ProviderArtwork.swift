@@ -25,8 +25,8 @@ enum ProviderArtwork {
   }
 
   /// API accounts reuse the subscription mark when the same company publishes
-  /// both — Grok's bundled mark is xAI's. OpenRouter and TypeSafe get the
-  /// neutral initial rather than a mark invented for them here.
+  /// both — Grok's bundled mark is xAI's. OpenRouter, TypeSafe, DeepSeek and
+  /// Moonshot get the neutral initial rather than a mark invented for them here.
   static func image(for provider: APIConsumptionProvider) -> NSImage {
     let image =
       switch provider {
@@ -35,6 +35,8 @@ enum ProviderArtwork {
       case .xAI: self.image(for: ProviderID.grok)
       case .openRouter: self.initialImage("OR")
       case .typeSafe: self.initialImage("TS")
+      case .deepSeek: self.initialImage("DS")
+      case .moonshot: self.initialImage("MS")
       }
     image.accessibilityDescription = provider.displayName
     return image
@@ -46,7 +48,7 @@ enum ProviderArtwork {
     case .openAI: self.hasBundledMark(for: ProviderID.openAI)
     case .anthropic: self.hasBundledMark(for: ProviderID.anthropic)
     case .xAI: self.hasBundledMark(for: ProviderID.grok)
-    case .openRouter, .typeSafe: false
+    case .openRouter, .typeSafe, .deepSeek, .moonshot: false
     }
   }
 

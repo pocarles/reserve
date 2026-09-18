@@ -12,6 +12,8 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
   case openRouter
   case xAI
   case typeSafe
+  case deepSeek
+  case moonshot
 
   public var id: String { self.rawValue }
 
@@ -22,10 +24,15 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .openRouter: "OpenRouter"
     case .xAI: "xAI"
     case .typeSafe: "TypeSafe"
+    case .deepSeek: "DeepSeek"
+    case .moonshot: "Moonshot"
     }
   }
 
-  /// What the key is allowed to do. None of these keys can call a model.
+  /// What kind of key the provider issues. OpenAI and Anthropic admin keys and
+  /// xAI management keys read billing and cannot call a model. OpenRouter,
+  /// TypeSafe, DeepSeek and Moonshot issue ordinary API keys: the key that reads
+  /// the account can also call models, so a dedicated key is the one to paste.
   public var keyKind: String {
     switch self {
     case .openAI: "Admin key"
@@ -33,6 +40,8 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .openRouter: "API key"
     case .xAI: "Management key"
     case .typeSafe: "API key"
+    case .deepSeek: "API key"
+    case .moonshot: "API key"
     }
   }
 
@@ -43,6 +52,8 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .openRouter: "sk-or-…"
     case .xAI: "xai-…"
     case .typeSafe: "ts-…"
+    case .deepSeek: "sk-…"
+    case .moonshot: "sk-…"
     }
   }
 
@@ -55,6 +66,8 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .openRouter: URL(string: "https://openrouter.ai/settings/keys")!
     case .xAI: URL(string: "https://console.x.ai/team/default/settings")!
     case .typeSafe: URL(string: "https://console.typesafe.ai/settings/keys")!
+    case .deepSeek: URL(string: "https://platform.deepseek.com/api_keys")!
+    case .moonshot: URL(string: "https://platform.kimi.ai/console/api-keys")!
     }
   }
 
@@ -65,6 +78,10 @@ public enum APIConsumptionProvider: String, Codable, CaseIterable, Sendable, Ide
     case .openRouter: "openrouter.ai"
     case .xAI: "management-api.x.ai"
     case .typeSafe: "api.typesafe.ai"
+    case .deepSeek: "api.deepseek.com"
+    // The international platform only, which reports USD. api.moonshot.cn
+    // serves China-issued keys in CNY; those keys are not accepted here.
+    case .moonshot: "api.moonshot.ai"
     }
   }
 }
@@ -416,6 +433,8 @@ public struct APIConsumptionClient: Sendable {
     case .openRouter: return try await self.fetchOpenRouter(key)
     case .xAI: return try await self.fetchXAI(key)
     case .typeSafe: return try await self.fetchTypeSafe(key)
+    case .deepSeek: return try await self.fetchDeepSeek(key)
+    case .moonshot: return try await self.fetchMoonshot(key)
     }
   }
 
@@ -742,6 +761,108 @@ public struct APIConsumptionClient: Sendable {
         })
   }
 
+  // MARK: DeepSeek
+
+  /// DeepSeek reports what is left of prepaid credit, not spend, so the balance
+  /// is a note rather than a window, as xAI's is when it cannot derive a cap.
+  /// Amounts are decimal strings and are parsed as decimals, so no binary
+  /// rounding creeps in. An account can hold a balance in both CNY and USD; USD
+  /// leads when present and the other is named alongside it.
+  private func fetchDeepSeek(_ key: String) async throws -> APIConsumptionSnapshot {
+    let now = self.now()
+    guard let url = URL(string: "https://api.deepseek.com/user/balance") else {
+      throw UsageProviderError.invalidResponse("DeepSeek balance URL could not be formed.")
+    }
+    var request = URLRequest(url: url)
+    request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    let data = try await self.data(for: request, provider: .deepSeek)
+    let decoded = try Self.decode(DeepSeekBalance.self, from: data, provider: .deepSeek)
+    let infos = (decoded.balanceInfos ?? []).filter { !$0.currencyCode.isEmpty }
+    guard let lead = infos.first(where: { $0.currencyCode == "USD" }) ?? infos.first else {
+      throw UsageProviderError.invalidResponse("DeepSeek did not return a balance.")
+    }
+    let currency = lead.currencyCode
+    let total = Self.minorUnits(fromDecimalAmount: lead.totalBalance)
+    let granted = Self.minorUnits(fromDecimalAmount: lead.grantedBalance)
+    let toppedUp = Self.minorUnits(fromDecimalAmount: lead.toppedUpBalance)
+    let others = infos.filter { $0.currencyCode != currency }.map {
+      Self.money(Self.minorUnits(fromDecimalAmount: $0.totalBalance), currency: $0.currencyCode)
+    }
+
+    var parts: [String] = []
+    if decoded.isAvailable == false { parts.append("balance too low to make calls") }
+    parts.append("\(Self.money(granted, currency: currency)) granted")
+    parts.append("\(Self.money(toppedUp, currency: currency)) topped up")
+    parts += others.map { "also \($0)" }
+
+    var details = [
+      UsageDetail("Balance", Self.money(total, currency: currency)),
+      UsageDetail("Granted", Self.money(granted, currency: currency)),
+      UsageDetail("Topped up", Self.money(toppedUp, currency: currency)),
+    ]
+    if !others.isEmpty {
+      details.append(UsageDetail("Other balance", others.joined(separator: " · ")))
+    }
+    if let available = decoded.isAvailable {
+      details.append(UsageDetail("Can make calls", available ? "Yes" : "No, balance too low"))
+    }
+    return APIConsumptionSnapshot(
+      provider: .deepSeek,
+      windows: [],
+      note: APIConsumptionNote(
+        headline: Self.money(total, currency: currency),
+        detail: parts.joined(separator: " · ")),
+      fetchedAt: now,
+      source: "DeepSeek Balance API",
+      details: details)
+  }
+
+  // MARK: Moonshot
+
+  /// Moonshot's international platform reports the account's remaining credit
+  /// in USD: vouchers plus cash, where cash can go negative. Like DeepSeek's it
+  /// is a balance, so it is a note rather than a spend window.
+  private func fetchMoonshot(_ key: String) async throws -> APIConsumptionSnapshot {
+    let now = self.now()
+    guard let url = URL(string: "https://api.moonshot.ai/v1/users/me/balance") else {
+      throw UsageProviderError.invalidResponse("Moonshot balance URL could not be formed.")
+    }
+    var request = URLRequest(url: url)
+    request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    let data = try await self.data(for: request, provider: .moonshot)
+    let decoded = try Self.decode(MoonshotBalanceEnvelope.self, from: data, provider: .moonshot)
+    guard decoded.status != false, decoded.code == nil || decoded.code == 0,
+      let balance = decoded.data, let reported = balance.availableBalance
+    else {
+      throw UsageProviderError.invalidResponse("Moonshot did not return a balance.")
+    }
+    let available = Self.signedMinorUnits(from: reported)
+    let voucher = Self.signedMinorUnits(from: balance.voucherBalance)
+    let cash = Self.signedMinorUnits(from: balance.cashBalance)
+
+    var parts: [String] = []
+    // Moonshot refuses calls once the available balance reaches zero.
+    if available <= 0 { parts.append("balance too low to make calls") }
+    parts.append("\(Self.money(voucher, currency: "USD")) voucher")
+    parts.append("\(Self.money(cash, currency: "USD")) cash")
+    return APIConsumptionSnapshot(
+      provider: .moonshot,
+      windows: [],
+      note: APIConsumptionNote(
+        headline: Self.money(available, currency: "USD"),
+        detail: parts.joined(separator: " · ")),
+      fetchedAt: now,
+      source: "Moonshot Balance API",
+      details: [
+        UsageDetail("Balance", Self.money(available, currency: "USD")),
+        UsageDetail("Vouchers", Self.money(voucher, currency: "USD")),
+        UsageDetail("Cash", Self.money(cash, currency: "USD")),
+        UsageDetail("Can make calls", available > 0 ? "Yes" : "No, balance too low"),
+      ])
+  }
+
   // MARK: Paging
 
   /// Walks a billing endpoint's cursor, bounded so a cursor that never settles
@@ -922,6 +1043,46 @@ public struct APIConsumptionClient: Sendable {
     return amount >= 100
       ? String(format: "$%.0f", amount)
       : String(format: "$%.2f", amount)
+  }
+
+  /// A balance in its own currency. Dollars keep the `money` format, yuan take
+  /// the same shape with their own sign, and anything else leads with its code.
+  /// A negative balance keeps its sign in front of the symbol.
+  static func money(_ minorUnits: Int, currency: String) -> String {
+    let sign = minorUnits < 0 ? "-" : ""
+    let magnitude = Self.money(minorUnits == Int.min ? Int.max : abs(minorUnits))
+    let amount = magnitude.dropFirst()
+    switch currency.uppercased() {
+    case "USD": return sign + magnitude
+    case "CNY": return sign + "¥" + amount
+    default: return sign + currency.uppercased() + " " + amount
+    }
+  }
+
+  /// A signed amount in major units, for balances that can legitimately go
+  /// negative (Moonshot's cash balance), into minor units.
+  static func signedMinorUnits(from amount: Double?) -> Int {
+    guard let amount, amount.isFinite else { return 0 }
+    let scaled = (amount * 100).rounded()
+    if scaled >= Double(Int.max) { return Int.max }
+    if scaled <= -Double(Int.max) { return -Int.max }
+    return Int(scaled)
+  }
+
+  /// A decimal string in major units, as DeepSeek reports "110.00", into minor
+  /// units without passing through a binary floating-point value. Signed, so
+  /// an account in arrears is never shown as holding money.
+  static func minorUnits(fromDecimalAmount text: String?) -> Int {
+    guard let text else { return 0 }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let value = Decimal(string: trimmed, locale: Locale(identifier: "en_US_POSIX")),
+      !value.isNaN
+    else { return 0 }
+    let cents = NSDecimalNumber(decimal: value * 100).rounding(
+      accordingToBehavior: Self.centRounding)
+    if cents.compare(NSDecimalNumber(value: Int.max)) != .orderedAscending { return Int.max }
+    if cents.compare(NSDecimalNumber(value: -Int.max)) != .orderedDescending { return -Int.max }
+    return cents.intValue
   }
 
   /// Dollars, as OpenAI and OpenRouter report them, into cents.
@@ -1116,6 +1277,50 @@ private struct TypeSafeModel: Decodable {
     case name, description
     case releaseDate = "release_date"
   }
+}
+
+private struct DeepSeekBalance: Decodable {
+  struct Info: Decodable {
+    let currency: String?
+    let totalBalance: String?
+    let grantedBalance: String?
+    let toppedUpBalance: String?
+
+    var currencyCode: String {
+      (self.currency ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    }
+
+    enum CodingKeys: String, CodingKey {
+      case currency
+      case totalBalance = "total_balance"
+      case grantedBalance = "granted_balance"
+      case toppedUpBalance = "topped_up_balance"
+    }
+  }
+  let isAvailable: Bool?
+  let balanceInfos: [Info]?
+
+  enum CodingKeys: String, CodingKey {
+    case isAvailable = "is_available"
+    case balanceInfos = "balance_infos"
+  }
+}
+
+private struct MoonshotBalanceEnvelope: Decodable {
+  struct Balance: Decodable {
+    let availableBalance: Double?
+    let voucherBalance: Double?
+    let cashBalance: Double?
+
+    enum CodingKeys: String, CodingKey {
+      case availableBalance = "available_balance"
+      case voucherBalance = "voucher_balance"
+      case cashBalance = "cash_balance"
+    }
+  }
+  let code: Int?
+  let data: Balance?
+  let status: Bool?
 }
 
 private struct XAIBalance: Decodable {

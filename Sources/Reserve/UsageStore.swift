@@ -1241,6 +1241,8 @@ final class UsageStore {
       "apiConsumption.openRouter.enabled": false,
       "apiConsumption.xAI.enabled": false,
       "apiConsumption.typeSafe.enabled": false,
+      "apiConsumption.deepSeek.enabled": false,
+      "apiConsumption.moonshot.enabled": false,
       "appearance.mode": AppearanceMode.system.rawValue,
       "updates.automatic": true,
       "menuBar.provider": "reserve",
