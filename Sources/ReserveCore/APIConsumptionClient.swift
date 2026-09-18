@@ -708,11 +708,11 @@ public struct APIConsumptionClient: Sendable {
           let name = model.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
           let released = UsageDateParser.iso8601(model.releaseDate)
             ?? model.releaseDate.flatMap { $0.count == 10 ? UsageDateParser.iso8601($0 + "T00:00:00Z") : nil }
-          let parts = [
-            model.description?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
-            released.map { "released \(UsageDetailFormat.date($0))" },
-          ].compactMap { $0 }
-          return UsageDetail(name, parts.isEmpty ? "Available" : parts.joined(separator: " · "))
+          // The model's own description is a paragraph: in a detail row it is
+          // truncated to a fragment that says nothing. The release date is the
+          // fact that fits, so the row carries only that.
+          return UsageDetail(
+            name, released.map { "Released \(UsageDetailFormat.date($0))" } ?? "Available")
         })
   }
 

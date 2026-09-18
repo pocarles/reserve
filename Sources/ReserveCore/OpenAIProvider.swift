@@ -29,10 +29,7 @@ public struct OpenAIProvider: UsageProvider {
       timeout: .seconds(8))
     try rpc.notify(method: "initialized")
 
-    let limitMessage = try await rpc.request(
-      method: "account/rateLimits/read",
-      timeout: .seconds(5))
-    let response = try rpc.decodeResult(OpenAIRateLimitsResponse.self, from: limitMessage)
+    let response = try await Self.readRateLimits(using: rpc)
     let selected = response.rateLimitsByLimitId?["codex"] ?? response.rateLimits
 
     // The account read is local to the helper. It fills a missing plan, and the
@@ -72,6 +69,34 @@ public struct OpenAIProvider: UsageProvider {
       availableResetCount: response.rateLimitResetCredits?.availableCount,
       accountTokenActivity: activity,
       details: OpenAIDetails.details(limits: selected, account: account, activity: activity))
+  }
+
+  static let signInMessage = "Sign in to Codex to see your plan limits."
+
+  /// The limit read is where a signed-out Codex CLI says so, as a JSON-RPC
+  /// error that `JSONRPCProcess` reports as a generic process failure. Left
+  /// that way the card offers only Try again, which can never fix it.
+  static func readRateLimits(using rpc: JSONRPCProcess) async throws -> OpenAIRateLimitsResponse {
+    let message: [String: Any]
+    do {
+      message = try await rpc.request(method: "account/rateLimits/read", timeout: .seconds(5))
+    } catch UsageProviderError.processFailed(let text) {
+      throw Self.signInError(in: text) ?? UsageProviderError.processFailed(text)
+    }
+    return try rpc.decodeResult(OpenAIRateLimitsResponse.self, from: message)
+  }
+
+  /// Codex's own words for a missing sign-in, for example "codex account
+  /// authentication required to read rate limits". Like Gemini's check, the
+  /// text is only matched, never shown, and a message that merely mentions
+  /// authentication (a timeout, a server error) is not treated as signed out.
+  static func signInError(in text: String) -> UsageProviderError? {
+    let lowered = text.lowercased()
+    let signedOut = [
+      "authentication required", "not signed in", "not logged in", "login required",
+      "log in required", "sign in required", "sign-in required",
+    ]
+    return signedOut.contains(where: lowered.contains) ? .credentialsNotFound(Self.signInMessage) : nil
   }
 }
 

@@ -3,6 +3,10 @@ import Foundation
 /// Reads the signed-in Copilot account through the same quota RPC as GitHub's
 /// SDK. No conversation is created, resumed, or sent a prompt.
 public struct CopilotProvider: UsageProvider {
+  /// A Copilot CLI speaking a newer protocol than this Reserve. Only a Reserve
+  /// update fixes it, so it is never reported as a Copilot update.
+  public static let newerThanSupportedMessage =
+    "This Copilot CLI version is newer than Reserve supports. Update Reserve."
   public let id: ProviderID = .copilot
   public static let loginArguments = ["login", "--web-flow"]
   static let runtimeArguments = ["--headless", "--no-auto-update", "--stdio"]
@@ -176,7 +180,10 @@ final class CopilotQuotaProcess: @unchecked Sendable {
           guard let object = try JSONSerialization.jsonObject(with: handshake) as? [String: Any],
             let version = object["protocolVersion"] as? NSNumber,
             CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 3
-          else { throw UsageProviderError.updateRequired("This Copilot version is not supported by Reserve yet.") }
+          else {
+            throw Self.unsupportedProtocolError(
+              (try? JSONSerialization.jsonObject(with: handshake) as? [String: Any])?["protocolVersion"])
+          }
           let auth = try await self.request("auth.getStatus")
           let status = try JSONDecoder().decode(CopilotAuthStatus.self, from: auth)
           guard status.isAuthenticated else {
@@ -195,6 +202,18 @@ final class CopilotQuotaProcess: @unchecked Sendable {
     } onCancel: {
       self.shutdown()
     }
+  }
+
+  /// A protocol newer than Reserve speaks cannot be fixed by updating Copilot,
+  /// so it is reported as unavailable with the one remedy that helps. An older
+  /// or unreadable version still asks for a Copilot update.
+  static func unsupportedProtocolError(_ reported: Any?) -> UsageProviderError {
+    if let version = reported as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
+      version.doubleValue > 3
+    {
+      return .unavailable(CopilotProvider.newerThanSupportedMessage)
+    }
+    return .updateRequired("This Copilot version is not supported by Reserve yet.")
   }
 
   private func request(_ method: String) async throws -> Data {

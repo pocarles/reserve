@@ -115,6 +115,9 @@ struct ProviderSummary {
   var localHistorySupported = false
   /// Provider facts for the expanded details only (account, credits, counts).
   var details: [UsageDetail] = []
+  /// The last sign-in could not even be launched; the card says so instead of
+  /// a plain "Sign in" that would fail the same way.
+  var signInCouldNotStart = false
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
   var secondary: [Allowance] { self.allowances.filter { !$0.isPrimary } }
@@ -287,7 +290,8 @@ enum AllowanceBuilder {
       historyPossible: capabilities.contains(.localHistory)
         || capabilities.contains(.accountHistory),
       localHistorySupported: capabilities.contains(.localHistory),
-      details: state.snapshot?.details ?? [])
+      details: state.snapshot?.details ?? [],
+      signInCouldNotStart: state.signInCouldNotStart)
   }
 
   /// API-key plans need no local tool, so the lookup is skipped for them.
@@ -340,9 +344,10 @@ enum AllowanceBuilder {
       guard state.snapshot == nil, state.error == nil else { return nil }
       return .addKey
     }
+    // Same order as the Connect window: a missing helper cannot be updated.
     if state.requiresKeychainAccess { return .allowAccess }
-    if state.requiresUpdate { return .update }
     if state.requiresInstallation { return .install }
+    if state.requiresUpdate { return .update }
     if state.requiresConnection { return .signIn }
     guard state.snapshot == nil, state.error == nil else { return nil }
     let available = connectionToolAvailable ?? Self.connectionToolAvailable(for: state.provider)
