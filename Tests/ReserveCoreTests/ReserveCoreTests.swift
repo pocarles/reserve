@@ -436,19 +436,25 @@ private func cleanTestDefaults(suiteName: String) {
 struct ReserveCoreTests {
   @Test
   func testProviderHelperCatalogUsesOnlyFixedOfficialHTTPSInstallers() throws {
-    let definitions = ProviderID.allCases.map(ProviderHelperCatalog.definition)
-    XCTAssertEqual(definitions.map(\.provider), ProviderID.allCases)
+    // Key-connected plans (Z.ai, Kimi) have no helper and nothing to install.
+    let helperProviders = ProviderID.allCases.filter { !ProviderDescriptor.forProvider($0).usesAPIKey }
+    XCTAssertEqual(helperProviders, [.openAI, .anthropic, .grok, .cursor, .copilot, .gemini])
+    XCTAssertTrue(ProviderHelperCatalog.definition(for: .zai) == nil)
+    XCTAssertTrue(ProviderHelperCatalog.definition(for: .kimi) == nil)
+    let definitions = helperProviders.compactMap(ProviderHelperCatalog.definition)
+    XCTAssertEqual(definitions.map(\.provider), helperProviders)
     XCTAssertEqual(
       Set(definitions.compactMap(\.installerURL.host)),
-      Set(["chatgpt.com", "claude.ai", "x.ai", "cursor.com", "docs.github.com"]))
+      Set(["chatgpt.com", "claude.ai", "x.ai", "cursor.com", "docs.github.com", "antigravity.google"]))
     XCTAssertTrue(definitions.allSatisfy { definition in
       definition.installerURL.scheme == "https"
         && !definition.executable.isEmpty
     })
-    for provider in ProviderID.allCases {
+    for provider in helperProviders {
       XCTAssertEqual(
-        ProviderHelperCatalog.definition(for: provider).updateArguments,
-        provider == .copilot ? [] : ["update"])
+        ProviderHelperCatalog.definition(for: provider)?.updateArguments,
+        // Copilot is installed by hand; agy updates itself when it runs.
+        [.copilot, .gemini].contains(provider) ? [] : ["update"])
     }
 
     try ProviderHelperInstaller.validateInstallerFormat(
@@ -483,7 +489,8 @@ struct ReserveCoreTests {
 
   @Test
   func testCursorIsFourthProviderAndStartsWithDistinctPools() throws {
-    XCTAssertEqual(ProviderID.allCases.count, 5)
+    XCTAssertEqual(ProviderID.allCases.count, 8)
+    XCTAssertEqual(ProviderID.allCases.firstIndex(of: .cursor), 3)
     XCTAssertEqual(ProviderID.cursor.displayName, "Cursor")
     let data = Data(
       #"{"billingCycleStart":"1787616000000","billingCycleEnd":"1790294400000","planUsage":{"autoSpend":1800,"autoLimit":4000,"apiPercentUsed":72.5}}"#.utf8)

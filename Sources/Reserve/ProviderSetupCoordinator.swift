@@ -11,6 +11,12 @@ final class ProviderSetupCoordinator {
     /// A provider whose helper Reserve cannot install waits here while the
     /// person finishes the official installation themselves.
     case waitingForManualSetup
+    /// A helper that signs in only in its own terminal session (the Antigravity
+    /// CLI) waits here while the person runs it; Reserve then checks again.
+    case waitingForTerminalSignIn
+    /// A key-connected plan (Z.ai, Kimi) waits for a pasted API key, then
+    /// checks usage with it while `savingKey`.
+    case needsKey, savingKey
   }
 
   private let store: UsageStore
@@ -50,6 +56,11 @@ final class ProviderSetupCoordinator {
     panel.onClose = { [weak self] in self?.close() }
     self.panel = panel
     self.observer = self.store.observe { [weak self] in self?.storeChanged() }
+    // Without a saved key there is nothing to check: ask for one straight away.
+    if ProviderDescriptor.forProvider(provider).usesAPIKey && !self.store.hasPlanKey(provider) {
+      self.present(.needsKey)
+      return
+    }
     self.check()
   }
 
@@ -85,6 +96,8 @@ final class ProviderSetupCoordinator {
       return
     }
     self.present(Self.phase(after: state))
+    // A rejected key says so beside the field rather than silently re-asking.
+    if self.phase == .needsKey, let error = state.error { self.panel?.showKeyError(error) }
     // Fresh usage is the whole point of connecting; the card already shows it,
     // so there is nothing left for a window to say.
     if self.phase == .connected { self.close() }
@@ -94,6 +107,9 @@ final class ProviderSetupCoordinator {
   }
 
   static func phase(after state: ProviderViewState) -> Phase {
+    if ProviderDescriptor.forProvider(state.provider).usesAPIKey, state.requiresConnection {
+      return .needsKey
+    }
     if state.requiresKeychainAccess { return .needsAccess }
     if state.requiresInstallation { return .needsInstall }
     if state.requiresUpdate { return .needsUpdate }
@@ -109,9 +125,24 @@ final class ProviderSetupCoordinator {
     guard let provider = self.activeProvider else { return }
     let generation = self.generation
     switch self.phase {
+    case .needsUpdate where !ProviderDescriptor.forProvider(provider).supportsAutomaticHelperUpdate
+      && ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation:
+      // A helper that updates itself when run (agy) is never launched bare by
+      // Reserve; the person runs it once, then checks again here.
+      self.present(.waitingForManualSetup)
+    case .needsSignIn where ProviderDescriptor.forProvider(provider).signsInFromTerminal:
+      // The first time explains where to sign in; after that the button only
+      // checks whether the person has done it.
+      if self.loginAttempted {
+        self.check()
+      } else {
+        self.loginAttempted = true
+        self.present(.waitingForTerminalSignIn)
+      }
     case .needsInstall, .needsUpdate:
       if !ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation {
-        _ = LoginBrowser.open(ProviderHelperCatalog.definition(for: provider).installerURL)
+        guard let helper = ProviderHelperCatalog.definition(for: provider) else { return }
+        _ = LoginBrowser.open(helper.installerURL)
         self.present(.waitingForManualSetup)
         return
       }
@@ -160,8 +191,23 @@ final class ProviderSetupCoordinator {
       }
     case .failed, .unavailable, .accessDenied:
       self.check()
-    case .waitingForManualSetup:
+    case .waitingForManualSetup, .waitingForTerminalSignIn:
       self.check()
+    case .needsKey:
+      guard let key = self.panel?.enteredKey,
+        !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      else { return }
+      self.panel?.clearKey()
+      do {
+        try self.store.savePlanKey(key, for: provider) { [weak self] in
+          guard let self, self.generation == generation else { return }
+          self.didCheck()
+        }
+        self.present(.savingKey)
+      } catch {
+        self.present(.needsKey)
+        self.panel?.showKeyError(error.localizedDescription)
+      }
     case .connected:
       self.close()
     case .signInNotSaved:
@@ -169,7 +215,7 @@ final class ProviderSetupCoordinator {
         NSWorkspace.shared.open(app) {
         self.close()
       }
-    case .checking, .installing, .updating, .grantingAccess:
+    case .checking, .installing, .updating, .grantingAccess, .savingKey:
       break
     }
   }
@@ -179,7 +225,7 @@ final class ProviderSetupCoordinator {
     let provider = self.activeProvider
     let cancelledSetup = !self.wasEnabled && [Phase.checking, .needsInstall, .needsUpdate,
       .needsSignIn, .signingIn, .needsAccess, .grantingAccess, .accessNotGranted,
-      .waitingForManualSetup].contains(self.phase)
+      .waitingForManualSetup, .waitingForTerminalSignIn, .needsKey, .savingKey].contains(self.phase)
     self.activeProvider = nil
     self.generation += 1
     if let observer { self.store.removeObserver(observer) }
@@ -235,6 +281,10 @@ final class ProviderConnectionPanel: NSPanel {
   private let spinner = NSProgressIndicator()
   private let primary = NSButton(title: "", target: nil, action: nil)
   private let closeButton = NSButton(title: "Cancel", target: nil, action: nil)
+  /// Shown only for key-connected plans. Secure, so the key is never drawn.
+  private let keyField = NSSecureTextField()
+  private let keyPageButton = NSButton(title: "Get a key", target: nil, action: nil)
+  private var keyRow: NSStackView?
   var onPrimary: (() -> Void)?
   var onClose: (() -> Void)?
   private var mayClose = true
@@ -276,6 +326,22 @@ final class ProviderConnectionPanel: NSPanel {
   }
 
   @objc private func primaryClicked() { self.onPrimary?() }
+
+  @objc private func keyPageClicked() {
+    guard let url = ProviderDescriptor.forProvider(self.provider).apiKeyConnection?.keySettingsURL,
+      url.scheme?.lowercased() == "https"
+    else { return }
+    NSWorkspace.shared.open(url)
+  }
+
+  /// The pasted key, read once when the person saves it.
+  var enteredKey: String { self.keyField.stringValue }
+
+  func clearKey() { self.keyField.stringValue = "" }
+
+  func showKeyError(_ text: String) {
+    self.message.stringValue = text
+  }
   @objc private func closeClicked() { if self.mayClose { self.onClose?() } }
 
   func update(
@@ -286,6 +352,7 @@ final class ProviderConnectionPanel: NSPanel {
   ) {
     let name = self.provider.displayName
     let helper = ProviderHelperCatalog.definition(for: self.provider)
+    let helperName = helper?.displayName ?? name
     var busy = false
     var action: String?
     self.mayClose = phase != .installing && phase != .updating
@@ -298,12 +365,12 @@ final class ProviderConnectionPanel: NSPanel {
       busy = true
     case .needsInstall:
       self.heading.stringValue = "Connect \(name)"
-      self.message.stringValue = "Reserve needs the official \(helper.displayName). Install it for your Mac user, then continue here. No Terminal needed."
-      self.privacy.stringValue = "Downloaded from \(helper.installerURL.host ?? name). Installation starts only when you choose Install and continue."
+      self.message.stringValue = "Reserve needs the official \(helperName). Install it for your Mac user, then continue here. No Terminal needed."
+      self.privacy.stringValue = "Downloaded from \(helper?.installerURL.host ?? name). Installation starts only when you choose Install and continue."
       action = "Install and continue"
     case .needsUpdate:
       self.heading.stringValue = "Update to connect \(name)"
-      self.message.stringValue = "The \(helper.displayName) needs an update before Reserve can check your usage."
+      self.message.stringValue = "The \(helperName) needs an update before Reserve can check your usage."
       self.privacy.stringValue = "This updates the provider's software on this Mac using its own updater."
       action = "Update and continue"
     case .installing, .updating:
@@ -368,9 +435,40 @@ final class ProviderConnectionPanel: NSPanel {
       self.closeButton.title = "Close"
     case .waitingForManualSetup:
       self.heading.stringValue = "Finish installing \(name)"
-      self.message.stringValue = "Reserve opened the official \(helper.displayName) instructions. Return here once it is installed, then choose Check again."
+      self.message.stringValue = "Reserve opened the official \(helperName) instructions. Return here once it is installed, then choose Check again."
       self.privacy.stringValue = "Reserve never installs this helper for you and downloads nothing itself."
       action = "Check again"
+    case .waitingForTerminalSignIn:
+      self.heading.stringValue = "Sign in to \(name)"
+      self.message.stringValue = "Open Terminal and run \(helper?.executable ?? "the \(helperName)"). Sign in with your account there, then return here and choose Check again."
+      self.privacy.stringValue = "You sign in with \(helperName) itself. Reserve never sees your password or sign-in."
+      action = "Check again"
+    case .needsKey:
+      let connection = ProviderDescriptor.forProvider(self.provider).apiKeyConnection
+      self.heading.stringValue = "Connect \(name)"
+      self.message.stringValue = "Paste an API key from \(name) to show your plan limits. Choose Get a key to create one."
+      self.privacy.stringValue = "The key stays in your macOS Keychain and is sent only to \(connection?.endpointHost ?? name). It can call models, so use a dedicated key."
+      self.keyField.placeholderString = connection?.keyHint
+      action = "Save and connect"
+    case .savingKey:
+      self.heading.stringValue = "Checking your usage"
+      self.message.stringValue = "Reading your \(name) plan limits with the new key."
+      self.privacy.stringValue = "The key stays in your macOS Keychain."
+      busy = true
+    }
+    self.keyRow?.isHidden = phase != .needsKey
+    if self.provider == .gemini {
+      self.privacy.stringValue = phase == .needsInstall
+        ? "Downloaded from antigravity.google. Installation starts only when you choose Install and continue."
+        : "Reserve only runs the Antigravity CLI's own usage command. It never starts a conversation or reads your Google sign-in."
+      if phase == .needsUpdate || phase == .waitingForManualSetup {
+        self.heading.stringValue = "Update \(helperName)"
+        self.message.stringValue = "Gemini usage needs Antigravity CLI 1.1.11 or later. Open Terminal and run agy once: it updates itself. Then choose Check again."
+        action = "Check again"
+      } else if phase == .waitingForTerminalSignIn || phase == .needsSignIn {
+        self.message.stringValue = "Open Terminal and run agy. Sign in with the Google account that has your Google AI plan, then return here and choose Check again."
+        action = "Check again"
+      }
     }
     if self.provider == .copilot {
       self.privacy.stringValue = "Reserve asks the official Copilot CLI for allowance data. It never starts a conversation."
@@ -389,6 +487,10 @@ final class ProviderConnectionPanel: NSPanel {
     self.primary.isHidden = action == nil
     self.primary.isEnabled = action != nil
     self.closeButton.isHidden = !self.mayClose || phase == .connected
+    // The Beta tag is silent to VoiceOver, so the heading says it instead.
+    self.heading.setAccessibilityLabel(
+      ProviderDescriptor.forProvider(self.provider).isBeta
+        ? "\(self.heading.stringValue), beta" : nil)
     self.contentView?.layoutSubtreeIfNeeded()
   }
 
@@ -437,10 +539,35 @@ final class ProviderConnectionPanel: NSPanel {
     self.closeButton.target = self
     self.closeButton.action = #selector(self.closeClicked)
     self.closeButton.identifier = NSUserInterfaceItemIdentifier("connection-close")
-    let header = NSStackView.row([logo, self.heading], spacing: 14, alignment: .centerY)
+    var headerViews: [NSView] = [logo, self.heading]
+    if ProviderDescriptor.forProvider(self.provider).isBeta {
+      // The heading keeps its natural width so the tag follows the words
+      // rather than floating at the far edge of the window.
+      self.heading.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+      let badge = ReserveBetaBadge()
+      badge.identifier = NSUserInterfaceItemIdentifier("connection-beta")
+      headerViews += [badge, NSStackView.spacer()]
+    }
+    let header = NSStackView.row(headerViews, spacing: 14, alignment: .centerY)
+    if headerViews.count > 2 { header.setCustomSpacing(8, after: self.heading) }
     let actions = NSStackView.row(
       [self.spinner, NSStackView.spacer(), self.closeButton, self.primary], spacing: 10)
-    let stack = NSStackView.column([header, self.message, self.privacy, actions], spacing: 18)
+    self.keyField.identifier = NSUserInterfaceItemIdentifier("connection-key")
+    self.keyField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    self.keyField.bezelStyle = .roundedBezel
+    self.keyField.target = self
+    self.keyField.action = #selector(self.primaryClicked)
+    self.keyField.setAccessibilityLabel("\(self.provider.displayName) API key")
+    self.keyField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    self.keyPageButton.bezelStyle = .rounded
+    self.keyPageButton.target = self
+    self.keyPageButton.action = #selector(self.keyPageClicked)
+    self.keyPageButton.identifier = NSUserInterfaceItemIdentifier("connection-key-page")
+    self.keyPageButton.setContentHuggingPriority(.required, for: .horizontal)
+    let keyRow = NSStackView.row([self.keyField, self.keyPageButton], spacing: 8, alignment: .centerY)
+    keyRow.isHidden = true
+    self.keyRow = keyRow
+    let stack = NSStackView.column([header, self.message, keyRow, self.privacy, actions], spacing: 18)
     stack.translatesAutoresizingMaskIntoConstraints = false
     content.addSubview(stack)
     NSLayoutConstraint.activate([
@@ -452,6 +579,7 @@ final class ProviderConnectionPanel: NSPanel {
       self.message.widthAnchor.constraint(equalTo: stack.widthAnchor),
       self.privacy.widthAnchor.constraint(equalTo: stack.widthAnchor),
       actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
+      keyRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
     ])
     return content
   }

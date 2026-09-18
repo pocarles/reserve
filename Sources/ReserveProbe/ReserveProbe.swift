@@ -24,10 +24,18 @@ struct ReserveProbe {
     case "grok": selected = [.grok]
     case "cursor": selected = [.cursor]
     case "copilot": selected = [.copilot]
-    case nil, "all": selected = ProviderID.allCases
+    case "zai", "z.ai": selected = [.zai]
+    case "kimi": selected = [.kimi]
+    case "gemini", "agy", "antigravity": selected = [.gemini]
+    case nil, "all":
+      // Key-connected plans are probed only when a key is saved, so "all"
+      // does not report an unconfigured plan as a failure.
+      selected = ProviderID.allCases.filter {
+        !ProviderDescriptor.forProvider($0).usesAPIKey || PlanKeyKeychain.hasKey(for: $0)
+      }
     default:
       FileHandle.standardError.write(
-        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|copilot|local|all] [--insights]\n".utf8))
+        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|copilot|zai|kimi|gemini|local|all] [--insights]\n".utf8))
       exit(64)
     }
 
@@ -41,6 +49,9 @@ struct ReserveProbe {
         case .grok: GrokProvider()
         case .cursor: CursorProvider(allowKeychainRead: allowCursorKeychainRead, includeAccountUsage: includeInsights)
         case .copilot: CopilotProvider()
+        case .zai: ZaiProvider()
+        case .kimi: KimiProvider()
+        case .gemini: GeminiProvider()
         }
       do {
         snapshots.append(try await fetcher.fetch())

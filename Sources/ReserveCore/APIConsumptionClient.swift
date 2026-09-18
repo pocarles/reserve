@@ -300,55 +300,31 @@ public enum APIConsumptionKeychain {
     "api-consumption.\(provider.rawValue)"
   }
 
+  static func store(for provider: APIConsumptionProvider) -> KeychainKeyStore {
+    KeychainKeyStore(
+      service: Self.service, account: Self.account(for: provider),
+      displayName: provider.displayName, keyKind: provider.keyKind,
+      label: "Reserve \(provider.displayName) consumption key")
+  }
+
   #if canImport(Security)
     public static func hasKey(for provider: APIConsumptionProvider) -> Bool {
-      SecItemCopyMatching(self.query(provider, returningData: false) as CFDictionary, nil)
-        == errSecSuccess
+      Self.store(for: provider).hasKey()
     }
 
     /// Replaces any key already stored for this provider. The value never
     /// leaves this process except as an `Authorization` header on the fixed
     /// provider host.
     public static func save(_ key: String, for provider: APIConsumptionProvider) throws {
-      let stored = try Self.normalized(key, for: provider)
-      let payload = Data(stored.utf8)
-      let match = self.query(provider, returningData: false) as CFDictionary
-      let status: OSStatus
-      if SecItemCopyMatching(match, nil) == errSecSuccess {
-        status = SecItemUpdate(
-          match, [kSecValueData as String: payload] as CFDictionary)
-      } else {
-        var attributes = self.query(provider, returningData: false)
-        attributes[kSecValueData as String] = payload
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        attributes[kSecAttrLabel as String] = "Reserve \(provider.displayName) consumption key"
-        status = SecItemAdd(attributes as CFDictionary, nil)
-      }
-      guard status == errSecSuccess else {
-        throw UsageProviderError.credentialsNotFound(
-          "macOS refused to store the \(provider.displayName) key (\(status)).")
-      }
+      try Self.store(for: provider).save(key)
     }
 
     public static func load(for provider: APIConsumptionProvider) throws -> String {
-      var result: CFTypeRef?
-      let status = SecItemCopyMatching(
-        self.query(provider, returningData: true) as CFDictionary, &result)
-      guard status != errSecItemNotFound else {
-        throw UsageProviderError.credentialsNotFound(
-          "No \(provider.displayName) \(provider.keyKind.lowercased()) is saved.")
-      }
-      guard status == errSecSuccess, let data = result as? Data,
-        data.count <= 1_200, let key = String(data: data, encoding: .utf8), !key.isEmpty
-      else {
-        throw UsageProviderError.credentialsNotFound(
-          "The saved \(provider.displayName) key could not be read.")
-      }
-      return key
+      try Self.store(for: provider).load()
     }
 
     public static func delete(for provider: APIConsumptionProvider) {
-      SecItemDelete(self.query(provider, returningData: false) as CFDictionary)
+      Self.store(for: provider).delete()
     }
 
     /// Removes the Typeface item from an earlier mistaken provider name.
@@ -360,36 +336,15 @@ public enum APIConsumptionKeychain {
           kSecAttrAccount as String: "api-consumption.typeface",
         ] as CFDictionary)
     }
-
-    /// Paste often includes wrapping newlines. Those are stripped.
-    static func normalized(
-      _ key: String,
-      for provider: APIConsumptionProvider
-    ) throws -> String {
-      let stored = String(key.filter { $0.isASCII && !$0.isWhitespace && !$0.isNewline })
-      guard (16...1_200).contains(stored.count) else {
-        throw UsageProviderError.credentialsNotFound(
-          "\(provider.displayName) needs a single-line API key.")
-      }
-      return stored
-    }
-
-    private static func query(
-      _ provider: APIConsumptionProvider,
-      returningData: Bool
-    ) -> [String: Any] {
-      var query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: Self.service,
-        kSecAttrAccount as String: self.account(for: provider),
-      ]
-      if returningData {
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-      }
-      return query
-    }
   #endif
+
+  /// Paste often includes wrapping newlines. Those are stripped.
+  static func normalized(
+    _ key: String,
+    for provider: APIConsumptionProvider
+  ) throws -> String {
+    try KeychainKeyStore.normalized(key, displayName: provider.displayName)
+  }
 }
 
 /// Reads consumption from the official billing or account APIs. The key is supplied

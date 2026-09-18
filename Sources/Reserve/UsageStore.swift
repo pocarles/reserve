@@ -33,6 +33,20 @@ enum PreviewScenario: String, CaseIterable {
   case keychainAccess = "keychain-access"
 }
 
+/// Where plan keys (Z.ai, Kimi) are kept. The app always uses the Keychain;
+/// self-tests substitute memory so they never touch a real Keychain item.
+@MainActor
+struct PlanKeyStorage {
+  var hasKey: (ProviderID) -> Bool
+  var save: (String, ProviderID) throws -> Void
+  var delete: (ProviderID) -> Void
+
+  static let keychain = PlanKeyStorage(
+    hasKey: { PlanKeyKeychain.hasKey(for: $0) },
+    save: { try PlanKeyKeychain.save($0, for: $1) },
+    delete: { PlanKeyKeychain.delete(for: $0) })
+}
+
 @MainActor
 final class UsageStore {
   private(set) var states: [ProviderID: ProviderViewState]
@@ -191,6 +205,8 @@ final class UsageStore {
   /// every minute tick, and each miss is a synchronous Keychain lookup on the
   /// main actor for something that only changes when a key is saved or removed.
   private var apiConsumptionKeyPresence: [APIConsumptionProvider: Bool] = [:]
+  private var planKeyPresence: [ProviderID: Bool] = [:]
+  private let planKeys: PlanKeyStorage
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
   /// Which provider row is open in the popover. Transient interface state, so
@@ -209,8 +225,10 @@ final class UsageStore {
     cache: SnapshotCache = SnapshotCache(),
     fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
-    openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) }
+    openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) },
+    planKeys: PlanKeyStorage = .keychain
   ) {
+    self.planKeys = planKeys
     self.cache = cache
     self.fetchOverride = fetchOverride
     self.loginCommandOverride = loginCommandOverride
@@ -648,6 +666,22 @@ final class UsageStore {
       self.allowKeychainAccess(for: provider, onFinished: onFinished)
       return
     }
+    // A key-connected plan is connected by saving its key, never by a CLI.
+    // Callers route those to the key field; this only re-reads usage.
+    if ProviderDescriptor.forProvider(provider).usesAPIKey {
+      if !self.isEnabled(provider) { onFinished?(); return }
+      self.refresh(provider, queueIfBusy: true) { onFinished?() }
+      return
+    }
+    // A helper that signs in only inside its own terminal session (the
+    // Antigravity CLI) is never started here: without a terminal it would
+    // either fail or wait on a prompt. The person signs in there; this only
+    // checks whether that has happened.
+    if ProviderDescriptor.forProvider(provider).signsInFromTerminal {
+      if !self.isEnabled(provider) { onFinished?(); return }
+      self.refresh(provider, queueIfBusy: true) { onFinished?() }
+      return
+    }
     guard self.loginProcesses[provider]?.isRunning != true else { return }
     self.loginStorageFailures.remove(provider)
     if forceSignIn {
@@ -656,13 +690,13 @@ final class UsageStore {
       self.states[provider]?.requiresKeychainAccess = false
     }
     self.loginCompletions[provider] = onFinished
-    let configuration = Self.loginConfiguration(for: provider)
+    guard let configuration = Self.loginConfiguration(for: provider) else { return }
     let generation = (self.loginGenerations[provider] ?? 0) + 1
     self.loginGenerations[provider] = generation
     let commandOverride = self.loginCommandOverride?(provider)
     guard let executable = commandOverride?.executable ?? BinaryLocator.find(configuration.executable) else {
       self.states[provider]?.error =
-        "\(ProviderHelperCatalog.definition(for: provider).displayName) needs setup."
+        "\(ProviderHelperCatalog.definition(for: provider)?.displayName ?? provider.displayName) needs setup."
       self.states[provider]?.requiresInstallation = true
       self.states[provider]?.requiresUpdate = false
       self.states[provider]?.requiresConnection = false
@@ -899,6 +933,39 @@ final class UsageStore {
     self.changed()
   }
 
+  // MARK: Plan keys
+
+  /// Whether an API-key plan (Z.ai, Kimi) has a key in the Keychain. Cached,
+  /// since Settings asks on every rebuild and each miss is a Keychain lookup.
+  func hasPlanKey(_ provider: ProviderID) -> Bool {
+    guard ProviderDescriptor.forProvider(provider).usesAPIKey else { return false }
+    if let known = self.planKeyPresence[provider] { return known }
+    let present = self.planKeys.hasKey(provider)
+    self.planKeyPresence[provider] = present
+    return present
+  }
+
+  /// Stores a pasted plan key in the Keychain and connects the provider. The
+  /// key itself never reaches preferences, logs or the snapshot cache.
+  func savePlanKey(
+    _ key: String, for provider: ProviderID, onFinished: (() -> Void)? = nil
+  ) throws {
+    try self.planKeys.save(key, provider)
+    self.planKeyPresence[provider] = true
+    self.states[provider]?.error = nil
+    self.states[provider]?.requiresConnection = false
+    self.setEnabled(provider, enabled: true, refreshImmediately: false)
+    self.refresh(provider, queueIfBusy: true) { onFinished?() }
+  }
+
+  /// Deletes the key, stops checks and clears the cached snapshot.
+  func removePlanKey(_ provider: ProviderID) {
+    guard ProviderDescriptor.forProvider(provider).usesAPIKey else { return }
+    self.planKeys.delete(provider)
+    self.planKeyPresence[provider] = false
+    self.disconnect(provider)
+  }
+
   @discardableResult
   func refreshAPIConsumption(_ provider: APIConsumptionProvider) -> Bool {
     guard self.isAPIConsumptionEnabled(provider), self.hasAPIConsumptionKey(provider) else {
@@ -1053,7 +1120,7 @@ final class UsageStore {
       }
     let openAIWindowMinutes: Int? = scenario == .unknown ? nil : 10_080
     let grokFetchedAt = now.addingTimeInterval(scenario == .stale ? -42 * 60 : -126)
-    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19, 24, 27]) {
+    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19, 24, 27, 3, 15, 21]) {
       self.defaults.set(day, forKey: "subscription.renewalDay.\(provider.rawValue)")
     }
     self.states[.openAI] = ProviderViewState(
@@ -1198,6 +1265,39 @@ final class UsageStore {
           resetsAt: now.addingTimeInterval(18 * 86_400))], fetchedAt: now,
         source: "Copilot account quota",
         details: [UsageDetail("Premium requests", "54 of 300 used"), UsageDetail("Chat", "Unlimited")]))
+    self.states[.zai] = ProviderViewState(provider: .zai,
+      snapshot: UsageSnapshot(provider: .zai, planName: "GLM Coding Pro", windows: [
+        UsageWindow(id: "tokens_limit-300", label: "5 hours", usedPercent: 22,
+          windowMinutes: 300, resetsAt: now.addingTimeInterval(3.1 * 3600)),
+        UsageWindow(id: "tokens_limit-10080", label: "Weekly", usedPercent: 35,
+          windowMinutes: 10_080, resetsAt: now.addingTimeInterval(5.2 * 86_400)),
+      ], fetchedAt: now.addingTimeInterval(-37),
+        source: "Z.ai quota API (unofficial)", detailedUsageUnavailable: true,
+        details: [UsageDetail("Tool calls", "224 of 1,000 this month")]))
+    self.states[.kimi] = ProviderViewState(provider: .kimi,
+      snapshot: UsageSnapshot(provider: .kimi, planName: "Moderato", windows: [
+        UsageWindow(id: "limit-300", label: "5 hours", usedPercent: 40,
+          windowMinutes: 300, resetsAt: now.addingTimeInterval(2 * 3600)),
+        UsageWindow(id: "weekly", label: "Weekly", usedPercent: 18,
+          windowMinutes: 10_080, resetsAt: now.addingTimeInterval(4.5 * 86_400)),
+      ], fetchedAt: now.addingTimeInterval(-52),
+        source: "Kimi Code usage API (unofficial)", detailedUsageUnavailable: true,
+        details: [UsageDetail("Weekly requests", "369 of 2,048 used")]))
+    self.states[.kimi]?.serviceStatus = ProviderServiceStatus(
+      provider: .kimi, health: .operational, detail: "All systems operational",
+      pageURL: URL(string: "https://status.moonshot.cn")!)
+    self.states[.gemini] = ProviderViewState(provider: .gemini,
+      snapshot: UsageSnapshot(provider: .gemini, windows: [
+        UsageWindow(id: "gemini-weekly", label: "Weekly", usedPercent: 29,
+          windowMinutes: 10_080, resetsAt: now.addingTimeInterval(3.4 * 86_400)),
+        UsageWindow(id: "gemini-5h", label: "5 hours", usedPercent: 12,
+          windowMinutes: 300, resetsAt: now.addingTimeInterval(2.6 * 3600)),
+        UsageWindow(id: "3p-weekly", label: "Claude and GPT weekly", usedPercent: 8,
+          windowMinutes: 10_080, resetsAt: now.addingTimeInterval(5.1 * 86_400)),
+      ], fetchedAt: now.addingTimeInterval(-44),
+        source: "Antigravity CLI usage report", detailedUsageUnavailable: true,
+        details: [UsageDetail("Gemini Models", "Gemini Flash, Gemini Pro"),
+          UsageDetail("Claude and GPT models", "Claude Opus, Claude Sonnet, GPT-OSS")]))
     self.changed()
   }
 
@@ -1212,6 +1312,12 @@ final class UsageStore {
       "provider.grok.enabled": BinaryLocator.find("grok") != nil,
       "provider.cursor.enabled": false,
       "provider.copilot.enabled": false,
+      // Key-connected plans stay off until a key is saved.
+      "provider.zai.enabled": false,
+      "provider.kimi.enabled": false,
+      // Gemini runs the Antigravity CLI, which signs in separately, so it is
+      // opt-in like Cursor and Copilot even when agy is installed.
+      "provider.gemini.enabled": false,
       // Reading Claude Code's Keychain item is another application's OAuth
       // token, so it is opt-in and stays off until asked for.
       "anthropic.keychainReadAllowed": false,
@@ -1398,16 +1504,20 @@ final class UsageStore {
       let text = String(output[swiftRange]).trimmingCharacters(
         in: CharacterSet(charactersIn: "'(),.;"))
       guard let url = URL(string: text), url.scheme == "https",
-        Self.loginConfiguration(for: provider).trustedHosts.contains(url.host?.lowercased() ?? "")
+        Self.loginConfiguration(for: provider)?.trustedHosts.contains(url.host?.lowercased() ?? "") == true
       else { continue }
       return url
     }
     return nil
   }
 
-  private static func loginConfiguration(for provider: ProviderID) -> LoginConfiguration {
+  /// Nil for API-key providers and terminal sign-ins: they have no sign-in
+  /// command to run.
+  private static func loginConfiguration(for provider: ProviderID) -> LoginConfiguration? {
     let descriptor = ProviderDescriptor.forProvider(provider)
-    return LoginConfiguration(executable: descriptor.helper.executable,
+    guard !descriptor.usesAPIKey, !descriptor.signsInFromTerminal, let helper = descriptor.helper
+    else { return nil }
+    return LoginConfiguration(executable: helper.executable,
       arguments: descriptor.loginArguments, displayName: descriptor.loginDisplayName,
       trustedHosts: descriptor.trustedLoginHosts)
   }
@@ -1621,9 +1731,12 @@ final class UsageStore {
           allowKeychainInteraction: allowKeychainInteraction,
           includeAccountUsage: includeInsights)
       case .copilot: CopilotProvider()
+      case .zai: ZaiProvider()
+      case .kimi: KimiProvider()
+      case .gemini: GeminiProvider()
       }
     let previousHealth = self.states[provider]?.serviceStatus?.health
-    let statusTask: Task<ProviderServiceStatus, Never>? = self.fetchOverride == nil
+    let statusTask: Task<ProviderServiceStatus?, Never>? = self.fetchOverride == nil
       ? Task { await self.serviceStatusClient.fetch(provider) } : nil
     defer { statusTask?.cancel() }
     var providerFetchSucceeded = false

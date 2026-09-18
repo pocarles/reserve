@@ -112,7 +112,7 @@ enum ReserveColor {
       return Self.dynamic(light: 0xC2_5B_36, dark: 0xE8_70_45)
     case .grok:
       return Self.dynamic(light: 0x1F_63_92, dark: 0x6B_AE_EE)
-    case .cursor, .copilot:
+    case .cursor, .copilot, .zai, .kimi, .gemini:
       return Self.dynamic(light: 0x12_12_12, dark: 0xF4_F4_F4)
     }
   }
@@ -645,6 +645,57 @@ final class ReserveIconButton: NSButton {
   }
 
   @objc private func performAction() { self.handler() }
+}
+
+/// A small "Beta" tag shown beside the name of a provider whose usage source
+/// has not been verified against a real account. 11 pt, the smallest size the
+/// Settings readability check allows. It is silent to VoiceOver:
+/// the name it sits beside carries ", beta" in its own accessibility label.
+@MainActor
+final class ReserveBetaBadge: NSView {
+  static let text = "Beta"
+
+  private let label = NSTextField(labelWithString: ReserveBetaBadge.text)
+
+  init(size: CGFloat = 11) {
+    super.init(frame: .zero)
+    self.translatesAutoresizingMaskIntoConstraints = false
+    self.label.font = .systemFont(ofSize: size, weight: .medium)
+    self.label.textColor = .secondaryLabelColor
+    self.label.translatesAutoresizingMaskIntoConstraints = false
+    self.label.setAccessibilityElement(false)
+    self.addSubview(self.label)
+    self.setAccessibilityElement(false)
+    self.toolTip = "Beta: not yet verified with every account. Report problems on GitHub."
+    self.setContentHuggingPriority(.required, for: .horizontal)
+    self.setContentCompressionResistancePriority(.required, for: .horizontal)
+    NSLayoutConstraint.activate([
+      self.label.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 5),
+      self.label.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -5),
+      self.label.topAnchor.constraint(equalTo: self.topAnchor, constant: 1),
+      self.label.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -1),
+    ])
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  // Drawn rather than layer-backed so the system colours follow light, dark
+  // and increased-contrast appearances without extra bookkeeping.
+  override func draw(_ dirtyRect: NSRect) {
+    let path = NSBezierPath(
+      roundedRect: self.bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+    NSColor.quaternaryLabelColor.withAlphaComponent(0.25).setFill()
+    path.fill()
+    NSColor.tertiaryLabelColor.setStroke()
+    path.lineWidth = 0.5
+    path.stroke()
+  }
+
+  /// The spoken name for a provider, with ", beta" when it carries the tag.
+  static func accessibilityName(for provider: ProviderID) -> String {
+    ProviderDescriptor.forProvider(provider).isBeta
+      ? "\(provider.displayName), beta" : provider.displayName
+  }
 }
 
 /// The provider mark on a tinted plate.

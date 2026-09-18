@@ -23,7 +23,8 @@ public struct ProviderHelperDefinition: Sendable, Equatable {
 }
 
 public enum ProviderHelperCatalog {
-  public static func definition(for provider: ProviderID) -> ProviderHelperDefinition {
+  /// Nil for providers connected with an API key, which have no helper.
+  public static func definition(for provider: ProviderID) -> ProviderHelperDefinition? {
     ProviderDescriptor.forProvider(provider).helper
   }
 }
@@ -43,7 +44,7 @@ public enum ProviderHelperInstallerError: LocalizedError, Sendable, Equatable {
   }
 }
 
-/// Installs only the four fixed, official provider helpers that Reserve knows
+/// Installs only the fixed, official provider helpers that Reserve knows
 /// how to use. The remote script is downloaded first, bounded and checked as a
 /// shell script, then run from a private temporary directory. It never receives
 /// the app's environment, which may contain unrelated API keys.
@@ -57,10 +58,11 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
   }
 
   public func install(_ provider: ProviderID) async throws {
-    guard ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation else {
+    guard ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation,
+      let definition = ProviderHelperCatalog.definition(for: provider)
+    else {
       throw ProviderHelperInstallerError.installFailed("Install \(provider.displayName) from its official download page, then return to Reserve.")
     }
-    let definition = ProviderHelperCatalog.definition(for: provider)
     var request = URLRequest(url: definition.installerURL)
     request.timeoutInterval = 30
     request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -111,10 +113,13 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
   }
 
   public func update(_ provider: ProviderID) async throws {
-    guard ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation else {
+    // A helper without an update command must not be launched bare: that
+    // would start its interactive session, not an update.
+    guard ProviderDescriptor.forProvider(provider).supportsAutomaticHelperUpdate,
+      let definition = ProviderHelperCatalog.definition(for: provider)
+    else {
       throw ProviderHelperInstallerError.installFailed("Update \(provider.displayName) using its official installation instructions, then return to Reserve.")
     }
-    let definition = ProviderHelperCatalog.definition(for: provider)
     guard let executable = BinaryLocator.find(definition.executable) else {
       throw ProviderHelperInstallerError.helperNotFound(definition.displayName)
     }

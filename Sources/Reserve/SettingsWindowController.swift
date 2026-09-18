@@ -585,6 +585,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
               "Cursor account usage totals from Cursor's authenticated DashboardService; Reserve does not read Cursor prompts or transcripts",
               "Optional quota updates shared by Claude Code; Reserve stores only limits and their observation time",
               "Copilot allowance and OpenAI account activity through their installed helpers, without sending prompts",
+              "Gemini plan limits by running the Antigravity CLI's own usage command (agy -p /usage), "
+                + "which starts no conversation and spends no quota; Reserve never reads agy's Google sign-in",
             ])
           ]),
         self.section(
@@ -603,7 +605,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
               "Prompts or responses",
               "Raw provider payloads",
               "OAuth tokens, account identifiers or passwords",
-              "API keys — those stay in the macOS Keychain",
+              "API keys, including Z.ai and Kimi plan keys — those stay in the macOS Keychain",
             ])
           ]),
         self.section(
@@ -613,6 +615,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             self.bullets([
               "Your providers, to read your limits",
               "OpenAI, Anthropic, OpenRouter, xAI, TypeSafe, DeepSeek and Moonshot APIs, only after you save a key",
+              "Z.ai (api.z.ai) and Kimi Code (api.kimi.com) usage endpoints, only after you save a plan key",
               "Their official status pages",
               "GitHub, only to look for a Reserve update",
             ])
@@ -755,7 +758,21 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
     let logo = SettingsProviderLogo(provider: provider)
     // The logo carries the brand; the name stays in the system label colour.
-    let name = SettingsLabel(provider.displayName, size: 13, weight: .medium, color: .labelColor)
+    let nameLabel = SettingsLabel(provider.displayName, size: 13, weight: .medium, color: .labelColor)
+    nameLabel.setAccessibilityLabel(ReserveBetaBadge.accessibilityName(for: provider))
+    let name: NSView
+    if ProviderDescriptor.forProvider(provider).isBeta {
+      // The tag sits right after the name, inside the same fixed column, so
+      // the plan and status columns stay aligned with every other row.
+      nameLabel.setContentHuggingPriority(.required, for: .horizontal)
+      let badge = ReserveBetaBadge()
+      badge.identifier = NSUserInterfaceItemIdentifier("provider-beta-\(provider.rawValue)")
+      let column = NSStackView.row([nameLabel, badge], spacing: 5, alignment: .centerY)
+      column.setHuggingPriority(.defaultLow, for: .horizontal)
+      name = column
+    } else {
+      name = nameLabel
+    }
     name.widthAnchor.constraint(equalToConstant: 92).isActive = true
     let plan = SettingsLabel(
       Self.displayPlanName(self.store.states[provider]?.snapshot?.planName),
@@ -818,6 +835,17 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     if provider == .copilot {
       rows.append(SettingsLabel("Experimental support · quota checks only", size: 11, color: .secondaryLabelColor))
     }
+    if provider == .gemini {
+      rows.append(SettingsLabel(
+        "Antigravity CLI 1.1.11 or later · sign in by running agy in Terminal",
+        size: 11, color: .secondaryLabelColor))
+    }
+    if ProviderDescriptor.forProvider(provider).usesAPIKey {
+      rows.append(self.formRow("API key:", self.planKeyControls(provider), labelWidth: 92))
+      rows.append(SettingsLabel(
+        "Unofficial usage endpoint · the key can call models, so use a dedicated one",
+        size: 11, color: .secondaryLabelColor))
+    }
     if provider == .anthropic || provider == .cursor {
       let checkbox = NSButton(
         checkboxWithTitle: "Allow access to my \(provider.displayName) usage",
@@ -852,7 +880,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       setup.toolTip = setupAction.toolTip(for: provider)
       rows.append(self.formRow("", setup, labelWidth: 92))
     }
-    if self.store.isEnabled(provider) || self.store.states[provider]?.snapshot != nil {
+    // A key-connected plan disconnects by removing its key, next to the field.
+    if !ProviderDescriptor.forProvider(provider).usesAPIKey,
+      self.store.isEnabled(provider) || self.store.states[provider]?.snapshot != nil
+    {
       let disconnect = NSButton(
         title: "Disconnect from Reserve", target: self,
         action: #selector(self.disconnectProvider(_:)))
@@ -1042,6 +1073,102 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     row.spacing = 6
     row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
     return row
+  }
+
+  /// Paste, save, remove and "Get a key" for a key-connected plan, mirroring
+  /// the API account rows. The key goes straight to the Keychain.
+  private func planKeyControls(_ provider: ProviderID) -> NSView {
+    let saved = self.store.hasPlanKey(provider)
+    let connection = ProviderDescriptor.forProvider(provider).apiKeyConnection
+    let hint = connection?.keyHint ?? "API key"
+    let field = NSSecureTextField()
+    field.identifier = NSUserInterfaceItemIdentifier("plan-key-\(provider.rawValue)")
+    field.placeholderString = saved ? "Replace key" : hint
+    field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    field.bezelStyle = .roundedBezel
+    field.target = self
+    field.action = #selector(self.planKeySubmitted(_:))
+    field.toolTip = "Paste a \(provider.displayName) API key (\(hint)). Return saves it."
+    field.setAccessibilityLabel("\(provider.displayName) API key")
+    field.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    var buttons: [NSButton] = [
+      self.apiRowButton(
+        title: saved ? "Replace" : "Save",
+        identifier: "plan-save-\(provider.rawValue)",
+        action: #selector(self.planKeySubmitted(_:)), tag: 0,
+        toolTip: "Save this key in the macOS Keychain and connect \(provider.displayName)",
+        accessibility: "Save \(provider.displayName) API key")
+    ]
+    if saved {
+      buttons.append(self.apiRowButton(
+        title: "Remove",
+        identifier: "plan-remove-\(provider.rawValue)",
+        action: #selector(self.planKeyRemoved(_:)), tag: 0,
+        toolTip: "Delete this key from the macOS Keychain and disconnect \(provider.displayName)",
+        accessibility: "Remove the saved \(provider.displayName) API key"))
+    }
+    buttons.append(self.apiRowButton(
+      title: "Get a key",
+      identifier: "plan-page-\(provider.rawValue)",
+      action: #selector(self.planKeyPageOpened(_:)), tag: 0,
+      toolTip: "Open \(connection?.keySettingsURL.host ?? provider.displayName) to create an API key",
+      accessibility: "Get a \(provider.displayName) API key"))
+    for button in buttons {
+      button.setContentHuggingPriority(.required, for: .horizontal)
+      button.setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+    let row = NSStackView(views: [field] + buttons)
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 8
+    return row
+  }
+
+  private func planKeyProvider(for sender: NSControl) -> ProviderID? {
+    guard let raw = sender.identifier?.rawValue else { return nil }
+    for prefix in ["plan-key-", "plan-save-", "plan-remove-", "plan-page-"] where raw.hasPrefix(prefix) {
+      let provider = ProviderID(rawValue: String(raw.dropFirst(prefix.count)))
+      return provider.flatMap { ProviderDescriptor.forProvider($0).usesAPIKey ? $0 : nil }
+    }
+    return nil
+  }
+
+  private func planKeyField(for provider: ProviderID) -> NSTextField? {
+    self.window?.contentView.flatMap { view in
+      Self.descendants(of: view).compactMap { $0 as? NSTextField }.first {
+        $0.identifier?.rawValue == "plan-key-\(provider.rawValue)"
+      }
+    }
+  }
+
+  @objc private func planKeySubmitted(_ sender: NSControl) {
+    guard let provider = self.planKeyProvider(for: sender),
+      let field = self.planKeyField(for: provider)
+    else { return }
+    let value = field.stringValue
+    guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    field.stringValue = ""
+    do {
+      try self.store.savePlanKey(value, for: provider)
+    } catch {
+      self.presentError(error)
+    }
+    self.applyPane(animated: false)
+  }
+
+  @objc private func planKeyRemoved(_ sender: NSButton) {
+    guard let provider = self.planKeyProvider(for: sender) else { return }
+    self.store.removePlanKey(provider)
+    self.applyPane(animated: false)
+  }
+
+  @objc private func planKeyPageOpened(_ sender: NSButton) {
+    guard let provider = self.planKeyProvider(for: sender),
+      let url = ProviderDescriptor.forProvider(provider).apiKeyConnection?.keySettingsURL,
+      url.scheme?.lowercased() == "https"
+    else { return }
+    NSWorkspace.shared.open(url)
   }
 
   private func apiReading(for provider: APIConsumptionProvider, saved: Bool) -> String {
@@ -1623,8 +1750,18 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func providerStatus(_ provider: ProviderID) -> (text: String, color: NSColor) {
-    let executable = ProviderDescriptor.forProvider(provider).helper.executable
     let state = self.store.states[provider]
+    // Key-connected plans have no tool to detect; the key is what matters.
+    if ProviderDescriptor.forProvider(provider).usesAPIKey {
+      let saved = self.store.hasPlanKey(provider)
+      if !self.store.isEnabled(provider) { return (saved ? "Key saved" : "Off", .secondaryLabelColor) }
+      if !saved || state?.requiresConnection == true { return ("Key needed", ReserveColor.accent) }
+      if state?.snapshot == nil, state?.error == nil { return ("Checking", .secondaryLabelColor) }
+      return Self.providerStatus(
+        provider: provider, hasSnapshot: state?.snapshot != nil,
+        hasError: state?.error != nil, toolDetected: true)
+    }
+    let executable = ProviderDescriptor.forProvider(provider).helper?.executable ?? ""
     if !self.store.isEnabled(provider) {
       return (BinaryLocator.find(executable) != nil ? "Available on this Mac" : "Off", .secondaryLabelColor)
     }
@@ -1800,8 +1937,22 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       renewalInputWorks = false
     }
     self.store.setRenewalDay(originalRenewalDay, for: .anthropic)
+    // Key-connected plans show a secure key field, Save and Get a key, and no
+    // Keychain-consent checkbox or helper actions.
+    self.expandedProviders = [.zai, .kimi]
+    self.applyPane(animated: false)
+    let keyIDs = identifiers()
+    let planKeyControlsWork = [ProviderID.zai, .kimi].allSatisfy { provider in
+      let field = descendants().first { $0.identifier?.rawValue == "plan-key-\(provider.rawValue)" }
+      return field is NSSecureTextField
+        && keyIDs.contains("plan-save-\(provider.rawValue)")
+        && keyIDs.contains("plan-page-\(provider.rawValue)")
+        && !keyIDs.contains("settings-keychain-\(provider.rawValue)")
+        && !keyIDs.contains("provider-disconnect-\(provider.rawValue)")
+    }
     let providersSuccess =
       providerRowsPresent
+      && planKeyControlsWork
       && keychainAccessIsHiddenUntilExpanded
       && expandedIDs.contains("settings-keychain-anthropic")
       && expandedIDs.contains("settings-keychain-cursor")

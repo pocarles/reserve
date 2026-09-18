@@ -949,6 +949,9 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
     } else if summary.requiresKeychainAccess {
       state = "Waiting for permission"
       fullState = state
+    } else if summary.setupAction == .addKey {
+      state = "API key needed"
+      fullState = state
     } else if summary.needsConnection {
       state = "Sign-in needed"
       fullState = state

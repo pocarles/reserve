@@ -6,6 +6,10 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   case grok
   case cursor
   case copilot
+  // Appended so the persisted raw values of earlier providers never shift.
+  case zai
+  case kimi
+  case gemini
 
   public var id: String { self.rawValue }
 
@@ -523,7 +527,8 @@ public enum UsageProviderError: LocalizedError, Sendable, Equatable {
         "The provider temporarily rate limited usage checks."
       }
     case .timedOut(let operation): "\(operation) timed out."
-    case .invalidResponse(let message): "Invalid provider response: \(message)"
+    case .invalidResponse(let message):
+      BetaProviderReport.isReportMessage(message) ? message : "Invalid provider response: \(message)"
     case .unavailable(let message): message
     case .processFailed(let message): message
     }
