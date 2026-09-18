@@ -173,7 +173,19 @@ there. It stays in the macOS Keychain on this Mac and is off until you save one:
   remaining balance on its own when it does not;
 - TypeSafe, the API key from the dashboard. TypeSafe publishes no spend
   endpoint, so Reserve lists the models that key can send and the documented
-  input price. It does not call System One, which would consume the account.
+  input price. It does not call System One, which would consume the account;
+- DeepSeek, an API key, read from the user balance endpoint: the remaining
+  balance in the currency DeepSeek reports (USD first when the account holds
+  both USD and CNY), split into granted and topped-up credit, and whether the
+  balance still allows calls;
+- Moonshot (Kimi API platform), an API key from platform.kimi.ai, read from the
+  balance endpoint on api.moonshot.ai: the remaining USD balance, split into
+  vouchers and cash. Keys from the China platform (api.moonshot.cn) are not
+  supported.
+
+OpenAI and Anthropic admin keys and xAI management keys can only read billing.
+OpenRouter, TypeSafe, DeepSeek and Moonshot have no read-only key: the key you
+paste can also call models, so create one just for Reserve.
 
 Where a provider groups its billing, Reserve asks for the grouping and shows
 what the spend went on: models for Anthropic, billing line items for OpenAI.
@@ -185,7 +197,7 @@ Each row has **Get a key**, which opens that provider's own key page in your
 browser; the field shows the prefix to expect. Refreshing Reserve refreshes
 these measurements along with the subscription cards.
 
-Those calls report spend. They do not replace the subscription cards, and a
+Those calls report spend or a remaining balance. They do not replace the subscription cards, and a
 key is sent only to the provider that issued it.
 
 The optional comparable-value view is an API-equivalent estimate, not a provider bill.

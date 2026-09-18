@@ -1358,6 +1358,20 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       note: APIConsumptionNote(headline: "2 models", detail: "jev-latest, jev-preview"),
       fetchedAt: now, source: "self-test",
       details: [UsageDetail("jev-latest", "Flagship System One model")])
+    // Balance providers report what is left, so they arrive as a note.
+    let deepSeek = APIConsumptionSnapshot(
+      provider: .deepSeek, windows: [],
+      note: APIConsumptionNote(headline: "¥110.00", detail: "¥10.00 granted · ¥100 topped up"),
+      fetchedAt: now, source: "self-test",
+      details: [
+        UsageDetail("Balance", "¥110.00"), UsageDetail("Granted", "¥10.00"),
+        UsageDetail("Topped up", "¥100"),
+      ])
+    let moonshot = APIConsumptionSnapshot(
+      provider: .moonshot, windows: [],
+      note: APIConsumptionNote(headline: "$49.59", detail: "$46.59 voucher · $3.00 cash"),
+      fetchedAt: now, source: "self-test",
+      details: [UsageDetail("Balance", "$49.59")])
     let readings = [
       APIConsumptionReading(
         provider: .openRouter, snapshot: openRouter, error: nil, isRefreshing: false,
@@ -1368,6 +1382,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         isRefreshing: false, isExpanded: true),
       APIConsumptionReading(
         provider: .typeSafe, snapshot: typeSafe, error: nil, isRefreshing: false),
+      APIConsumptionReading(
+        provider: .deepSeek, snapshot: deepSeek, error: nil, isRefreshing: false,
+        isExpanded: true),
+      APIConsumptionReading(
+        provider: .moonshot, snapshot: moonshot, error: nil, isRefreshing: false),
     ]
     let view = UsageDashboardView(
       states: [], selectedMenuBarProvider: nil, isRefreshing: false, now: now,
@@ -1380,7 +1399,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     return identifiers.filter { $0 == "api-detail-openRouter" }.count == 3
       && identifiers.filter { $0 == "api-detail-xAI" }.count == 1
       && !identifiers.contains("api-detail-typeSafe")
-      && ["openRouter", "xAI", "typeSafe"].allSatisfy { identifiers.contains("disclose-api-\($0)") }
+      && identifiers.filter { $0 == "api-detail-deepSeek" }.count == 3
+      && !identifiers.contains("api-detail-moonshot")
+      && ["openRouter", "xAI", "typeSafe", "deepSeek", "moonshot"].allSatisfy {
+        identifiers.contains("disclose-api-\($0)")
+      }
   }
 
   private static func historyPlaceholderChecks() -> Bool {
