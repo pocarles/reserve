@@ -54,8 +54,10 @@ struct DescriptorBoundReadTests {
     let fifo = root.appendingPathComponent("pipe.jsonl")
     #expect(mkfifo(fifo.path, 0o600) == 0)
 
-    // Run the open off-thread and give it two seconds. If it ever blocks, fail
-    // and then unblock it by opening the write end, so the suite cannot hang.
+    // Run the open off-thread and give it ten seconds. A blocking FIFO open
+    // never returns at all, so a generous bound still catches it while a busy
+    // CI runner that is slow to schedule the thread does not fail the test. If
+    // it ever blocks, fail and unblock it by opening the write end.
     let finished = DispatchSemaphore(value: 0)
     let outcome = OpenOutcome()
     DispatchQueue.global().async {
@@ -65,13 +67,13 @@ struct DescriptorBoundReadTests {
       finished.signal()
     }
     let started = Date()
-    if finished.wait(timeout: .now() + 2) == .timedOut {
+    if finished.wait(timeout: .now() + 10) == .timedOut {
       Issue.record("Opening a FIFO blocked")
       let writer = open(fifo.path, O_WRONLY | O_NONBLOCK)
       if writer >= 0 { close(writer) }
       finished.wait()
     }
-    #expect(Date().timeIntervalSince(started) < 2)
+    #expect(Date().timeIntervalSince(started) < 10)
     #expect(outcome.helperRejected)
     #expect(outcome.readerRejected)
   }
