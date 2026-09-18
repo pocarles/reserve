@@ -32,6 +32,13 @@ public struct UsageWindow: Codable, Equatable, Sendable, Identifiable {
     self.label.localizedCaseInsensitiveContains("share")
   }
 
+  /// Model-scoped limits (Claude's "Fable weekly", Codex's "GPT-5 · Weekly")
+  /// cap one model inside the plan's own allowance, so they never stand in for
+  /// the plan itself.
+  public var isModelScoped: Bool {
+    self.label.lowercased().hasSuffix(" weekly") || self.label.contains(" · ")
+  }
+
   public init(
     id: String,
     label: String,

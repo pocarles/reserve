@@ -54,6 +54,10 @@ final class ReserveUpdater:
   }
 
   func checkForUpdates() {
+    // Sparkle shows its progress window straight away, before any delegate
+    // callback, so Reserve's floating windows must step down first.
+    self.lowerReserveWindows()
+    NSApplication.shared.activate(ignoringOtherApps: true)
     self.controller.checkForUpdates(nil)
   }
 
@@ -62,6 +66,7 @@ final class ReserveUpdater:
     didFinishUpdateCycleFor _: SPUUpdateCheck,
     error _: (any Error)?
   ) {
+    self.restoreReserveWindows()
     self.onDidFinishUpdateUI?()
     self.onChange?()
   }
@@ -87,7 +92,33 @@ final class ReserveUpdater:
 
   private func prepareForUpdateUI() {
     self.onWillPresentUpdateUI?()
+    self.lowerReserveWindows()
     NSApplication.shared.activate(ignoringOtherApps: true)
+  }
+
+  /// Settings and the dashboard float above normal windows, and Sparkle's
+  /// windows open at the normal level, so they landed behind Reserve. While an
+  /// update session runs, Reserve's own windows drop to the normal level; the
+  /// most recently shown window, Sparkle's, then stays in front.
+  private var loweredWindowLevels: [ObjectIdentifier: (window: NSWindow, level: NSWindow.Level)] = [:]
+
+  private func lowerReserveWindows() {
+    for window in NSApplication.shared.windows
+    where window.isVisible && window.level > .normal
+      // The menu-bar icon lives in a status-bar window; it must stay put.
+      && !window.className.contains("StatusBar")
+      && self.loweredWindowLevels[ObjectIdentifier(window)] == nil
+    {
+      self.loweredWindowLevels[ObjectIdentifier(window)] = (window, window.level)
+      window.level = .normal
+    }
+  }
+
+  private func restoreReserveWindows() {
+    for entry in self.loweredWindowLevels.values where entry.window.level == .normal {
+      entry.window.level = entry.level
+    }
+    self.loweredWindowLevels.removeAll()
   }
 
   /// Carries the existing Reserve checkbox choice into Sparkle once. Sparkle

@@ -121,8 +121,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private static let uiSelfTestDefaultsSuite = "Reserve.UISelfTest"
 
+  /// A menu-bar app shows no menu bar of its own, but text fields still find
+  /// Cut, Copy, Paste, Undo and Select All through the main menu's key
+  /// equivalents. Without it, Command-V does nothing in Settings.
+  static func editingMenu() -> NSMenu {
+    let edit = NSMenu(title: "Edit")
+    edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+    let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+    redo.keyEquivalentModifierMask = [.command, .shift]
+    edit.addItem(.separator())
+    edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    let window = NSMenu(title: "Window")
+    window.addItem(
+      withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    let main = NSMenu()
+    for submenu in [NSMenu(title: "Reserve"), edit, window] {
+      main.addItem(withTitle: submenu.title, action: nil, keyEquivalent: "").submenu = submenu
+    }
+    return main
+  }
+
   func applicationDidFinishLaunching(_: Notification) {
     NSApplication.shared.setActivationPolicy(.accessory)
+    NSApplication.shared.mainMenu = Self.editingMenu()
 #if RESERVE_DEV_AUTOMATION
     let isConnectionSelfTest = CommandLine.arguments.contains("--self-test-connections")
     let isUISelfTest = CommandLine.arguments.contains("--self-test-ui")

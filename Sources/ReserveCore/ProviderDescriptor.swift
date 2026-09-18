@@ -13,6 +13,8 @@ public struct ProviderDescriptor: Sendable {
     public static let localHistory = Self(rawValue: 1 << 1)
     public static let accountHistory = Self(rawValue: 1 << 2)
     public static let extraSpending = Self(rawValue: 1 << 3)
+    /// Every plan limit gets its own meter instead of a one-line summary.
+    public static let limitMeters = Self(rawValue: 1 << 4)
   }
 
   public let id: ProviderID
@@ -41,7 +43,7 @@ public struct ProviderDescriptor: Sendable {
     case .anthropic:
       Self(id: id, displayName: "Claude", executable: "claude", helperName: "Claude helper",
         installer: "https://claude.ai/install.sh", account: "https://claude.ai/settings/usage",
-        status: "https://status.claude.com", capabilities: [.liveAllowance, .localHistory, .extraSpending],
+        status: "https://status.claude.com", capabilities: [.liveAllowance, .localHistory, .extraSpending, .limitMeters],
         authenticationStrategy: .protectedSession,
         loginArguments: ["auth", "login", "--claudeai"], loginDisplayName: "Claude Code",
         trustedLoginHosts: ["claude.com", "claude.ai", "platform.claude.com"])
