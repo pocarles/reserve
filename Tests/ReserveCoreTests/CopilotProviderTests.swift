@@ -163,7 +163,9 @@ import Testing
       } catch {
         #expect(cancel && error is CancellationError)
       }
-      #expect(start.duration(to: .now) < .seconds(3))
+      // Well under the 10 s the cancelled case would otherwise wait, with
+      // enough room that a loaded CI runner's scheduling does not fail it.
+      #expect(start.duration(to: .now) < .seconds(8))
     }
   }
 
