@@ -758,7 +758,21 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
     let logo = SettingsProviderLogo(provider: provider)
     // The logo carries the brand; the name stays in the system label colour.
-    let name = SettingsLabel(provider.displayName, size: 13, weight: .medium, color: .labelColor)
+    let nameLabel = SettingsLabel(provider.displayName, size: 13, weight: .medium, color: .labelColor)
+    nameLabel.setAccessibilityLabel(ReserveBetaBadge.accessibilityName(for: provider))
+    let name: NSView
+    if ProviderDescriptor.forProvider(provider).isBeta {
+      // The tag sits right after the name, inside the same fixed column, so
+      // the plan and status columns stay aligned with every other row.
+      nameLabel.setContentHuggingPriority(.required, for: .horizontal)
+      let badge = ReserveBetaBadge()
+      badge.identifier = NSUserInterfaceItemIdentifier("provider-beta-\(provider.rawValue)")
+      let column = NSStackView.row([nameLabel, badge], spacing: 5, alignment: .centerY)
+      column.setHuggingPriority(.defaultLow, for: .horizontal)
+      name = column
+    } else {
+      name = nameLabel
+    }
     name.widthAnchor.constraint(equalToConstant: 92).isActive = true
     let plan = SettingsLabel(
       Self.displayPlanName(self.store.states[provider]?.snapshot?.planName),

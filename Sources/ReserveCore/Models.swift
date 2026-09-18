@@ -527,7 +527,8 @@ public enum UsageProviderError: LocalizedError, Sendable, Equatable {
         "The provider temporarily rate limited usage checks."
       }
     case .timedOut(let operation): "\(operation) timed out."
-    case .invalidResponse(let message): "Invalid provider response: \(message)"
+    case .invalidResponse(let message):
+      BetaProviderReport.isReportMessage(message) ? message : "Invalid provider response: \(message)"
     case .unavailable(let message): message
     case .processFailed(let message): message
     }

@@ -207,7 +207,7 @@ import Testing
   }
 
   @Test func unknownShapesAreInvalidResponses() {
-    let unrecognized = UsageProviderError.invalidResponse("Antigravity CLI usage report was not recognized.")
+    let unrecognized = BetaProviderReport.unrecognizedResponse(.gemini)
     for json in [
       #"{}"#, #"[]"#, #"{"quota": 1}"#, #"{"groups": {}}"#, #"{"groups": [1]}"#,
       #"{"status": "SUCCESS", "command": {"name": "skills", "data": {"groups": []}}}"#,
@@ -272,7 +272,7 @@ import Testing
     #expect(throws: UsageProviderError.processFailed("Antigravity CLI exited with status 2.")) {
       try GeminiProvider.interpret(Self.result("crashed", status: 2), now: Self.now)
     }
-    #expect(throws: UsageProviderError.invalidResponse("Antigravity CLI usage report was not recognized.")) {
+    #expect(throws: BetaProviderReport.unrecognizedResponse(.gemini)) {
       try GeminiProvider.interpret(Self.result("Gemini Models\tWeekly\t0%"), now: Self.now)
     }
   }

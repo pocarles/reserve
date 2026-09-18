@@ -59,13 +59,19 @@ start enabled only when their helper is already installed. Saved choices are pre
 - Copilot CLI, signed into GitHub. Setup opens GitHub’s installation instructions
   if the helper is missing;
 - Antigravity CLI (`agy`) 1.1.11 or newer, signed into a Google account with a
-  Google AI Pro or Ultra plan (see [Gemini](#gemini));
-- Z.ai GLM Coding Plan, connected with an API key; and
-- Kimi Code, connected with an API key.
+  Google AI Pro or Ultra plan (see [Gemini](#gemini)), in beta;
+- Z.ai GLM Coding Plan, connected with an API key, in beta; and
+- Kimi Code, connected with an API key, in beta.
+
+Gemini, Z.ai and Kimi Code are in beta: their usage formats have not yet been
+checked against every kind of account, and Reserve marks them **Beta** in
+Settings and in the connection window. If one shows an error or numbers that
+look wrong, please [open a GitHub issue](https://github.com/pocarles/reserve/issues)
+without your key, account name or email.
 
 ### Gemini
 
-Since 2026-06-18, Gemini CLI no longer serves Google AI Pro, Ultra or free
+*Beta.* Since 2026-06-18, Gemini CLI no longer serves Google AI Pro, Ultra or free
 individual accounts; those plans run through the Antigravity CLI (`agy`), with
 5-hour and weekly limits per model group. Reserve shows each group's limits as
 its own meter: the Gemini models group leads, and the Claude and GPT models
@@ -89,7 +95,7 @@ read, so the Gemini card shows no service status.
 
 ### Plans connected with an API key
 
-Z.ai and Kimi Code have no helper and no sign-in. **Connect** asks for an API
+*Beta.* Z.ai and Kimi Code have no helper and no sign-in. **Connect** asks for an API
 key instead: paste it, or choose **Get a key** to open the provider's key page.
 The key is saved only in the macOS Keychain and is sent only to that provider's
 usage endpoint. **Remove** in Settings > Providers deletes the key, stops
@@ -106,8 +112,8 @@ meters, reset times, pace, alerts and menu-bar source as the other providers.
 
 Both usage endpoints are unofficial: they are what the providers' own tools
 use, they are not documented, and they may change without notice. If a reply
-is not understood, Reserve says so rather than showing a guessed 0%. Neither
-provider offers a read-only key, so the key you paste can also call models;
+is not understood, Reserve says so rather than showing a guessed 0%, and asks
+you to report it on GitHub. Neither provider offers a read-only key, so the key you paste can also call models;
 create a dedicated key just for Reserve. Z.ai publishes no status page, so its
 card shows no service status; Kimi uses Moonshot AI's status page.
 

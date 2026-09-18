@@ -58,7 +58,7 @@ public struct ZaiProvider: UsageProvider {
   static func decode(_ data: Data, now: Date = Date()) throws -> UsageSnapshot {
     guard data.count <= APIKeyPlanTransport.maximumResponseBytes,
       let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    else { throw UsageProviderError.invalidResponse("Z.ai usage data was not recognized.") }
+    else { throw BetaProviderReport.unrecognizedResponse(.zai) }
 
     // Z.ai reports failures inside an HTTP 200 body. A rejected key comes back
     // as code 401 ("token expired or incorrect") or 1000–1004 (missing or
@@ -78,7 +78,7 @@ public struct ZaiProvider: UsageProvider {
     }
     guard let payload = root["data"] as? [String: Any],
       let rawLimits = payload["limits"] as? [Any], rawLimits.count <= 64
-    else { throw UsageProviderError.invalidResponse("Z.ai usage data was not recognized.") }
+    else { throw BetaProviderReport.unrecognizedResponse(.zai) }
 
     var planWindows: [(window: UsageWindow, counts: (used: Double, limit: Double)?, kind: String)] = []
     var details: [UsageDetail] = []
@@ -88,7 +88,7 @@ public struct ZaiProvider: UsageProvider {
         let unit = APIKeyPlanTransport.integer(limit["unit"]),
         let number = APIKeyPlanTransport.integer(limit["number"]),
         let percentage = APIKeyPlanTransport.number(limit["percentage"])
-      else { throw UsageProviderError.invalidResponse("Z.ai returned a limit Reserve could not read.") }
+      else { throw BetaProviderReport.unrecognizedResponse(.zai) }
 
       let total = APIKeyPlanTransport.number(limit["usage"])
       let current = APIKeyPlanTransport.number(limit["currentValue"])
@@ -101,7 +101,7 @@ public struct ZaiProvider: UsageProvider {
       }
       let usedPercent = used.flatMap { value in total.map { value / $0 * 100 } } ?? percentage
       guard usedPercent.isFinite, usedPercent >= 0 else {
-        throw UsageProviderError.invalidResponse("Z.ai returned an invalid limit.")
+        throw BetaProviderReport.unrecognizedResponse(.zai)
       }
 
       switch type {

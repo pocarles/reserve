@@ -56,7 +56,7 @@ public struct KimiProvider: UsageProvider {
   static func decode(_ data: Data, now: Date = Date()) throws -> UsageSnapshot {
     guard data.count <= APIKeyPlanTransport.maximumResponseBytes,
       let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    else { throw UsageProviderError.invalidResponse("Kimi Code usage data was not recognized.") }
+    else { throw BetaProviderReport.unrecognizedResponse(.kimi) }
 
     var windows: [UsageWindow] = []
     var details: [UsageDetail] = []
@@ -121,7 +121,7 @@ public struct KimiProvider: UsageProvider {
 
     // Nothing recognizable is an error, never an empty 0% plan.
     guard !windows.isEmpty else {
-      throw UsageProviderError.invalidResponse("Kimi Code usage data was not recognized.")
+      throw BetaProviderReport.unrecognizedResponse(.kimi)
     }
     windows.sort { ($0.windowMinutes ?? .max) < ($1.windowMinutes ?? .max) }
     return UsageSnapshot(

@@ -176,7 +176,7 @@ public struct GeminiProvider: UsageProvider {
       if output.status != 0 {
         throw UsageProviderError.processFailed("Antigravity CLI exited with status \(output.status).")
       }
-      throw UsageProviderError.invalidResponse("Antigravity CLI usage report was not recognized.")
+      throw Self.unrecognized
     }
     return try Self.decode(report, now: now, exitStatus: output.status)
   }
@@ -358,7 +358,7 @@ public struct GeminiProvider: UsageProvider {
     // Float noise at the edges is clamped; anything clearly outside 0–1 is
     // not a fraction, so the whole report is refused rather than guessed at.
     guard remaining.isFinite, remaining >= -0.001, remaining <= 1.001 else {
-      throw UsageProviderError.invalidResponse("Antigravity CLI returned an invalid remaining allowance.")
+      throw Self.unrecognized
     }
     let fraction = min(1, max(0, remaining))
 
@@ -406,8 +406,7 @@ public struct GeminiProvider: UsageProvider {
     return try Self.number(object, ["remaining_fraction", "remainingFraction"])
   }
 
-  private static let unrecognized = UsageProviderError.invalidResponse(
-    "Antigravity CLI usage report was not recognized.")
+  static let unrecognized = BetaProviderReport.unrecognizedResponse(.gemini)
 
   private static func array(_ value: Any?) throws -> [Any] {
     guard let value, !(value is NSNull) else { return [] }

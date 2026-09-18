@@ -294,6 +294,71 @@ struct APIKeyPlanProviderTests {
     }
   }
 
+  // MARK: Beta providers
+
+  @Test func exactlyTheUnverifiedPlanProvidersAreBeta() {
+    let beta = Set(ProviderID.allCases.filter { ProviderDescriptor.forProvider($0).isBeta })
+    #expect(beta == [.zai, .kimi, .gemini])
+  }
+
+  @Test func anUnrecognizedBetaResponseAsksForAReportWithoutLeakingAnything() async throws {
+    let issues = "https://github.com/pocarles/reserve/issues"
+    #expect(BetaProviderReport.issuesURL.absoluteString == issues)
+    #expect(BetaProviderReport.unrecognizedMessage(for: .zai)
+      == "Reserve didn’t recognize Z.ai’s usage format. Z.ai support is in beta. "
+      + "Please report this at \(issues)")
+
+    func check(_ error: Error, provider: ProviderID, secrets: [String]) {
+      let text = error.localizedDescription
+      #expect(error as? UsageProviderError == BetaProviderReport.unrecognizedResponse(provider))
+      #expect(text == BetaProviderReport.unrecognizedMessage(for: provider))
+      #expect(text.contains(issues))
+      #expect(text.contains("beta"))
+      #expect(!text.contains("Invalid provider response"))
+      for secret in secrets { #expect(!text.contains(secret), "\(text) leaked \(secret)") }
+    }
+
+    for body in [
+      #"{"code":200,"success":true,"data":{"echo":"\#(Self.zaiKey)","email":"person@example.com"}}"#,
+      #"{"code":200,"success":true,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":"\#(Self.zaiKey)"}]}}"#,
+      "<html>person@example.com \(Self.zaiKey)</html>",
+    ] {
+      do {
+        _ = try await self.zai(body).fetch()
+        Issue.record("expected a failure for \(body)")
+      } catch {
+        check(error, provider: .zai, secrets: [Self.zaiKey, "ZaiSecret", "person@example.com", "echo", "html"])
+      }
+    }
+    for body in [
+      #"{"user":"person@example.com","token":"\#(Self.kimiKey)"}"#,
+      "<html>\(Self.kimiKey)</html>",
+    ] {
+      do {
+        _ = try await self.kimi(body).fetch()
+        Issue.record("expected a failure for \(body)")
+      } catch {
+        check(error, provider: .kimi, secrets: [Self.kimiKey, "KimiSecret", "person@example.com", "html"])
+      }
+    }
+    for json in [
+      #"{"account":"person@example.com","groups":[1]}"#,
+      #"{"groups":[{"name":"person@example.com","buckets":[{"window":"weekly","remaining_fraction":7}]}]}"#,
+    ] {
+      do {
+        _ = try GeminiProvider.decode(Data(json.utf8))
+        Issue.record("expected a failure for \(json)")
+      } catch {
+        check(error, provider: .gemini, secrets: ["person@example.com", "groups", "buckets"])
+      }
+    }
+  }
+
+  @Test func otherInvalidResponsesKeepTheirGenericPrefix() {
+    #expect(UsageProviderError.invalidResponse("missing HTTP status").localizedDescription
+      == "Invalid provider response: missing HTTP status")
+  }
+
   // MARK: Shared safety
 
   @Test func theKeyNeverAppearsInAnErrorDescription() async throws {

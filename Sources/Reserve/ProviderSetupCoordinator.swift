@@ -487,6 +487,10 @@ final class ProviderConnectionPanel: NSPanel {
     self.primary.isHidden = action == nil
     self.primary.isEnabled = action != nil
     self.closeButton.isHidden = !self.mayClose || phase == .connected
+    // The Beta tag is silent to VoiceOver, so the heading says it instead.
+    self.heading.setAccessibilityLabel(
+      ProviderDescriptor.forProvider(self.provider).isBeta
+        ? "\(self.heading.stringValue), beta" : nil)
     self.contentView?.layoutSubtreeIfNeeded()
   }
 
@@ -535,7 +539,17 @@ final class ProviderConnectionPanel: NSPanel {
     self.closeButton.target = self
     self.closeButton.action = #selector(self.closeClicked)
     self.closeButton.identifier = NSUserInterfaceItemIdentifier("connection-close")
-    let header = NSStackView.row([logo, self.heading], spacing: 14, alignment: .centerY)
+    var headerViews: [NSView] = [logo, self.heading]
+    if ProviderDescriptor.forProvider(self.provider).isBeta {
+      // The heading keeps its natural width so the tag follows the words
+      // rather than floating at the far edge of the window.
+      self.heading.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+      let badge = ReserveBetaBadge()
+      badge.identifier = NSUserInterfaceItemIdentifier("connection-beta")
+      headerViews += [badge, NSStackView.spacer()]
+    }
+    let header = NSStackView.row(headerViews, spacing: 14, alignment: .centerY)
+    if headerViews.count > 2 { header.setCustomSpacing(8, after: self.heading) }
     let actions = NSStackView.row(
       [self.spinner, NSStackView.spacer(), self.closeButton, self.primary], spacing: 10)
     self.keyField.identifier = NSUserInterfaceItemIdentifier("connection-key")

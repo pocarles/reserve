@@ -47,6 +47,10 @@ public struct ProviderDescriptor: Sendable {
   public let loginDisplayName: String
   public let trustedLoginHosts: Set<String>
   public let apiKeyConnection: APIKeyConnection?
+  /// Providers whose usage source has not been verified against a real
+  /// account. They are labelled Beta, and a response Reserve cannot read asks
+  /// the person to report it (see `BetaProviderReport`).
+  public let isBeta: Bool
   public var supportsAutomaticHelperInstallation: Bool { self.installationStrategy == .automaticHelper }
   /// An installable helper that has no update command of its own (the
   /// Antigravity CLI updates itself when the person runs it) is never started
@@ -104,7 +108,8 @@ public struct ProviderDescriptor: Sendable {
         connection: APIKeyConnection(
           keyHint: "id.secret",
           keySettingsURL: URL(string: "https://z.ai/manage-apikey/apikey-list")!,
-          endpointHost: ZaiProvider.endpointHost))
+          endpointHost: ZaiProvider.endpointHost),
+        isBeta: true)
     case .gemini:
       // Google AI Pro, Ultra and free individual plans are served by the
       // Antigravity CLI (`agy`) since Gemini CLI stopped serving them on
@@ -119,7 +124,8 @@ public struct ProviderDescriptor: Sendable {
         helperName: "Antigravity CLI", installer: "https://antigravity.google/cli/install.sh",
         account: "https://antigravity.google/docs/plans/", status: nil,
         capabilities: [.liveAllowance, .limitMeters], updateArguments: [],
-        loginArguments: [], loginDisplayName: "Antigravity CLI", trustedLoginHosts: [])
+        loginArguments: [], loginDisplayName: "Antigravity CLI", trustedLoginHosts: [],
+        isBeta: true)
     case .kimi:
       // Moonshot AI's official Statuspage covers the Kimi service.
       Self(apiKeyProvider: id, displayName: "Kimi",
@@ -127,7 +133,8 @@ public struct ProviderDescriptor: Sendable {
         connection: APIKeyConnection(
           keyHint: "sk-kimi-…",
           keySettingsURL: URL(string: "https://www.kimi.com/code/console")!,
-          endpointHost: KimiProvider.endpointHost))
+          endpointHost: KimiProvider.endpointHost),
+        isBeta: true)
     }
   }
 
@@ -136,7 +143,8 @@ public struct ProviderDescriptor: Sendable {
     installer: String, account: String, status: String?, statusFormat: StatusFormat = .statuspage,
     capabilities: Capabilities, authenticationStrategy: AuthenticationStrategy = .cliOAuth,
     installationStrategy: InstallationStrategy = .automaticHelper, updateArguments: [String]? = nil,
-    loginArguments: [String], loginDisplayName: String, trustedLoginHosts: Set<String>
+    loginArguments: [String], loginDisplayName: String, trustedLoginHosts: Set<String>,
+    isBeta: Bool = false
   ) {
     self.id = id
     self.displayName = displayName
@@ -157,13 +165,14 @@ public struct ProviderDescriptor: Sendable {
     self.loginDisplayName = loginDisplayName
     self.trustedLoginHosts = trustedLoginHosts
     self.apiKeyConnection = nil
+    self.isBeta = isBeta
   }
 
   /// A plan read with a pasted key: live allowance only, with no helper, no
   /// sign-in command and no local history.
   private init(
     apiKeyProvider id: ProviderID, displayName: String, account: String, status: String?,
-    connection: APIKeyConnection
+    connection: APIKeyConnection, isBeta: Bool = false
   ) {
     self.id = id
     self.displayName = displayName
@@ -179,5 +188,31 @@ public struct ProviderDescriptor: Sendable {
     self.loginDisplayName = displayName
     self.trustedLoginHosts = []
     self.apiKeyConnection = connection
+    self.isBeta = isBeta
+  }
+}
+
+/// One wording for every beta provider whose response Reserve could not read,
+/// so Z.ai, Kimi and Gemini stay consistent. The message names only the
+/// provider: never the response, the key, an account name or an email.
+public enum BetaProviderReport {
+  /// Where people report problems. The same repository as the app's updater.
+  public static let issuesURL = URL(string: "https://github.com/pocarles/reserve/issues")!
+
+  public static func unrecognizedMessage(for provider: ProviderID) -> String {
+    let name = provider.displayName
+    return "Reserve didn’t recognize \(name)’s usage format. \(name) support is in beta. "
+      + "Please report this at \(Self.issuesURL.absoluteString)"
+  }
+
+  /// The error a beta provider throws when a response has a shape it cannot read.
+  public static func unrecognizedResponse(_ provider: ProviderID) -> UsageProviderError {
+    .invalidResponse(Self.unrecognizedMessage(for: provider))
+  }
+
+  /// A message that already explains itself and asks for a report is shown
+  /// as is, without the generic "Invalid provider response" prefix.
+  static func isReportMessage(_ message: String) -> Bool {
+    message.contains(Self.issuesURL.absoluteString)
   }
 }
