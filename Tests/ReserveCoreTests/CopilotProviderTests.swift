@@ -131,6 +131,11 @@ import Testing
         Issue.record("Invalid account or protocol was accepted")
       } catch let error as UsageProviderError {
         if mode == "signedout" { #expect(error.requiresConnection) }
+        else if mode == "version" {
+          // Protocol 99 is newer than Reserve speaks: updating Copilot cannot
+          // fix it, so it must not ask for a Copilot update.
+          #expect(error == .unavailable(CopilotProvider.newerThanSupportedMessage))
+        }
         else if case .updateRequired = error {} else { Issue.record("Expected an update action") }
       }
       let calls = try String(contentsOf: fixture.calls, encoding: .utf8)

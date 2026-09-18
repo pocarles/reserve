@@ -54,7 +54,7 @@ enum ProviderArtwork {
 
   private static func bundledImage(for provider: ProviderID) -> NSImage? {
     guard
-      let url = Bundle.reserveResources.url(
+      let url = Bundle.reserveResources?.url(
         forResource: provider.rawValue,
         withExtension: "svg",
         subdirectory: "ProviderLogos"),

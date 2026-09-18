@@ -905,6 +905,10 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
       message = "Waiting for macOS permission…"
     } else if summary.isConnecting {
       message = "Complete the sign-in in your browser"
+    } else if summary.signInCouldNotStart, summary.setupAction == .signIn {
+      // The generic "Sign in to…" would invite the same failed launch. The
+      // specific reason stays in the tooltip below.
+      message = "Sign-in could not start. Reopen Reserve."
     } else if let setupAction = summary.setupAction {
       message = setupAction.message(for: summary.provider)
     } else if summary.needsConnection && summary.localUsage != nil {
@@ -951,6 +955,9 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
       fullState = state
     } else if summary.setupAction == .addKey {
       state = "API key needed"
+      fullState = state
+    } else if summary.signInCouldNotStart {
+      state = "Sign-in could not start"
       fullState = state
     } else if summary.needsConnection {
       state = "Sign-in needed"

@@ -43,6 +43,18 @@ enum ConnectionFlowSelfTest {
         "Claude browser pipe did not preserve the automatic callback URL")
       expect(UsageStore.authorizationURL(in: handedOffURL, for: .anthropic)?.query?
         .contains("localhost") == true, "Claude callback URL was not accepted")
+      // The shim is written at runtime into the private directory, so a
+      // running Reserve whose app bundle was deleted can still sign in.
+      expect(Bundle.reserveResources?.url(forResource: "ClaudeLoginBrowser", withExtension: "sh") == nil,
+        "the Claude browser shim is still shipped as a bundle resource")
+      expect(URL(fileURLWithPath: pipe.browserExecutable).deletingLastPathComponent().standardizedFileURL
+        == pipe.directory.standardizedFileURL,
+        "the Claude browser shim was not written into the private sign-in directory")
+      expect(ClaudeLoginBrowserPipe.isPrivate(pipe.directory.path, type: S_IFDIR)
+        && ClaudeLoginBrowserPipe.isPrivate(pipe.browserExecutable, type: S_IFREG),
+        "the Claude browser shim or its directory is not owned by this user with mode 0700")
+      expect((try? String(contentsOfFile: pipe.browserExecutable, encoding: .utf8))
+        == ClaudeLoginBrowserPipe.browserScript, "the Claude browser shim was not written intact")
       let pipeDirectory = pipe.directory
       pipe.close()
       expect(!FileManager.default.fileExists(atPath: pipeDirectory.path),
@@ -66,6 +78,9 @@ enum ConnectionFlowSelfTest {
     var lastOpenedBrowserURL: URL?
     var browserOpens = true
     var loginCommands: [ProviderID] = []
+    // The helper Reserve launches for sign-in. A path that does not exist
+    // stands in for a deleted or broken installation.
+    var loginExecutable = "/bin/sh"
     // Plan keys live in memory here, so no real Keychain item is written.
     var savedPlanKeys: [ProviderID: String] = [:]
     let memoryKeys = PlanKeyStorage(
@@ -84,7 +99,7 @@ enum ConnectionFlowSelfTest {
       },
       loginCommandOverride: { provider in
         loginCommands.append(provider)
-        return ("/bin/sh", [directory.appendingPathComponent("login.sh").path])
+        return (loginExecutable, [directory.appendingPathComponent("login.sh").path])
       },
       openLoginURL: { url in openedBrowserCount += 1; lastOpenedBrowserURL = url; return browserOpens },
       planKeys: memoryKeys)
@@ -131,7 +146,16 @@ enum ConnectionFlowSelfTest {
       await settle { coordinator.phase == .needsKey }
       expect(coordinator.phase == .needsKey && coordinator.panel?.isVisible == true,
         "a rejected \(provider.displayName) key did not ask for a replacement")
-      coordinator.close()
+      // A replacement that is rejected too, then abandoned, must not stay in
+      // Keychain.
+      keyField?.stringValue = "test-\(provider.rawValue)-rejected-0123456789"
+      click("connection-primary", in: coordinator.panel)
+      await settle { coordinator.phase == .needsKey }
+      expect(savedPlanKeys[provider] != nil, "a rejected \(provider.displayName) key was not checked")
+      click("connection-close", in: coordinator.panel)
+      expect(coordinator.activeProvider == nil && savedPlanKeys[provider] == nil
+        && !store.hasPlanKey(provider),
+        "a rejected \(provider.displayName) key stayed in Keychain after Cancel")
 
       store.removePlanKey(provider)
       expect(!store.isEnabled(provider) && store.states[provider]?.snapshot == nil
@@ -177,6 +201,28 @@ enum ConnectionFlowSelfTest {
     coordinator.start(.cursor)
     expect(coordinator.panel === window && coordinator.activeProvider == .openAI,
       "overlapping connections created a second flow")
+    expect(coordinator.panel?.isVisible == true
+      && visibleText("connection-detail", in: coordinator.panel)?.contains("Finish or cancel it, then connect Cursor") == true,
+      "Connect for another provider was silently dropped while a connection was active")
+
+    // (6) An installer failure keeps its own reason instead of a generic hint.
+    do {
+      let failingInstaller = ProviderHelperInstaller(session: FailingInstallerProtocol.session())
+      let installCoordinator = ProviderSetupCoordinator(store: store, installer: failingInstaller)
+      click("connection-close", in: coordinator.panel)
+      installCoordinator.start(.openAI)
+      await settle { installCoordinator.phase == .needsInstall }
+      click("connection-primary", in: installCoordinator.panel)
+      await settle { installCoordinator.phase == .failed }
+      let reason = visibleText("connection-detail", in: installCoordinator.panel)
+      expect(installCoordinator.phase == .failed && reason?.contains("could not be downloaded") == true,
+        "an installer failure hid its reason behind a generic message")
+      expect(text("connection-message", in: installCoordinator.panel)?.contains("Check your connection") == false,
+        "an installer failure with a reason still blamed the connection")
+      installCoordinator.close()
+      coordinator.start(.openAI)
+      await settle { coordinator.phase == .needsInstall }
+    }
     click("connection-close", in: coordinator.panel)
     expect(coordinator.activeProvider == nil, "Cancel did not dismiss setup")
 
@@ -210,6 +256,47 @@ enum ConnectionFlowSelfTest {
     await settle { coordinator.phase == .accessNotGranted }
     expect(coordinator.phase == .accessNotGranted, "denied permission silently repeated the first permission screen")
     expect(store.claudeKeychainReadAllowed, "a temporary macOS denial erased saved consent")
+    // A denial is answered by asking again, never by a fresh sign-in, which
+    // would replace the Claude Code sign-in on this Mac.
+    let launchesBeforeDenial = store.loginLaunchCount(for: .anthropic)
+    expect(coordinator.panel?.isVisible == true
+      && buttonTitle("connection-primary", in: coordinator.panel) == "Allow usage access",
+      "a macOS denial did not offer to allow usage access again")
+    expect(visibleText("connection-detail", in: coordinator.panel) == nil,
+      "the access window repeated the consent request as an error")
+    coordinator.panel?.markAsSimulation()
+    do { try coordinator.panel?.render(to: evidence.appendingPathComponent("claude-simulation-access-not-allowed.png")) }
+    catch { failures.append("Claude simulation evidence could not be saved") }
+    click("connection-primary", in: coordinator.panel)
+    await settle { coordinator.phase == .accessNotGranted }
+    expect(coordinator.phase == .accessNotGranted
+      && store.loginLaunchCount(for: .anthropic) == launchesBeforeDenial,
+      "Allow usage access after a denial started a sign-in instead of asking again")
+    // Turning access off in Settings mid-check must not land on a sign-in.
+    await responses.set(.slowDeniedPermission)
+    click("connection-primary", in: coordinator.panel)
+    await settle { coordinator.phase == .grantingAccess }
+    store.claudeKeychainReadAllowed = false
+    await settle { coordinator.phase == .accessNotGranted }
+    expect(coordinator.phase == .accessNotGranted
+      && buttonTitle("connection-primary", in: coordinator.panel) == "Allow usage access"
+      && store.loginLaunchCount(for: .anthropic) == launchesBeforeDenial,
+      "turning access off mid-check offered a sign-in")
+    coordinator.close()
+
+    // Only a saved sign-in that is readable but unusable leads to a fresh
+    // sign-in, and Claude's window says it replaces the CLI's sign-in first.
+    await responses.set(.unusableSavedSignIn)
+    coordinator.start(.anthropic)
+    await settle { coordinator.phase == .needsAccess }
+    click("connection-primary", in: coordinator.panel)
+    await settle { coordinator.phase == .needsSignIn }
+    expect(coordinator.phase == .needsSignIn && coordinator.panel?.isVisible == true
+      && store.loginLaunchCount(for: .anthropic) == launchesBeforeDenial,
+      "an unusable Claude sign-in started a fresh login without asking first")
+    expect(text("connection-privacy", in: coordinator.panel)?
+      .contains("replaces the Claude Code sign-in on this Mac") == true,
+      "Claude sign-in did not warn that it replaces the Claude Code sign-in")
     coordinator.panel?.markAsSimulation()
     do { try coordinator.panel?.render(to: evidence.appendingPathComponent("claude-simulation-sign-in-again.png")) }
     catch { failures.append("Claude simulation evidence could not be saved") }
@@ -226,18 +313,58 @@ enum ConnectionFlowSelfTest {
     click("connection-primary", in: coordinator.panel)
     await settle { store.canReopenLoginBrowser(.anthropic) }
     expect(store.canReopenLoginBrowser(.anthropic) && coordinator.phase == .signingIn,
-      "failed permission retried the inaccessible item instead of opening fresh sign-in")
+      "an unusable saved sign-in did not open a fresh sign-in")
     expect(coordinator.panel?.isVisible != true,
-      "the permission window stayed open while the browser sign-in was in progress")
+      "the sign-in window stayed open while the browser sign-in was in progress")
     expect(lastOpenedBrowserURL?.query?.contains("localhost") == true,
       "Claude simulation opened the manual-code fallback instead of the browser callback")
     expect(openedBrowserCount == 1, "Claude simulation opened duplicate browser links")
     await settle { coordinator.phase == .connected }
-    expect(coordinator.phase == .connected, "fresh sign-in did not verify usage after failed permission")
+    expect(coordinator.phase == .connected, "fresh sign-in did not verify usage after an unusable sign-in")
     expect(store.states[.anthropic]?.snapshot?.windows.first?.usedPercent == 20,
       "Claude simulation did not return its expected usage data")
     coordinator.close()
     openedBrowserCount = 0
+
+    // (1) A sign-in that cannot even launch explains why, and its button
+    // re-checks the installation instead of repeating the launch.
+    loginExecutable = directory.appendingPathComponent("missing-helper").path
+    await responses.set(.signedOut)
+    coordinator.start(.anthropic)
+    await settle { coordinator.phase == .needsSignIn }
+    let launchesBeforeFailure = store.loginLaunchCount(for: .anthropic)
+    click("connection-primary", in: coordinator.panel)
+    await settle { coordinator.phase == .signInCouldNotStart }
+    expect(store.loginLaunchCount(for: .anthropic) == launchesBeforeFailure + 1,
+      "the failing sign-in launch fixture was not attempted exactly once")
+    let launchesAfterFailure = store.loginLaunchCount(for: .anthropic)
+    expect(coordinator.phase == .signInCouldNotStart && coordinator.panel?.isVisible == true,
+      "a sign-in that could not start was presented as an unfinished sign-in")
+    expect(visibleText("connection-detail", in: coordinator.panel)?
+      .contains("Could not start Claude Code sign-in") == true,
+      "the window hid why the sign-in could not start")
+    expect(buttonTitle("connection-primary", in: coordinator.panel) == "Try again"
+      && text("connection-privacy", in: coordinator.panel)?.contains("reinstall Reserve") == true,
+      "a sign-in that could not start did not offer repair guidance")
+    expect(store.states[.anthropic]?.signInCouldNotStart == true,
+      "the dashboard cannot tell a failed launch from an unfinished sign-in")
+    coordinator.panel?.markAsSimulation()
+    do { try coordinator.panel?.render(to: evidence.appendingPathComponent("claude-simulation-could-not-start.png")) }
+    catch { failures.append("Claude simulation evidence could not be saved") }
+    click("connection-primary", in: coordinator.panel)
+    await settle { coordinator.phase == .signInCouldNotStart }
+    expect(coordinator.phase == .signInCouldNotStart
+      && store.loginLaunchCount(for: .anthropic) == launchesAfterFailure
+      && store.states[.anthropic]?.isConnecting == false,
+      "Try again relaunched a sign-in that could not start")
+    loginExecutable = "/bin/sh"
+    click("connection-primary", in: coordinator.panel)
+    await settle { coordinator.phase == .needsSignIn }
+    expect(coordinator.phase == .needsSignIn
+      && buttonTitle("connection-primary", in: coordinator.panel) == "Continue in browser"
+      && store.loginLaunchCount(for: .anthropic) == launchesAfterFailure,
+      "a repaired installation did not return to an explicit sign-in")
+    coordinator.close()
 
     let resumeTime = Date()
     var staleConnection = ProviderViewState(provider: .grok)
@@ -332,6 +459,8 @@ enum ConnectionFlowSelfTest {
     try? await Task.sleep(for: .milliseconds(120))
     expect(coordinator.phase == .needsSignIn && store.states[.openAI]?.isConnecting == false,
       "failed login retried automatically instead of offering an explicit retry")
+    expect(visibleText("connection-detail", in: coordinator.panel)?.contains("sign-in was not completed") == true,
+      "a failed sign-in did not show its reason")
     coordinator.close()
 
     // A helper can report an error after the account was already connected in
@@ -405,6 +534,9 @@ enum ConnectionFlowSelfTest {
     } catch { failures.append("could not launch the cancellation fixture") }
 
     failures += await self.checkRefreshScheduling(in: directory)
+    failures += await self.checkLoginHandoff(in: directory)
+    failures += await self.checkEarlyCompletions(in: directory)
+    failures += self.checkPhaseTable()
 
     // Render actual native controls for each step, with no real credentials.
     let preview = ProviderConnectionPanel(provider: .anthropic)
@@ -413,13 +545,18 @@ enum ConnectionFlowSelfTest {
       ("setup", ProviderSetupCoordinator.Phase.needsInstall),
       ("browser", .signingIn), ("permission", .needsAccess),
       ("unavailable", .unavailable), ("access-denied", .accessDenied),
+      ("access-not-allowed", .accessNotGranted), ("could-not-start", .signInCouldNotStart),
+      ("sign-in-first", .needsSignIn), ("failed", .failed),
     ] {
-      preview.update(phase: phase, canReopenBrowser: true)
+      preview.update(phase: phase, canReopenBrowser: true,
+        detail: phase == .signingIn || phase == .needsAccess ? nil
+          : "Could not start Claude Code sign-in: Reserve could not prepare its browser handoff.")
       preview.markAsSimulation()
       preview.show()
       try? await Task.sleep(for: .milliseconds(50))
       if let root = preview.contentView {
-        for field in LifecycleSelfTest.descendants(of: root).compactMap({ $0 as? NSTextField }) {
+        for field in LifecycleSelfTest.descendants(of: root).compactMap({ $0 as? NSTextField })
+        where !field.isHiddenOrHasHiddenAncestor {
           let cellHeight = field.cell?.cellSize(forBounds:
             NSRect(x: 0, y: 0, width: field.bounds.width, height: 1000)).height ?? 0
           expect(cellHeight <= field.bounds.height + 1, "\(name) text is clipped")
@@ -545,6 +682,231 @@ enum ConnectionFlowSelfTest {
     return failures
   }
 
+  /// A helper that prints nothing must not leave the person waiting without
+  /// a window, and Claude falls back to a trusted stdout URL only after its
+  /// `$BROWSER` handoff has missed the deadline. Short deadline, local scripts,
+  /// synthetic usage: no real helper, browser or account is involved.
+  private static func checkLoginHandoff(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) {
+      if !value { failures.append(message) }
+    }
+    let suite = "Reserve.HandoffSelfTest.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { return ["handoff: isolated preferences unavailable"] }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let script = directory.appendingPathComponent("handoff-login.sh")
+    let responses = ConnectionTestResponses()
+    var opened: [URL] = []
+    let store = UsageStore(
+      defaults: defaults, startAutomatically: false, notificationsActive: false,
+      cache: SnapshotCache(fileURL: directory.appendingPathComponent("handoff.json")),
+      fetchOverride: { provider, allowAccess in try await responses.fetch(provider, allowAccess: allowAccess) },
+      loginCommandOverride: { _ in ("/bin/sh", [script.path]) },
+      openLoginURL: { opened.append($0); return true },
+      planKeys: PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in }),
+      loginHandoffDeadline: .milliseconds(300))
+    let coordinator = ProviderSetupCoordinator(store: store)
+    defer { coordinator.close() }
+
+    // Nothing from the helper at first: the window comes back and says so,
+    // then offers the browser again once the page does arrive.
+    do {
+      try "#!/bin/sh\nsleep 1\necho https://auth.openai.com/reserve-late\nsleep 2\n".write(
+        to: script, atomically: true, encoding: .utf8)
+    } catch { return ["handoff: login fixture could not be saved"] }
+    await responses.set(.signedOut)
+    coordinator.start(.openAI)
+    await settle { store.states[.openAI]?.isConnecting == true }
+    expect(coordinator.phase == .signingIn && coordinator.panel?.isVisible != true,
+      "handoff: the sign-in window appeared before the deadline")
+    await settle { coordinator.panel?.isVisible == true }
+    expect(coordinator.phase == .signingIn && coordinator.panel?.isVisible == true
+      && text("connection-message", in: coordinator.panel) == "Waiting for Codex to open the sign-in page…",
+      "handoff: a helper that opened nothing left the person waiting without a window")
+    expect(buttonVisible("connection-close", in: coordinator.panel),
+      "handoff: the waiting window offered no way to cancel")
+    coordinator.panel?.markAsSimulation()
+    let evidence = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "reserve-connection-review", isDirectory: true)
+    try? coordinator.panel?.render(to: evidence.appendingPathComponent("waiting-for-helper.png"))
+    await settle { store.canReopenLoginBrowser(.openAI) }
+    expect(opened.last?.absoluteString == "https://auth.openai.com/reserve-late"
+      && coordinator.panel?.isVisible == true
+      && buttonTitle("connection-primary", in: coordinator.panel) == "Open browser again",
+      "handoff: a late sign-in page did not offer Open browser again")
+    coordinator.close()
+
+    // Claude's pipe never receives a URL; a trusted stdout URL is used, but
+    // only after the deadline.
+    opened.removeAll()
+    do {
+      try "#!/bin/sh\necho 'https://claude.ai/oauth/authorize?state=stdout-only'\nsleep 3\n".write(
+        to: script, atomically: true, encoding: .utf8)
+    } catch { return failures + ["handoff: Claude fixture could not be saved"] }
+    coordinator.start(.anthropic)
+    await settle { coordinator.phase == .needsSignIn }
+    click("connection-primary", in: coordinator.panel)
+    try? await Task.sleep(for: .milliseconds(120))
+    expect(opened.isEmpty, "handoff: Claude used stdout before its browser handoff deadline")
+    await settle { !opened.isEmpty }
+    expect(opened.first?.absoluteString == "https://claude.ai/oauth/authorize?state=stdout-only"
+      && opened.count == 1 && store.canReopenLoginBrowser(.anthropic),
+      "handoff: Claude ignored a trusted stdout URL after its browser handoff missed the deadline")
+    coordinator.close()
+
+    // An untrusted stdout URL is still never opened.
+    opened.removeAll()
+    do {
+      try "#!/bin/sh\necho 'https://claude.ai.example.org/oauth/authorize'\nsleep 2\n".write(
+        to: script, atomically: true, encoding: .utf8)
+    } catch { return failures + ["handoff: untrusted fixture could not be saved"] }
+    coordinator.start(.anthropic)
+    await settle { coordinator.phase == .needsSignIn }
+    click("connection-primary", in: coordinator.panel)
+    await settle { coordinator.panel?.isVisible == true && store.loginHandoffIsOverdue(.anthropic) }
+    try? await Task.sleep(for: .milliseconds(100))
+    expect(opened.isEmpty && store.loginHandoffIsOverdue(.anthropic),
+      "handoff: an untrusted stdout URL was opened")
+    coordinator.close()
+    return failures
+  }
+
+  /// Every early return hands back to its caller exactly once, so a window
+  /// waiting on it can never stay in a busy step.
+  private static func checkEarlyCompletions(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    let suite = "Reserve.CompletionSelfTest.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { return ["completions: isolated preferences unavailable"] }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let script = directory.appendingPathComponent("completion-login.sh")
+    do { try "#!/bin/sh\nsleep 0.4\nexit 1\n".write(to: script, atomically: true, encoding: .utf8) }
+    catch { return ["completions: login fixture could not be saved"] }
+    let responses = ConnectionTestResponses()
+    await responses.set(.signedOut)
+    let store = UsageStore(
+      defaults: defaults, startAutomatically: false, notificationsActive: false,
+      cache: SnapshotCache(fileURL: directory.appendingPathComponent("completions.json")),
+      fetchOverride: { provider, allowAccess in try await responses.fetch(provider, allowAccess: allowAccess) },
+      loginCommandOverride: { _ in ("/bin/sh", [script.path]) },
+      openLoginURL: { _ in failures.append("completions: unexpectedly opened sign-in"); return false },
+      planKeys: PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in }))
+    for provider in ProviderID.allCases { store.setEnabled(provider, enabled: false, refreshImmediately: false) }
+
+    var counts: [String: Int] = [:]
+    store.refresh(.openAI) { counts["refresh-disabled", default: 0] += 1 }
+    store.allowKeychainAccess(for: .openAI) { counts["access-unsupported", default: 0] += 1 }
+    store.connect(.zai) { counts["key-disabled", default: 0] += 1 }
+    store.connect(.gemini) { counts["terminal-disabled", default: 0] += 1 }
+    store.setEnabled(.grok, enabled: true, refreshImmediately: false)
+    store.connect(.grok) { counts["login-first", default: 0] += 1 }
+    store.connect(.grok) { counts["login-while-running", default: 0] += 1 }
+    await settle { counts["login-first"] != nil && counts["login-while-running"] != nil }
+    try? await Task.sleep(for: .milliseconds(150))
+    for name in ["refresh-disabled", "access-unsupported", "key-disabled", "terminal-disabled",
+      "login-first", "login-while-running"] where counts[name] != 1 {
+      failures.append("completions: \(name) finished \(counts[name] ?? 0) times instead of once")
+    }
+    if store.loginLaunchCount(for: .grok) != 1 {
+      failures.append("completions: a second Connect launched a second sign-in helper")
+    }
+    for provider in ProviderID.allCases { store.cancelConnection(provider) }
+    return failures
+  }
+
+  /// Which window each failed check opens. Built through the same state
+  /// update a real refresh applies, one row per `UsageProviderError`.
+  private static func checkPhaseTable() -> [String] {
+    var failures: [String] = []
+    typealias Phase = ProviderSetupCoordinator.Phase
+    let table: [(ProviderID, UsageProviderError, Phase)] = [
+      (.openAI, .executableNotFound("Codex CLI"), .needsInstall),
+      (.openAI, .credentialsNotFound("signed out"), .needsSignIn),
+      (.cursor, .keychainConsentRequired(.cursor), .needsAccess),
+      (.openAI, .keychainConsentRequired(.anthropic), .needsSignIn),
+      (.openAI, .unauthorized("expired"), .needsSignIn),
+      (.openAI, .accessDenied("denied"), .accessDenied),
+      (.openAI, .updateRequired("old"), .needsUpdate),
+      (.openAI, .rateLimited(retryAt: nil), .unavailable),
+      (.openAI, .timedOut("usage"), .unavailable),
+      (.openAI, .invalidResponse("bad"), .unavailable),
+      (.openAI, .unavailable("offline"), .unavailable),
+      (.openAI, .processFailed("crashed"), .unavailable),
+      (.copilot, .unavailable(CopilotProvider.newerThanSupportedMessage), .unavailable),
+      (.zai, .credentialsNotFound("rejected key"), .needsKey),
+      (.zai, .unauthorized("rejected key"), .needsKey),
+      (.zai, .unavailable("offline"), .unavailable),
+    ]
+    for (provider, error, expected) in table {
+      var state = ProviderViewState(provider: provider)
+      UsageStore.applyFailure(error, to: &state)
+      let phase = ProviderSetupCoordinator.phase(after: state)
+      if phase != expected {
+        failures.append("phase table: \(provider.rawValue) \(error) opened \(phase), expected \(expected)")
+      }
+    }
+    var couldNotStart = ProviderViewState(provider: .anthropic)
+    couldNotStart.requiresConnection = true
+    couldNotStart.signInCouldNotStart = true
+    couldNotStart.error = "Could not start Claude Code sign-in"
+    if ProviderSetupCoordinator.phase(after: couldNotStart) != .signInCouldNotStart {
+      failures.append("phase table: a failed launch was shown as an unfinished sign-in")
+    }
+    // The dashboard and the window agree that a missing helper comes first.
+    var both = ProviderViewState(provider: .grok)
+    both.requiresInstallation = true
+    both.requiresUpdate = true
+    if ProviderSetupCoordinator.phase(after: both) != .needsInstall
+      || AllowanceBuilder.setupAction(for: both, connectionToolAvailable: true) != .install
+    {
+      failures.append("phase table: the dashboard and Connect window disagree on install before update")
+    }
+    // A newer Copilot protocol is fixed by updating Reserve, not Copilot.
+    var newer = ProviderViewState(provider: .copilot)
+    UsageStore.applyFailure(
+      UsageProviderError.unavailable(CopilotProvider.newerThanSupportedMessage), to: &newer)
+    if AllowanceBuilder.setupAction(for: newer, connectionToolAvailable: true) == .update {
+      failures.append("phase table: a Copilot protocol newer than Reserve asked for a Copilot update")
+    }
+    // A sign-in URL in an error never reaches the window.
+    if ProviderSetupCoordinator.displayableError(
+      "Open https://claude.ai/oauth/authorize?code=secret to continue", provider: .anthropic)?.contains("claude.ai") != false
+    {
+      failures.append("phase table: an error line could show a sign-in URL")
+    }
+    return failures
+  }
+
+  private static func field(_ identifier: String, in panel: ProviderConnectionPanel?) -> NSTextField? {
+    guard let root = panel?.contentView else { return nil }
+    return LifecycleSelfTest.descendants(of: root).compactMap { $0 as? NSTextField }
+      .first { $0.identifier?.rawValue == identifier }
+  }
+
+  private static func text(_ identifier: String, in panel: ProviderConnectionPanel?) -> String? {
+    self.field(identifier, in: panel)?.stringValue
+  }
+
+  /// The label's text only when it is actually on screen.
+  private static func visibleText(_ identifier: String, in panel: ProviderConnectionPanel?) -> String? {
+    guard let field = self.field(identifier, in: panel), !field.isHiddenOrHasHiddenAncestor else { return nil }
+    return field.stringValue
+  }
+
+  private static func button(_ identifier: String, in panel: ProviderConnectionPanel?) -> NSButton? {
+    guard let root = panel?.contentView else { return nil }
+    return LifecycleSelfTest.descendants(of: root).compactMap { $0 as? NSButton }
+      .first { $0.identifier?.rawValue == identifier }
+  }
+
+  private static func buttonTitle(_ identifier: String, in panel: ProviderConnectionPanel?) -> String? {
+    guard let button = self.button(identifier, in: panel), !button.isHidden else { return nil }
+    return button.title
+  }
+
+  private static func buttonVisible(_ identifier: String, in panel: ProviderConnectionPanel?) -> Bool {
+    self.button(identifier, in: panel).map { !$0.isHiddenOrHasHiddenAncestor } ?? false
+  }
+
   private static func click(_ identifier: String, in panel: ProviderConnectionPanel?) {
     guard let root = panel?.contentView else { return }
     let button = LifecycleSelfTest.descendants(of: root).compactMap { $0 as? NSButton }
@@ -561,7 +923,14 @@ enum ConnectionFlowSelfTest {
 }
 
 private actor ConnectionTestResponses {
-  enum Mode { case success, missingHelper, permission, deniedPermission, offline, signedOut, slowSuccess, slowPermission, accessDenied }
+  enum Mode {
+    case success, missingHelper, permission, deniedPermission, offline, signedOut, slowSuccess
+    case slowPermission, accessDenied
+    /// The protected item can be read once allowed, but holds no usable sign-in.
+    case unusableSavedSignIn
+    /// The macOS prompt stays up for a while and is then denied.
+    case slowDeniedPermission
+  }
   private var mode: Mode = .success
   private(set) var calls = 0
 
@@ -579,6 +948,12 @@ private actor ConnectionTestResponses {
     case .permission:
       if !allowAccess { throw UsageProviderError.keychainConsentRequired(provider) }
     case .deniedPermission: throw UsageProviderError.keychainConsentRequired(provider)
+    case .slowDeniedPermission:
+      try? await Task.sleep(for: .milliseconds(300))
+      throw UsageProviderError.keychainConsentRequired(provider)
+    case .unusableSavedSignIn:
+      if !allowAccess { throw UsageProviderError.keychainConsentRequired(provider) }
+      throw UsageProviderError.credentialsNotFound("The Claude Keychain item does not contain a usable subscription sign-in.")
     case .offline: throw UsageProviderError.unavailable("offline fixture")
     case .accessDenied: throw UsageProviderError.accessDenied("denied fixture")
     case .signedOut: throw UsageProviderError.unauthorized("expired fixture")
@@ -591,6 +966,30 @@ private actor ConnectionTestResponses {
     ], source: "isolated connection test")
   }
 }
+/// Answers every installer download with a server error, so installation
+/// fails the way a real outage would without any network request.
+private final class FailingInstallerProtocol: URLProtocol, @unchecked Sendable {
+  static func session() -> URLSession {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [FailingInstallerProtocol.self]
+    return URLSession(configuration: configuration)
+  }
+
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+  override func startLoading() {
+    guard let url = self.request.url,
+      let response = HTTPURLResponse(url: url, statusCode: 503, httpVersion: "HTTP/1.1", headerFields: [:])
+    else { return }
+    self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    self.client?.urlProtocol(self, didLoad: Data())
+    self.client?.urlProtocolDidFinishLoading(self)
+  }
+
+  override func stopLoading() {}
+}
+
 private actor ConnectionSchedulingProbe {
   private let historyThenNone: Bool
   private var total = 0

@@ -8,6 +8,10 @@ final class ProviderSetupCoordinator {
     case checking, needsInstall, needsUpdate, installing, updating
     case needsSignIn, signingIn, needsAccess, grantingAccess, accessNotGranted, signInNotSaved
     case connected, unavailable, accessDenied, failed
+    /// The sign-in helper, or what Reserve prepares for it, could not be
+    /// launched. Launching it again cannot help, so this window re-checks the
+    /// installation instead and says how to repair it.
+    case signInCouldNotStart
     /// A provider whose helper Reserve cannot install waits here while the
     /// person finishes the official installation themselves.
     case waitingForManualSetup
@@ -29,6 +33,16 @@ final class ProviderSetupCoordinator {
   private var loginCompleted = false
   private var loginAttempted = false
   private var wasEnabled = false
+  /// Set when the person asked for this window (Connect pressed again, or
+  /// for another provider), so steps that normally pass without a window keep
+  /// it on screen instead of hiding it again on the next update.
+  private var keepsWindowVisible = false
+  /// Why another provider's Connect did not start its own flow.
+  private var notice: String?
+  /// What the installer said when installation or an update failed.
+  private var failureMessage: String?
+  /// A key pasted in this window that has not yet been confirmed by a check.
+  private var savedKeyInFlow = false
 
   init(store: UsageStore, installer: ProviderHelperInstaller = ProviderHelperInstaller()) {
     self.store = store
@@ -38,10 +52,16 @@ final class ProviderSetupCoordinator {
   func start(_ provider: ProviderID) {
     if let active = self.activeProvider {
       // Connect pressed again during a browser sign-in brings the sign-in page
-      // back. Anything else surfaces the pending flow so it can be cancelled.
+      // back. Anything else surfaces the pending flow so it can be finished
+      // or cancelled; a different provider is told why it did not start.
       if self.panel?.isVisible != true, self.phase == .signingIn, active == provider,
         self.store.reopenLoginBrowser(active)
       { return }
+      self.keepsWindowVisible = true
+      if active != provider {
+        self.notice = "Connecting \(active.displayName) is still in progress. Finish or cancel it, then connect \(provider.displayName)."
+      }
+      self.present(self.phase)
       self.panel?.show()
       return
     }
@@ -49,6 +69,10 @@ final class ProviderSetupCoordinator {
     self.generation += 1
     self.loginCompleted = false
     self.loginAttempted = false
+    self.keepsWindowVisible = false
+    self.notice = nil
+    self.failureMessage = nil
+    self.savedKeyInFlow = false
     self.wasEnabled = self.store.isEnabled(provider)
     self.store.setEnabled(provider, enabled: true, refreshImmediately: false)
     let panel = ProviderConnectionPanel(provider: provider)
@@ -71,6 +95,8 @@ final class ProviderSetupCoordinator {
     } else if self.phase == .signingIn {
       self.present(.signingIn)
     } else if self.phase == .grantingAccess && !self.store.keychainReadAllowed(for: provider) {
+      // Access was turned off in Settings mid-check. The window offers to
+      // allow it again; it never turns into a sign-in.
       self.present(.accessNotGranted)
     }
   }
@@ -91,6 +117,8 @@ final class ProviderSetupCoordinator {
       self.present(.signInNotSaved)
       return
     }
+    // A denial in the macOS prompt is answered by asking again, never by a
+    // fresh sign-in: for Claude that would replace the CLI's own sign-in.
     if [.grantingAccess, .accessNotGranted].contains(self.phase), state.requiresKeychainAccess {
       self.present(.accessNotGranted)
       return
@@ -102,10 +130,21 @@ final class ProviderSetupCoordinator {
     // so there is nothing left for a window to say.
     if self.phase == .connected { self.close() }
     // Connect already expresses the user's intent to sign in. Open the
-    // browser when needed, but never automatically repeat a failed login.
-    if self.phase == .needsSignIn && !self.loginAttempted { self.continueConnection() }
+    // browser when needed, but never automatically repeat a failed login, and
+    // never start one that replaces a sign-in without saying so first.
+    if self.phase == .needsSignIn && !self.loginAttempted && !Self.asksBeforeSignIn(provider) {
+      self.continueConnection()
+    }
   }
 
+  /// `claude auth login` replaces the Claude Code sign-in on this Mac the
+  /// moment it starts, so Claude's window explains that before it runs.
+  static func asksBeforeSignIn(_ provider: ProviderID) -> Bool {
+    provider == .anthropic
+  }
+
+  /// Install comes before update everywhere (here and on the dashboard card):
+  /// a helper that is missing cannot be updated.
   static func phase(after state: ProviderViewState) -> Phase {
     if ProviderDescriptor.forProvider(state.provider).usesAPIKey, state.requiresConnection {
       return .needsKey
@@ -113,6 +152,7 @@ final class ProviderSetupCoordinator {
     if state.requiresKeychainAccess { return .needsAccess }
     if state.requiresInstallation { return .needsInstall }
     if state.requiresUpdate { return .needsUpdate }
+    if state.signInCouldNotStart { return .signInCouldNotStart }
     if state.requiresConnection { return .needsSignIn }
     if state.usageAccessDenied { return .accessDenied }
     guard state.error == nil, let snapshot = state.snapshot,
@@ -147,6 +187,7 @@ final class ProviderSetupCoordinator {
         return
       }
       let installing = self.phase == .needsInstall
+      self.failureMessage = nil
       self.present(installing ? .installing : .updating)
       Task { [weak self] in
         guard let self else { return }
@@ -162,26 +203,33 @@ final class ProviderSetupCoordinator {
           self.check()
         } catch {
           guard self.generation == generation else { return }
+          // The installer's own reason ("could not be downloaded", "exited
+          // with status 1") is what tells the person what to do next.
+          self.failureMessage = error.localizedDescription
           self.present(.failed)
           if !self.store.isEnabled(provider) { self.close() }
         }
       }
-    case .needsSignIn, .accessNotGranted:
-      let forceSignIn = self.phase == .accessNotGranted
+    case .needsSignIn:
       self.loginAttempted = true
       self.present(.signingIn)
-      self.store.connect(provider, forceSignIn: forceSignIn) { [weak self] in
+      self.store.connect(provider) { [weak self] in
         guard let self, self.generation == generation else { return }
         let state = self.store.states[provider]
         // A successful login is followed by a real usage check in UsageStore.
         self.loginCompleted = state?.requiresConnection == false
         self.didCheck()
       }
+    case .signInCouldNotStart:
+      // Never relaunch what just failed to launch. Re-check the installation;
+      // if it is sound now, the sign-in screen offers the browser again.
+      self.store.recheckSignInStart(provider)
+      self.didCheck()
     case .signingIn:
       if !self.store.reopenLoginBrowser(provider) {
         self.panel?.showBrowserFailure()
       }
-    case .needsAccess:
+    case .needsAccess, .accessNotGranted:
       // This button is the explicit consent. Keep the explanation in this
       // window rather than opening another Reserve permission dialog.
       self.present(.grantingAccess)
@@ -190,6 +238,7 @@ final class ProviderSetupCoordinator {
         self.didCheck()
       }
     case .failed, .unavailable, .accessDenied:
+      self.failureMessage = nil
       self.check()
     case .waitingForManualSetup, .waitingForTerminalSignIn:
       self.check()
@@ -203,6 +252,7 @@ final class ProviderSetupCoordinator {
           guard let self, self.generation == generation else { return }
           self.didCheck()
         }
+        self.savedKeyInFlow = true
         self.present(.savingKey)
       } catch {
         self.present(.needsKey)
@@ -225,15 +275,27 @@ final class ProviderSetupCoordinator {
     let provider = self.activeProvider
     let cancelledSetup = !self.wasEnabled && [Phase.checking, .needsInstall, .needsUpdate,
       .needsSignIn, .signingIn, .needsAccess, .grantingAccess, .accessNotGranted,
-      .waitingForManualSetup, .waitingForTerminalSignIn, .needsKey, .savingKey].contains(self.phase)
+      .signInCouldNotStart, .waitingForManualSetup, .waitingForTerminalSignIn, .needsKey,
+      .savingKey].contains(self.phase)
+    // A key that was rejected, or pasted here and never confirmed, is not
+    // left behind in Keychain when the person gives up on it.
+    let discardsKey = provider.map { provider in
+      ProviderDescriptor.forProvider(provider).usesAPIKey
+        && ((self.phase == .needsKey && self.store.hasPlanKey(provider)
+          && self.store.states[provider]?.requiresConnection == true)
+          || (self.phase == .savingKey && self.savedKeyInFlow))
+    } ?? false
     self.activeProvider = nil
     self.generation += 1
+    self.keepsWindowVisible = false
+    self.notice = nil
     if let observer { self.store.removeObserver(observer) }
     self.observer = nil
     self.panel?.close()
     self.panel = nil
     if let provider {
       self.store.cancelConnection(provider)
+      if discardsKey { self.store.discardRejectedPlanKey(provider) }
       if cancelledSetup { self.store.setEnabled(provider, enabled: false) }
     }
   }
@@ -245,7 +307,10 @@ final class ProviderSetupCoordinator {
       phase: phase, canReopenBrowser: self.store.canReopenLoginBrowser(provider),
       isReadingUsage: self.store.states[provider]?.isRefreshing == true
         && self.store.states[provider]?.isConnecting != true,
-      loginCompleted: self.loginCompleted)
+      loginCompleted: self.loginCompleted,
+      loginAttempted: self.loginAttempted,
+      handoffOverdue: self.store.loginHandoffIsOverdue(provider),
+      detail: self.detail(for: phase, provider: provider))
     if phase == .signingIn, self.store.loginBrowserFailedToOpen(provider) {
       self.panel?.showBrowserFailure()
     }
@@ -253,14 +318,50 @@ final class ProviderSetupCoordinator {
     else { self.panel?.orderOut(nil) }
   }
 
+  /// The specific reason behind a screen, shown beneath its explanation.
+  /// Busy steps have none, and a key's rejection is shown beside its field.
+  private func detail(for phase: Phase, provider: ProviderID) -> String? {
+    var lines: [String] = []
+    if let notice = self.notice { lines.append(notice) }
+    switch phase {
+    case .checking, .installing, .updating, .signingIn, .grantingAccess, .savingKey,
+      .connected, .needsKey:
+      break
+    default:
+      let error = phase == .failed ? (self.failureMessage ?? self.store.states[provider]?.error)
+        : self.store.states[provider]?.error
+      if let error, let text = Self.displayableError(error, provider: provider) {
+        lines.append(text)
+      }
+    }
+    return lines.isEmpty ? nil : lines.joined(separator: "\n")
+  }
+
+  /// Errors are shown as one short line. Anything that looks like a link is
+  /// removed, so a sign-in URL can never reach the window, and the consent
+  /// request, which the access screens already explain, is not repeated.
+  static func displayableError(_ error: String, provider: ProviderID) -> String? {
+    if error == UsageProviderError.keychainConsentRequired(provider).localizedDescription { return nil }
+    let withoutLinks = error.replacingOccurrences(
+      of: #"[A-Za-z][A-Za-z0-9+.-]*://\S+"#, with: "…", options: .regularExpression)
+    let singleLine = withoutLinks.components(separatedBy: .whitespacesAndNewlines)
+      .filter { !$0.isEmpty }.joined(separator: " ")
+    guard !singleLine.isEmpty else { return nil }
+    return singleLine.count > 240 ? String(singleLine.prefix(239)) + "…" : singleLine
+  }
+
   /// The window appears only when the person has to decide something or a
   /// problem needs explaining. Checking, a browser sign-in that opened, and a
   /// finished connection pass without one; the provider card shows their state.
+  /// A sign-in whose helper has not opened a page by the deadline comes back.
   private func needsWindow(_ phase: Phase, for provider: ProviderID) -> Bool {
     switch phase {
-    case .checking, .connected: false
-    case .needsSignIn: self.loginAttempted
-    case .signingIn: self.store.loginBrowserFailedToOpen(provider)
+    case .connected: false
+    case .checking: self.keepsWindowVisible
+    case .needsSignIn: self.loginAttempted || self.keepsWindowVisible || Self.asksBeforeSignIn(provider)
+    case .signingIn:
+      self.store.loginBrowserFailedToOpen(provider) || self.store.loginHandoffIsOverdue(provider)
+        || self.keepsWindowVisible
     default: true
     }
   }
@@ -277,6 +378,9 @@ final class ProviderConnectionPanel: NSPanel {
   private let provider: ProviderID
   private let heading = NSTextField(wrappingLabelWithString: "")
   private let message = NSTextField(wrappingLabelWithString: "")
+  /// The specific reason behind this screen (an error, or why another
+  /// Connect did not start). Hidden when there is none.
+  private let detail = NSTextField(wrappingLabelWithString: "")
   private let privacy = NSTextField(wrappingLabelWithString: "")
   private let spinner = NSProgressIndicator()
   private let primary = NSButton(title: "", target: nil, action: nil)
@@ -285,6 +389,7 @@ final class ProviderConnectionPanel: NSPanel {
   private let keyField = NSSecureTextField()
   private let keyPageButton = NSButton(title: "Get a key", target: nil, action: nil)
   private var keyRow: NSStackView?
+  private var contentStack: NSStackView?
   var onPrimary: (() -> Void)?
   var onClose: (() -> Void)?
   private var mayClose = true
@@ -348,11 +453,15 @@ final class ProviderConnectionPanel: NSPanel {
     phase: ProviderSetupCoordinator.Phase,
     canReopenBrowser: Bool = false,
     isReadingUsage: Bool = false,
-    loginCompleted: Bool = false
+    loginCompleted: Bool = false,
+    loginAttempted: Bool = true,
+    handoffOverdue: Bool = false,
+    detail: String? = nil
   ) {
     let name = self.provider.displayName
     let helper = ProviderHelperCatalog.definition(for: self.provider)
     let helperName = helper?.displayName ?? name
+    let signInHelperName = ProviderDescriptor.forProvider(self.provider).loginDisplayName
     var busy = false
     var action: String?
     self.mayClose = phase != .installing && phase != .updating
@@ -380,7 +489,13 @@ final class ProviderConnectionPanel: NSPanel {
       busy = true
     case .needsSignIn:
       self.heading.stringValue = "Sign in to \(name)"
-      self.message.stringValue = "Reserve could not verify your sign-in. Continue on \(name)'s website to try again. Your usage will be checked when you finish."
+      self.message.stringValue = loginAttempted
+        ? "Reserve could not verify your sign-in. Continue on \(name)'s website to try again. Your usage will be checked when you finish."
+        : "Reserve could not find a sign-in it can use. Continue on \(name)'s website to sign in. Your usage will be checked when you finish."
+      if ProviderSetupCoordinator.asksBeforeSignIn(self.provider) {
+        // Said before the button, because starting sign-in is what replaces it.
+        self.privacy.stringValue = "Signing in here replaces the \(signInHelperName) sign-in on this Mac. Your password stays with \(name)."
+      }
       action = "Continue in browser"
     case .signingIn:
       self.heading.stringValue = isReadingUsage ? "Checking your usage" : "Sign in to \(name)"
@@ -388,9 +503,17 @@ final class ProviderConnectionPanel: NSPanel {
         ? "Finishing the connection by reading your latest usage."
         : canReopenBrowser
           ? "Complete sign-in in your browser. This window will update when you finish."
-          : "Opening the provider's sign-in page."
+          : handoffOverdue
+            ? "Waiting for \(signInHelperName) to open the sign-in page…"
+            : "Opening the provider's sign-in page."
       busy = true
       if canReopenBrowser { action = "Open browser again" }
+    case .signInCouldNotStart:
+      self.heading.stringValue = "Sign-in could not start"
+      self.message.stringValue = "Reserve could not start \(signInHelperName) to sign in to \(name). Choose Try again to check the installation."
+      self.privacy.stringValue = "If this keeps happening, quit and reopen Reserve. If it still fails, reinstall Reserve."
+      action = "Try again"
+      self.closeButton.title = "Close"
     case .needsAccess:
       self.heading.stringValue = "Allow \(name) usage access"
       self.message.stringValue = "Reserve needs permission to use the sign-in protected by macOS to read your plan limits. macOS may ask you to approve access."
@@ -401,10 +524,13 @@ final class ProviderConnectionPanel: NSPanel {
       self.message.stringValue = "Approve access if macOS asks. Reserve will then check your usage."
       busy = true
     case .accessNotGranted:
-      self.heading.stringValue = "Sign in to \(name) again"
-      self.message.stringValue = "Your saved sign-in could not be used. Sign in again in your browser to reconnect."
-      self.privacy.stringValue = "Your password stays with \(name). Reserve will check your usage after sign-in. macOS may still ask you to approve access."
-      action = "Sign in again"
+      // A denial is fixed by allowing access, not by signing in again, which
+      // for Claude would replace the CLI's own sign-in.
+      let item = self.provider == .cursor ? "cursor-access-token" : "Claude Code-credentials"
+      self.heading.stringValue = "Usage access not allowed"
+      self.message.stringValue = "Reserve does not have permission to use your saved \(name) sign-in. Choose Allow usage access, then approve the macOS prompt."
+      self.privacy.stringValue = "If macOS does not ask, open Keychain Access, find “\(item)”, and allow Reserve under Access Control. Reserve never saves your sign-in."
+      action = "Allow usage access"
     case .connected:
       self.heading.stringValue = "\(name) is connected"
       self.message.stringValue = "Your latest usage is ready. Reserve will keep it updated automatically."
@@ -430,7 +556,10 @@ final class ProviderConnectionPanel: NSPanel {
       self.closeButton.title = "Close"
     case .failed:
       self.heading.stringValue = "Setup did not finish"
-      self.message.stringValue = "Reserve could not finish setting up \(name). Check your connection, then try again."
+      // The installer's reason, when there is one, appears as the detail line.
+      self.message.stringValue = detail == nil
+        ? "Reserve could not finish setting up \(name). Check your connection, then try again."
+        : "Reserve could not finish setting up \(name)."
       action = "Try again"
       self.closeButton.title = "Close"
     case .waitingForManualSetup:
@@ -471,7 +600,9 @@ final class ProviderConnectionPanel: NSPanel {
       }
     }
     if self.provider == .copilot {
-      self.privacy.stringValue = "Reserve asks the official Copilot CLI for allowance data. It never starts a conversation."
+      if phase != .signInCouldNotStart {
+        self.privacy.stringValue = "Reserve asks the official Copilot CLI for allowance data. It never starts a conversation."
+      }
       if phase == .needsInstall || phase == .needsUpdate {
         self.message.stringValue = "Install or update the official Copilot CLI, then return here."
         action = "Open download page"
@@ -481,6 +612,10 @@ final class ProviderConnectionPanel: NSPanel {
         action = "Check again"
       }
     }
+    self.detail.stringValue = detail ?? ""
+    self.detail.isHidden = detail == nil
+    // The reason belongs to the explanation above it, so it sits closer.
+    self.contentStack?.setCustomSpacing(detail == nil ? 18 : 8, after: self.message)
     self.spinner.isHidden = !busy
     if busy { self.spinner.startAnimation(nil) } else { self.spinner.stopAnimation(nil) }
     self.primary.title = action ?? ""
@@ -520,10 +655,14 @@ final class ProviderConnectionPanel: NSPanel {
     self.message.font = ReserveFont.sans(ReserveType.body)
     self.message.textColor = ReserveColor.muted
     self.message.identifier = NSUserInterfaceItemIdentifier("connection-message")
+    self.detail.font = ReserveFont.sans(ReserveType.metadata, .medium)
+    self.detail.textColor = ReserveColor.text
+    self.detail.identifier = NSUserInterfaceItemIdentifier("connection-detail")
+    self.detail.isHidden = true
     self.privacy.font = ReserveFont.sans(ReserveType.metadata)
     self.privacy.textColor = ReserveColor.subtle
     self.privacy.identifier = NSUserInterfaceItemIdentifier("connection-privacy")
-    for label in [self.heading, self.message, self.privacy] {
+    for label in [self.heading, self.message, self.detail, self.privacy] {
       label.maximumNumberOfLines = 0
       label.lineBreakMode = .byWordWrapping
     }
@@ -567,7 +706,9 @@ final class ProviderConnectionPanel: NSPanel {
     let keyRow = NSStackView.row([self.keyField, self.keyPageButton], spacing: 8, alignment: .centerY)
     keyRow.isHidden = true
     self.keyRow = keyRow
-    let stack = NSStackView.column([header, self.message, keyRow, self.privacy, actions], spacing: 18)
+    let stack = NSStackView.column(
+      [header, self.message, self.detail, keyRow, self.privacy, actions], spacing: 18)
+    self.contentStack = stack
     stack.translatesAutoresizingMaskIntoConstraints = false
     content.addSubview(stack)
     NSLayoutConstraint.activate([
@@ -577,6 +718,7 @@ final class ProviderConnectionPanel: NSPanel {
       stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -22),
       header.widthAnchor.constraint(equalTo: stack.widthAnchor),
       self.message.widthAnchor.constraint(equalTo: stack.widthAnchor),
+      self.detail.widthAnchor.constraint(equalTo: stack.widthAnchor),
       self.privacy.widthAnchor.constraint(equalTo: stack.widthAnchor),
       actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
       keyRow.widthAnchor.constraint(equalTo: stack.widthAnchor),

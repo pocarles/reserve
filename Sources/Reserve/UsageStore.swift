@@ -20,6 +20,10 @@ struct ProviderViewState: Identifiable {
   var requiresUpdate = false
   var usageAccessDenied = false
   var localHistoryEnabled = false
+  /// The sign-in helper, or what Reserve prepares for it, could not be
+  /// launched at all. That is not a sign-in the person left unfinished, and
+  /// launching the same thing again cannot fix it, so it has its own state.
+  var signInCouldNotStart = false
 }
 
 enum PreviewScenario: String, CaseIterable {
@@ -104,6 +108,15 @@ final class UsageStore {
   private var loginStorageFailures: Set<ProviderID> = []
   private var loginTimeoutMessages: [ProviderID: String] = [:]
   private var loginOutputBuffers: [ProviderID: Data] = [:]
+  /// What Claude's `$BROWSER` handoff wrote, kept apart from its stdout, which
+  /// carries a manual-code URL that must not win over the loopback callback.
+  private var loginBrowserBuffers: [ProviderID: Data] = [:]
+  private var loginHandoffTasks: [ProviderID: Task<Void, Never>] = [:]
+  /// Sign-ins whose helper has not produced a sign-in page within
+  /// `loginHandoffDeadline`. The Connect window comes back for these, so the
+  /// person is never left waiting on nothing.
+  private var loginHandoffOverdue: Set<ProviderID> = []
+  private let loginHandoffDeadline: Duration
   private var loginOutputGates: [ProviderID: BoundedOutputGate] = [:]
   private var loginGenerations: [ProviderID: Int] = [:]
   private var openedLoginURLs: Set<ProviderID> = []
@@ -226,9 +239,11 @@ final class UsageStore {
     fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
     openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) },
-    planKeys: PlanKeyStorage = .keychain
+    planKeys: PlanKeyStorage = .keychain,
+    loginHandoffDeadline: Duration = .seconds(15)
   ) {
     self.planKeys = planKeys
+    self.loginHandoffDeadline = loginHandoffDeadline
     self.cache = cache
     self.fetchOverride = fetchOverride
     self.loginCommandOverride = loginCommandOverride
@@ -260,6 +275,7 @@ final class UsageStore {
     self.startupTask?.cancel()
     for task in self.refreshTasks.values { task.cancel() }
     for task in self.loginTimeoutTasks.values { task.cancel() }
+    for task in self.loginHandoffTasks.values { task.cancel() }
     for process in self.loginProcesses.values where process.isRunning { process.terminate() }
   }
 
@@ -359,7 +375,8 @@ final class UsageStore {
   }
 
   func allowKeychainAccess(for provider: ProviderID, onFinished: (() -> Void)? = nil) {
-    guard provider == .anthropic || provider == .cursor else { return }
+    // Every early return completes, so a window waiting on it cannot hang.
+    guard provider == .anthropic || provider == .cursor else { onFinished?(); return }
     self.defaults.set(true, forKey: "\(provider.rawValue).keychainReadAllowed")
     self.states[provider]?.requiresKeychainAccess = true
     self.pendingKeychainInteractions.insert(provider)
@@ -639,7 +656,8 @@ final class UsageStore {
     allowKeychainInteraction: Bool = false,
     onFinished: (() -> Void)? = nil
   ) -> Bool {
-    guard self.isEnabled(provider) else { return false }
+    // A disabled provider has nothing to check; the caller still hears back.
+    guard self.isEnabled(provider) else { onFinished?(); return false }
     if let onFinished { self.refreshCompletions[provider, default: []].append(onFinished) }
     guard self.beginRefresh(provider) else {
       if queueIfBusy { self.pendingRefreshes.insert(provider) }
@@ -660,9 +678,12 @@ final class UsageStore {
     return true
   }
 
-  func connect(_ provider: ProviderID, forceSignIn: Bool = false, onFinished: (() -> Void)? = nil) {
-    if !forceSignIn, self.states[provider]?.requiresKeychainAccess == true
-    {
+  /// Every path calls `onFinished` exactly once: at once when nothing can be
+  /// started, or when the sign-in (or the one already running) ends.
+  func connect(_ provider: ProviderID, onFinished: (() -> Void)? = nil) {
+    // A protected sign-in that only needs permission is never replaced by a
+    // fresh login from here: that would sign the person out of the CLI too.
+    if self.states[provider]?.requiresKeychainAccess == true {
       self.allowKeychainAccess(for: provider, onFinished: onFinished)
       return
     }
@@ -682,25 +703,27 @@ final class UsageStore {
       self.refresh(provider, queueIfBusy: true) { onFinished?() }
       return
     }
-    guard self.loginProcesses[provider]?.isRunning != true else { return }
-    self.loginStorageFailures.remove(provider)
-    if forceSignIn {
-      // A protected but unusable old item must not trap an explicit fresh login
-      // in the permission path. Fresh credentials still need usage consent.
-      self.states[provider]?.requiresKeychainAccess = false
+    guard let configuration = Self.loginConfiguration(for: provider) else {
+      onFinished?()
+      return
     }
+    if self.loginProcesses[provider]?.isRunning == true {
+      // One sign-in at a time. The caller hears back when the running one
+      // ends, alongside whoever started it.
+      let running = self.loginCompletions[provider]
+      self.loginCompletions[provider] = {
+        running?()
+        onFinished?()
+      }
+      return
+    }
+    self.loginStorageFailures.remove(provider)
     self.loginCompletions[provider] = onFinished
-    guard let configuration = Self.loginConfiguration(for: provider) else { return }
     let generation = (self.loginGenerations[provider] ?? 0) + 1
     self.loginGenerations[provider] = generation
     let commandOverride = self.loginCommandOverride?(provider)
     guard let executable = commandOverride?.executable ?? BinaryLocator.find(configuration.executable) else {
-      self.states[provider]?.error =
-        "\(ProviderHelperCatalog.definition(for: provider)?.displayName ?? provider.displayName) needs setup."
-      self.states[provider]?.requiresInstallation = true
-      self.states[provider]?.requiresUpdate = false
-      self.states[provider]?.requiresConnection = false
-      self.changed()
+      self.markHelperMissing(provider)
       self.loginCompletions.removeValue(forKey: provider)?()
       return
     }
@@ -743,6 +766,9 @@ final class UsageStore {
       if provider != .anthropic {
         try input.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
       }
+      #if RESERVE_DEV_AUTOMATION
+      self.loginLaunchCounts[provider, default: 0] += 1
+      #endif
       try process.run()
       self.loginProcesses[provider] = process
       self.loginInputs[provider] = input
@@ -783,6 +809,7 @@ final class UsageStore {
       }
       self.states[provider]?.isConnecting = true
       self.states[provider]?.error = nil
+      self.states[provider]?.signInCouldNotStart = false
       self.states[provider]?.requiresInstallation = false
       self.states[provider]?.requiresUpdate = false
       self.states[provider]?.requiresConnection = false
@@ -801,18 +828,99 @@ final class UsageStore {
         }
         if let process { ProcessRunner.stop(process) }
       }
+      self.scheduleLoginHandoffDeadline(for: provider, generation: generation)
     } catch {
       if provider == .anthropic {
         self.claudeBrowserPipe?.close()
         self.claudeBrowserPipe = nil
       }
+      self.loginGenerations[provider] = generation + 1
       self.states[provider]?.error =
         "Could not start \(configuration.displayName) sign-in: \(error.localizedDescription)"
       self.states[provider]?.requiresConnection = true
+      self.states[provider]?.signInCouldNotStart = true
       self.states[provider]?.isConnecting = false
       self.changed()
       self.loginCompletions.removeValue(forKey: provider)?()
     }
+  }
+
+  #if RESERVE_DEV_AUTOMATION
+  private var loginLaunchCounts: [ProviderID: Int] = [:]
+
+  /// How many times a sign-in helper launch was attempted, for the self-tests.
+  func loginLaunchCount(for provider: ProviderID) -> Int {
+    self.loginLaunchCounts[provider] ?? 0
+  }
+  #endif
+
+  private func markHelperMissing(_ provider: ProviderID) {
+    self.states[provider]?.error =
+      "\(ProviderHelperCatalog.definition(for: provider)?.displayName ?? provider.displayName) needs setup."
+    self.states[provider]?.requiresInstallation = true
+    self.states[provider]?.requiresUpdate = false
+    self.states[provider]?.requiresConnection = false
+    self.states[provider]?.signInCouldNotStart = false
+    self.changed()
+  }
+
+  /// A helper that has not produced a sign-in page by the deadline is shown
+  /// as waiting rather than left invisible. For Claude, whose `$BROWSER`
+  /// handoff is preferred, a trusted URL printed on stdout becomes usable
+  /// from this point on.
+  private func scheduleLoginHandoffDeadline(for provider: ProviderID, generation: Int) {
+    self.loginHandoffTasks[provider]?.cancel()
+    self.loginHandoffOverdue.remove(provider)
+    let deadline = self.loginHandoffDeadline
+    self.loginHandoffTasks[provider] = Task { [weak self] in
+      try? await Task.sleep(for: deadline)
+      guard !Task.isCancelled, let self, self.loginGenerations[provider] == generation,
+        self.loginProcesses[provider]?.isRunning == true, self.loginURLs[provider] == nil
+      else { return }
+      self.loginHandoffOverdue.insert(provider)
+      if let buffer = self.loginOutputBuffers[provider],
+        let output = String(data: buffer, encoding: .utf8)
+      {
+        self.openLoginURLIfFound(in: output, for: provider)
+      }
+      self.changed()
+    }
+  }
+
+  /// True once the helper has missed the handoff deadline, until the sign-in
+  /// ends. A URL that arrives later keeps it set, so the window that came
+  /// back stays with its Open browser again action.
+  func loginHandoffIsOverdue(_ provider: ProviderID) -> Bool {
+    self.loginHandoffOverdue.contains(provider)
+  }
+
+  /// "Try again" after a sign-in could not start. It re-checks what a launch
+  /// needs (the helper, and Claude's private browser handoff) without starting
+  /// a sign-in, so a broken installation is reported instead of repeated.
+  func recheckSignInStart(_ provider: ProviderID) {
+    guard let configuration = Self.loginConfiguration(for: provider) else { return }
+    guard let executable = self.loginCommandOverride?(provider).executable
+      ?? BinaryLocator.find(configuration.executable)
+    else {
+      self.markHelperMissing(provider)
+      return
+    }
+    var problem: String?
+    if !FileManager.default.isExecutableFile(atPath: executable) {
+      problem = "\(configuration.displayName) could not be opened."
+    } else if provider == .anthropic {
+      do { try ClaudeLoginBrowserPipe { _ in }.close() }
+      catch { problem = error.localizedDescription }
+    }
+    if let problem {
+      self.states[provider]?.error = "Could not start \(configuration.displayName) sign-in: \(problem)"
+      self.states[provider]?.signInCouldNotStart = true
+    } else {
+      self.states[provider]?.error = nil
+      self.states[provider]?.signInCouldNotStart = false
+    }
+    self.states[provider]?.requiresConnection = true
+    self.changed()
   }
 
   func canReopenLoginBrowser(_ provider: ProviderID) -> Bool {
@@ -956,6 +1064,17 @@ final class UsageStore {
     self.states[provider]?.requiresConnection = false
     self.setEnabled(provider, enabled: true, refreshImmediately: false)
     self.refresh(provider, queueIfBusy: true) { onFinished?() }
+  }
+
+  /// Removes a key that was just saved, rejected, and then abandoned, so a key
+  /// that never worked does not stay in Keychain. The provider stays in the
+  /// state the rejection left it in; closing the window decides the rest.
+  func discardRejectedPlanKey(_ provider: ProviderID) {
+    guard ProviderDescriptor.forProvider(provider).usesAPIKey else { return }
+    self.planKeys.delete(provider)
+    self.planKeyPresence[provider] = false
+    self.states[provider]?.requiresConnection = true
+    self.changed()
   }
 
   /// Deletes the key, stops checks and clears the cached snapshot.
@@ -1443,6 +1562,10 @@ final class UsageStore {
     }
     self.loginTimeoutTasks[provider]?.cancel()
     self.loginTimeoutTasks[provider] = nil
+    self.loginHandoffTasks[provider]?.cancel()
+    self.loginHandoffTasks[provider] = nil
+    self.loginHandoffOverdue.remove(provider)
+    self.loginBrowserBuffers[provider] = nil
     self.loginProcesses[provider] = nil
     self.loginOutputs[provider]?.fileHandleForReading.readabilityHandler = nil
     try? self.loginInputs[provider]?.fileHandleForWriting.close()
@@ -1475,17 +1598,25 @@ final class UsageStore {
   }
 
   private func consumeLoginOutput(_ data: Data, for provider: ProviderID, fromBrowser: Bool = false) {
-    // Claude prints a manual-code fallback to stdout. Its BROWSER handoff has
-    // the loopback callback that can actually finish sign-in inside this app.
-    if provider == .anthropic, self.claudeBrowserPipe != nil, !fromBrowser { return }
-    let current = self.loginOutputBuffers[provider] ?? Data()
-    let remainingCapacity = max(0, 65_536 - current.count)
-    self.loginOutputBuffers[provider, default: Data()].append(data.prefix(remainingCapacity))
-    guard let buffer = self.loginOutputBuffers[provider],
-      let output = String(data: buffer, encoding: .utf8) else { return }
+    var buffer = (fromBrowser ? self.loginBrowserBuffers[provider] : self.loginOutputBuffers[provider]) ?? Data()
+    buffer.append(data.prefix(max(0, 65_536 - buffer.count)))
+    if fromBrowser { self.loginBrowserBuffers[provider] = buffer }
+    else { self.loginOutputBuffers[provider] = buffer }
+    guard let output = String(data: buffer, encoding: .utf8) else { return }
     if provider == .cursor, output.contains("Failed to store authentication tokens") {
       self.loginStorageFailures.insert(provider)
     }
+    // Claude prints a manual-code fallback to stdout. Its BROWSER handoff has
+    // the loopback callback that can actually finish sign-in inside this app,
+    // so stdout is used only once that handoff has missed its deadline.
+    if provider == .anthropic, self.claudeBrowserPipe != nil, !fromBrowser,
+      !self.loginHandoffOverdue.contains(provider)
+    { return }
+    self.openLoginURLIfFound(in: output, for: provider)
+  }
+
+  /// Opens the first trusted sign-in URL in the helper's output, once.
+  private func openLoginURLIfFound(in output: String, for provider: ProviderID) {
     guard !self.openedLoginURLs.contains(provider),
       let url = Self.authorizationURL(in: output, for: provider)
     else { return }
@@ -1752,6 +1883,7 @@ final class UsageStore {
       let snapshot = fetched.withFallbackPlanName(previous?.planName)
       self.states[provider]?.snapshot = snapshot
       self.states[provider]?.error = nil
+      self.states[provider]?.signInCouldNotStart = false
       self.states[provider]?.requiresConnection = false
       self.states[provider]?.requiresKeychainAccess = false
       self.states[provider]?.requiresInstallation = false
@@ -1772,31 +1904,10 @@ final class UsageStore {
       guard isCurrent() else { return }
       // The cached snapshot is deliberately kept: a failed refresh should leave
       // the last known numbers on screen with an error beside them.
-      self.states[provider]?.error = String(error.localizedDescription.prefix(500))
-      self.states[provider]?.requiresConnection =
-        (error as? UsageProviderError)?.requiresConnection == true
-      if case .executableNotFound = error as? UsageProviderError {
-        self.states[provider]?.requiresInstallation = true
-      } else {
-        self.states[provider]?.requiresInstallation = false
+      if var state = self.states[provider] {
+        Self.applyFailure(error, to: &state)
+        self.states[provider] = state
       }
-      if case .updateRequired = error as? UsageProviderError {
-        self.states[provider]?.requiresUpdate = true
-      } else {
-        self.states[provider]?.requiresUpdate = false
-      }
-      let requiresKeychainAccess: Bool
-      if case .accessDenied = error as? UsageProviderError {
-        self.states[provider]?.usageAccessDenied = true
-      } else {
-        self.states[provider]?.usageAccessDenied = false
-      }
-      if case .keychainConsentRequired(let consentProvider) = error as? UsageProviderError {
-        requiresKeychainAccess = consentProvider == provider
-      } else {
-        requiresKeychainAccess = false
-      }
-      self.states[provider]?.requiresKeychainAccess = requiresKeychainAccess
       // A temporary macOS access failure does not revoke the user's consent.
     }
     if providerFetchSucceeded { self.changed() }
@@ -1808,6 +1919,36 @@ final class UsageStore {
     }
     guard isCurrent() else { return }
     self.reportStaleness(provider)
+  }
+
+  /// How a failed check reads on a provider's state. The snapshot is left
+  /// alone. Shared with the self-test, which pins the window each error opens.
+  static func applyFailure(_ error: Error, to state: inout ProviderViewState) {
+    let providerError = error as? UsageProviderError
+    state.error = String(error.localizedDescription.prefix(500))
+    // A fresh answer replaces the launch failure; the next sign-in tries again.
+    state.signInCouldNotStart = false
+    state.requiresConnection = providerError?.requiresConnection == true
+    if case .executableNotFound = providerError {
+      state.requiresInstallation = true
+    } else {
+      state.requiresInstallation = false
+    }
+    if case .updateRequired = providerError {
+      state.requiresUpdate = true
+    } else {
+      state.requiresUpdate = false
+    }
+    if case .accessDenied = providerError {
+      state.usageAccessDenied = true
+    } else {
+      state.usageAccessDenied = false
+    }
+    if case .keychainConsentRequired(let consentProvider) = providerError {
+      state.requiresKeychainAccess = consentProvider == state.provider
+    } else {
+      state.requiresKeychainAccess = false
+    }
   }
 
   private func completeKeychainInteraction(for provider: ProviderID) {
