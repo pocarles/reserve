@@ -196,8 +196,12 @@ public struct UsageDetail: Codable, Equatable, Sendable {
   public static let maximumValueCharacters = 120
   public let label: String
   public let value: String
+  /// Identifies a person (email, organization). Shown, but never written to
+  /// Reserve's snapshot cache; it returns with the next refresh.
+  public let isPersonal: Bool
 
-  public init(_ label: String, _ value: String) {
+  public init(_ label: String, _ value: String, isPersonal: Bool = false) {
+    self.isPersonal = isPersonal
     self.label = String(label.trimmingCharacters(in: .whitespacesAndNewlines)
       .prefix(Self.maximumLabelCharacters))
     self.value = String(value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -351,7 +355,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     try container.encode(self.checkedAt, forKey: .checkedAt)
     try container.encodeIfPresent(self.availableResetCount, forKey: .availableResetCount)
     try container.encodeIfPresent(self.accountTokenActivity, forKey: .accountTokenActivity)
-    if !self.details.isEmpty { try container.encode(self.details, forKey: .details) }
+    let persistable = self.details.filter { !$0.isPersonal }
+    if !persistable.isEmpty { try container.encode(persistable, forKey: .details) }
     if self.detailedUsageUnavailable {
       try container.encode(true, forKey: .detailedUsageUnavailable)
     }

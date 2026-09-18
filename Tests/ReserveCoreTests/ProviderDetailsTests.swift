@@ -81,8 +81,48 @@ struct ProviderDetailsTests {
         {"kind":"weekly_scoped","percent":97,"resets_at":"2033-05-18T03:33:20Z","scope":{"model":{"id":"fable","display_name":"Fable"}}},
         {"kind":"five_hour_scoped","percent":30,"resets_at":"2033-05-18T03:33:20Z","scope":{"model":{"id":"fable","display_name":"Fable"}}}]}
       """#.utf8)
-    let response = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
-    #expect(response.limits?.map(\.kind) == ["weekly_scoped", "five_hour_scoped"])
+    let windows = AnthropicProvider.windows(
+      from: try JSONDecoder().decode(ClaudeUsageResponse.self, from: data))
+    #expect(windows.map(\.id) == ["weekly", "fable", "fable-five-hour"])
+    #expect(windows.map(\.label) == ["Weekly", "Fable weekly", "Fable · 5 hours"])
+    #expect(windows.map(\.windowMinutes) == [10080, 10080, 300])
+    #expect(windows.filter(\.isModelScoped).count == 2)
+
+    // Only a kind that names a five-hour period shortens the window.
+    #expect(!ClaudeLimit.isFiveHourKind("session_weekly"))
+    #expect(!ClaudeLimit.isFiveHourKind("weekly_15h_scoped"))
+    #expect(ClaudeLimit.isFiveHourKind("five_hour"))
+
+    // A kind in an unexpected shape is ignored, not fatal to the limits.
+    let odd = Data(
+      #"{"five_hour":{"utilization":10},"limits":[{"kind":{"type":"x"},"percent":50,"scope":{"model":{"id":"fable","display_name":"Fable"}}}]}"#
+        .utf8)
+    let oddWindows = AnthropicProvider.windows(
+      from: try JSONDecoder().decode(ClaudeUsageResponse.self, from: odd))
+    #expect(oddWindows.map(\.id) == ["five-hour", "fable"])
+  }
+
+  @Test func personalDetailsAreShownButNeverCached() throws {
+    let snapshot = UsageSnapshot(
+      provider: .openAI, windows: [UsageWindow(id: "weekly", label: "Weekly", usedPercent: 1)],
+      source: "test",
+      details: [UsageDetail("Account", "a@example.com", isPersonal: true), UsageDetail("Credits", "5 left")])
+    #expect(snapshot.details.count == 2)
+    let encoded = try JSONEncoder().encode(snapshot)
+    #expect(!String(decoding: encoded, as: UTF8.self).contains("a@example.com"))
+    #expect(try JSONDecoder().decode(UsageSnapshot.self, from: encoded).details.map(\.label) == ["Credits"])
+  }
+
+  @Test func accountActivityKeepsLifetimeWhenAnExtraIsMalformed() throws {
+    let activity = try JSONDecoder().decode(
+      OpenAIAccountActivity.self,
+      from: Data(#"{"summary":{"lifetimeTokens":99,"peakDailyTokens":"lots","currentStreakDays":3}}"#.utf8))
+    #expect(activity.lifetimeTokens == 99)
+    #expect(activity.peakDailyTokens == nil)
+    #expect(activity.currentStreakDays == 3)
+    let roundTrip = try JSONDecoder().decode(
+      OpenAIAccountActivity.self, from: JSONEncoder().encode(activity))
+    #expect(roundTrip == activity)
   }
 
   @Test func claudeAccountProfileShowsOnlyMeaningfulFields() throws {
@@ -97,6 +137,8 @@ struct ProviderDetailsTests {
     let labels = try #require(ClaudeAccountProfile.load(from: personal))
       .details(now: Self.now).map(\.label)
     #expect(labels == ["Account", "Subscribed since"])
+    // A configured directory without the file falls back to the home file.
+    #expect(ClaudeAccountProfile.defaultURLs(environment: ["CLAUDE_CONFIG_DIR": "/tmp/x"]).count == 2)
 
     let team = try temporaryFile(
       #"{"oauthAccount":{"emailAddress":"w@corp.com","organizationName":"Corp","organizationType":"team","organizationRole":"billing_admin"}}"#)
@@ -137,6 +179,25 @@ struct ProviderDetailsTests {
     #expect(details.map(\.label) == ["Included usage", "Team pool"])
     #expect(details[0].value == "$15.00 of $20.00 · 75% used")
     #expect(details[1].value == "$120 of $500 used")
+
+    // The usual payload only carries per-model spend, and an individual
+    // account's overall fields are not a team pool.
+    let individual = try JSONDecoder().decode(
+      CursorCurrentPeriodUsageResponse.self,
+      from: Data(
+        #"{"planUsage":{"autoSpend":1800,"autoLimit":4000,"apiSpend":200,"apiLimit":1000},"spendLimitUsage":{"overallLimit":5000,"overallUsed":100,"limitType":"individual"}}"#
+          .utf8))
+    let individualDetails = CursorProvider.details(current: individual, includedCents: nil)
+    #expect(individualDetails.map(\.label) == ["Included usage"])
+    #expect(individualDetails.first?.value == "$20.00 of $50.00 · 40% used")
+  }
+
+  @Test func grokShowsPrepaidBalanceAndOnDemandState() throws {
+    let envelope = try JSONDecoder().decode(
+      GrokBillingEnvelope.self,
+      from: Data(#"{"config":{"creditUsagePercent":5,"prepaidBalance":{"val":2550}},"onDemandEnabled":true}"#.utf8))
+    #expect(envelope.config?.prepaidBalance?.val == 2550)
+    #expect(envelope.onDemandEnabled == true)
   }
 
   @Test func statusPageListsOpenIncidentsComponentsAndMaintenance() throws {
@@ -157,6 +218,11 @@ struct ProviderDetailsTests {
     #expect(notices[0] == "Elevated errors on Claude Code")
     #expect(notices[1] == "Claude Code: degraded performance")
     #expect(notices[2].hasPrefix("Maintenance: Database upgrade · "))
+
+    // A scheduled window whose start has passed is no longer upcoming.
+    let later = try ServiceStatusClient.decodeStatuspage(
+      data, provider: .anthropic, now: Date(timeIntervalSince1970: 2_100_000_000))
+    #expect(later.notices?.contains { $0.hasPrefix("Maintenance") } == false)
 
     // A status page without the lists still reports health.
     let bare = try ServiceStatusClient.decodeStatuspage(

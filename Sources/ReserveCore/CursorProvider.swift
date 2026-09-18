@@ -221,9 +221,15 @@ public struct CursorProvider: UsageProvider {
   ) -> [UsageDetail] {
     var details: [UsageDetail] = []
     let usage = current.planUsage
-    if let spent = usage?.totalSpend ?? usage?.includedSpend, spent >= 0,
-      let limit = usage?.limit ?? includedCents, limit > 0
-    {
+    // Cursor usually reports only the per-model spend behind the two meters;
+    // the plan total is their sum when no total is given.
+    let modelSpend = [usage?.autoSpend, usage?.apiSpend].compactMap { $0 }
+    let modelLimit = [usage?.autoLimit, usage?.apiLimit].compactMap { $0 }
+    let totalSpend = usage?.totalSpend ?? usage?.includedSpend
+      ?? (modelSpend.isEmpty ? nil : modelSpend.reduce(0, +))
+    let totalLimit = usage?.limit ?? includedCents
+      ?? (modelLimit.isEmpty ? nil : modelLimit.reduce(0, +))
+    if let spent = totalSpend, spent >= 0, let limit = totalLimit, limit > 0 {
       let percent = usage?.totalPercentUsed ?? Double(spent) / Double(limit) * 100
       details.append(UsageDetail(
         "Included usage",
@@ -231,7 +237,11 @@ public struct CursorProvider: UsageProvider {
     } else if let percent = usage?.totalPercentUsed {
       details.append(UsageDetail("Included usage", "\(Int(min(100, percent).rounded()))% used"))
     }
-    if let pool = current.spendLimitUsage, let limit = pool.overallLimit, limit > 0,
+    // Only a team limit has a shared pool; an individual account can repeat
+    // its own cap in these fields.
+    if let pool = current.spendLimitUsage,
+      pool.limitType.localizedCaseInsensitiveContains("team"),
+      let limit = pool.overallLimit, limit > 0,
       let used = pool.overallUsed, used >= 0
     {
       details.append(UsageDetail(

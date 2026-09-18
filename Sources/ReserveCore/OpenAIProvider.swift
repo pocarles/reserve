@@ -35,11 +35,13 @@ public struct OpenAIProvider: UsageProvider {
     let response = try rpc.decodeResult(OpenAIRateLimitsResponse.self, from: limitMessage)
     let selected = response.rateLimitsByLimitId?["codex"] ?? response.rateLimits
 
-    // The account read is local to the helper and only adds the plan when the
-    // limit response omits it, plus the signed-in email for the details view.
+    // The account read is local to the helper. It fills a missing plan, and the
+    // signed-in email only when details are wanted (the same moment account
+    // activity is), so an ordinary refresh does not pay for it.
     var planName = OpenAIPlanFormatter.plan(from: selected.planType)
     var account: OpenAIAccountResponse.Account?
-    if let message = try? await rpc.request(
+    if planName == nil || self.includeAccountActivity,
+      let message = try? await rpc.request(
       method: "account/read",
       params: ["refreshToken": false],
       timeout: .seconds(3))
@@ -81,7 +83,9 @@ enum OpenAIDetails {
     activity: OpenAIAccountActivity?
   ) -> [UsageDetail] {
     var details: [UsageDetail] = []
-    if let email = account?.email, !email.isEmpty { details.append(UsageDetail("Account", email)) }
+    if let email = account?.email, !email.isEmpty {
+      details.append(UsageDetail("Account", email, isPersonal: true))
+    }
     if let reached = self.blockedReason(limits) { details.append(UsageDetail("Status", reached)) }
     if let credits = limits.credits {
       if credits.unlimited == true {
@@ -95,7 +99,8 @@ enum OpenAIDetails {
     if let limit = limits.individualLimit {
       var text = "\(limit.used) of \(limit.limit) used"
       if let remaining = limit.remainingPercent { text += " · \(remaining)% left" }
-      if let reset = limit.resetsAt {
+      // Seconds since 1970; anything outside a sane range is not a date.
+      if let reset = limit.resetsAt, (1_500_000_000...4_102_444_800) ~= reset {
         text += " · resets \(UsageDetailFormat.date(Date(timeIntervalSince1970: TimeInterval(reset))))"
       }
       details.append(UsageDetail("Spend cap", text))

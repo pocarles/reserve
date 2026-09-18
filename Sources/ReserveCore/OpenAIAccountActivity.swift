@@ -29,6 +29,20 @@ public struct OpenAIAccountActivity: Codable, Equatable, Sendable {
     let peakDailyTokens: Int64?
     let currentStreakDays: Int64?
     let longestStreakDays: Int64?
+
+    private enum CodingKeys: String, CodingKey {
+      case lifetimeTokens, peakDailyTokens, currentStreakDays, longestStreakDays
+    }
+
+    // The newer summary figures are extras; a shape Reserve does not expect
+    // must not cost the lifetime total or the daily history.
+    init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      self.lifetimeTokens = try container.decodeIfPresent(Int64.self, forKey: .lifetimeTokens)
+      self.peakDailyTokens = try? container.decodeIfPresent(Int64.self, forKey: .peakDailyTokens)
+      self.currentStreakDays = try? container.decodeIfPresent(Int64.self, forKey: .currentStreakDays)
+      self.longestStreakDays = try? container.decodeIfPresent(Int64.self, forKey: .longestStreakDays)
+    }
   }
   private struct Bucket: Decodable { let startDate: String; let tokens: Int64 }
 
@@ -53,12 +67,12 @@ public struct OpenAIAccountActivity: Codable, Equatable, Sendable {
     } else { daily = nil }
     self.init(
       lifetimeTokens: summary?.lifetimeTokens ?? tokens, dailyUsageBuckets: daily,
-      peakDailyTokens: try summary?.peakDailyTokens
-        ?? container.decodeIfPresent(Int64.self, forKey: .peakDailyTokens),
-      currentStreakDays: try summary?.currentStreakDays
-        ?? container.decodeIfPresent(Int64.self, forKey: .currentStreakDays),
-      longestStreakDays: try summary?.longestStreakDays
-        ?? container.decodeIfPresent(Int64.self, forKey: .longestStreakDays))
+      peakDailyTokens: summary?.peakDailyTokens
+        ?? (try? container.decodeIfPresent(Int64.self, forKey: .peakDailyTokens)) ?? nil,
+      currentStreakDays: summary?.currentStreakDays
+        ?? (try? container.decodeIfPresent(Int64.self, forKey: .currentStreakDays)) ?? nil,
+      longestStreakDays: summary?.longestStreakDays
+        ?? (try? container.decodeIfPresent(Int64.self, forKey: .longestStreakDays)) ?? nil)
   }
 
   public func encode(to encoder: Encoder) throws {

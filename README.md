@@ -250,7 +250,8 @@ retained. Reserve never scans Cursor transcripts or prompt text. It may read
 honoured, in that order). To name the signed-in Claude account in a card's
 expanded details, Reserve also reads the account email, organization and
 subscription dates from Claude Code's `~/.claude.json` (or
-`$CLAUDE_CONFIG_DIR/.claude.json`); nothing else in that file is used. Claude Code can instead keep its sign-in in
+`$CLAUDE_CONFIG_DIR/.claude.json`); nothing else in that file is used. Account
+emails and organization names are shown but never written to Reserve's cache. Claude Code can instead keep its sign-in in
 Keychain; Reserve reads it only after the user chooses **Allow access**, through
 the signed macOS `security` tool, and retains it in memory only. Reserve starts
 that tool directly, captures bounded output through a private pipe, and never

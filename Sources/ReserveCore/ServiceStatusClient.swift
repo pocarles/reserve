@@ -139,8 +139,7 @@ public actor ServiceStatusClient {
       health: ongoing == nil ? .operational : (isOutage ? .outage : .degraded),
       detail: title ?? "All systems operational",
       pageURL: Self.pageURL(.grok),
-      fetchedAt: now,
-      notices: title.map { [$0] } ?? [])
+      fetchedAt: now)
   }
 
   private static func pageURL(_ provider: ProviderID) -> URL {
@@ -210,7 +209,10 @@ private struct StatuspageSummary: Decodable {
     for maintenance in (self.scheduledMaintenances ?? []).prefix(8)
     where maintenance.status != "completed" {
       guard let name = maintenance.name, !name.isEmpty else { continue }
-      let when = UsageDateParser.iso8601(maintenance.scheduledFor).map {
+      let start = UsageDateParser.iso8601(maintenance.scheduledFor)
+      // A scheduled window that has already begun is reported as in progress.
+      if maintenance.status == "scheduled", let start, start < now { continue }
+      let when = start.map {
         " · \($0.formatted(date: .abbreviated, time: .shortened))"
       } ?? ""
       notices.append("Maintenance: \(name)\(when)")
