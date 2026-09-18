@@ -185,7 +185,10 @@ enum ProviderSetupAction: String, Equatable {
 enum AllowanceBuilder {
   static func summary(for state: ProviderViewState, now: Date = Date()) -> ProviderSummary {
     let windows = state.snapshot?.windows ?? []
-    let planWindows = windows.filter { !$0.isComponentShare }
+    let allPlanWindows = windows.filter { !$0.isComponentShare }
+    // A model-scoped limit only leads when the provider reports nothing broader.
+    let planWindows = allPlanWindows.filter { !$0.isModelScoped }.isEmpty
+      ? allPlanWindows : allPlanWindows.filter { !$0.isModelScoped }
     let blockingWindow = planWindows.filter { $0.usedPercent >= 99.5 && ($0.resetsAt ?? .distantFuture) > now }
       .min { ($0.resetsAt ?? .distantFuture) < ($1.resetsAt ?? .distantFuture) }
     let urgentWindow = planWindows.filter {
@@ -207,6 +210,7 @@ enum AllowanceBuilder {
         let lhsPrimary = lhs.id == primaryWindow?.id
         let rhsPrimary = rhs.id == primaryWindow?.id
         if lhsPrimary != rhsPrimary { return lhsPrimary }
+        if lhs.isModelScoped != rhs.isModelScoped { return rhs.isModelScoped }
         return (lhs.resetsAt ?? .distantFuture) < (rhs.resetsAt ?? .distantFuture)
       }
       .map { window in

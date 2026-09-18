@@ -297,6 +297,22 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             ],
             source: "self-test")))
         .primary?.id == "five-hour"
+      // A nearly spent model limit stays secondary to the plan's weekly limit.
+      && AllowanceBuilder.summary(
+        for: ProviderViewState(
+          provider: .anthropic,
+          snapshot: UsageSnapshot(
+            provider: .anthropic,
+            windows: [
+              UsageWindow(id: "five-hour", label: "5 hours", usedPercent: 5,
+                windowMinutes: 300, resetsAt: Date().addingTimeInterval(2 * 3_600)),
+              UsageWindow(id: "weekly", label: "Weekly", usedPercent: 69,
+                windowMinutes: 10_080, resetsAt: Date().addingTimeInterval(3 * 86_400)),
+              UsageWindow(id: "scoped-2", label: "Fable weekly", usedPercent: 97,
+                windowMinutes: 10_080, resetsAt: Date().addingTimeInterval(3 * 86_400)),
+            ],
+            source: "self-test")))
+        .allowances.map(\.id) == ["weekly", "five-hour", "scoped-2"]
     let compactMoneyKeepsCurrency =
       DashboardFormat.money(14_200) == "$14.2K"
       && DashboardFormat.money(1_420_000) == "$1.42M"
@@ -596,15 +612,24 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let decorationIsSilent = liveDescendants.compactMap { $0 as? NSImageView }
       .allSatisfy { ($0.accessibilityLabel() ?? "").isEmpty }
     let renderedMeters = liveDescendants.compactMap { $0 as? ReserveMeter }
-    let metersAreSpoken = zip(renderedMeters, previewSummaries).allSatisfy { meter, summary in
+    // The primary limit always has a meter; providers that chart every plan
+    // limit add one per remaining non-share limit, in card order.
+    let meteredAllowances: [(allowance: Allowance, paceState: UsagePaceState)] =
+      previewSummaries.flatMap { summary -> [(allowance: Allowance, paceState: UsagePaceState)] in
+        guard let primary = summary.primary else { return [] }
+        let extra =
+          ProviderDescriptor.forProvider(summary.provider).capabilities.contains(.limitMeters)
+          ? summary.secondary.filter { !$0.isComponentShare }.map { ($0, $0.paceState) } : []
+        return [(primary, summary.paceState)] + extra
+      }
+    let metersAreSpoken = zip(renderedMeters, meteredAllowances).allSatisfy { meter, entry in
         meter.accessibilityRole() == .progressIndicator
           && (meter.accessibilityLabel() ?? "").isEmpty == false
-          && (meter.accessibilityValue() as? String ?? "").contains(summary.paceState == .stale ? "percent last known" : "percent left")
+          && (meter.accessibilityValue() as? String ?? "").contains(entry.paceState == .stale ? "percent last known" : "percent left")
       }
-    let primaryAllowances = previewSummaries.compactMap(\.primary)
     let meterSemanticsWork =
-      renderedMeters.count == primaryAllowances.count
-      && zip(renderedMeters, primaryAllowances).allSatisfy { meter, allowance in
+      renderedMeters.count == meteredAllowances.count
+      && zip(renderedMeters, meteredAllowances.map(\.allowance)).allSatisfy { meter, allowance in
         let expectedPace = allowance.paceState == .stale ? nil : allowance.expectedPercent.map { 100 - $0 }
         let paceMatches: Bool =
           switch (meter.paceRemainingPercentForTesting, expectedPace) {

@@ -37,7 +37,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       switch self {
       case .general: "gearshape"
       case .providers: "person.2"
-      case .api: "key"
+      case .api: "curlybraces"
       case .notifications: "bell"
       case .appearance: "paintpalette"
       case .insights: "chart.bar"

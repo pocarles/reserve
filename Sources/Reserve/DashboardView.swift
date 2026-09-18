@@ -596,7 +596,18 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     if summary.serviceIsExceptional, let service = summary.serviceStatus {
       rows.append(ServiceBanner(provider: summary.provider, status: service))
     }
-    let secondary = summary.secondary.filter { isExpanded || !$0.isComponentShare }
+    var secondary = summary.secondary.filter { isExpanded || !$0.isComponentShare }
+    if ProviderDescriptor.forProvider(summary.provider).capabilities.contains(.limitMeters) {
+      // Each plan limit gets its own meter; component shares stay compact.
+      for allowance in secondary where !allowance.isComponentShare {
+        let meter = AllowanceView(
+          allowance: allowance, paceState: allowance.paceState,
+          lastUpdated: summary.lastUpdated, now: now, isDetail: true, showsForecast: false)
+        meter.identifier = NSUserInterfaceItemIdentifier("secondary-\(allowance.id)")
+        rows.append(meter)
+      }
+      secondary.removeAll { !$0.isComponentShare }
+    }
     if !secondary.isEmpty {
       rows.append(
         SecondaryAllowanceRow(
