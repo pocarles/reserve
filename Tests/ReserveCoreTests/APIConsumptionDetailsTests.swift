@@ -52,7 +52,7 @@ struct APIConsumptionDetailsTests {
     #expect(self.byLabel(snapshot)["Your own provider keys"] == nil)
   }
 
-  @Test func typeSafeListsEveryModelWithItsDescriptionAndDate() async throws {
+  @Test func typeSafeListsEveryModelWithItsReleaseDate() async throws {
     let snapshot = try await self.client(
       #"""
       {"models":[{"name":"jev-latest","description":"Flagship System One model","release_date":"2026-05-01"},
@@ -62,7 +62,10 @@ struct APIConsumptionDetailsTests {
     ).fetch(.typeSafe, apiKey: "ts-test")
     let details = self.byLabel(snapshot)
     #expect(snapshot.details.first?.label == "Price")
-    #expect(details["jev-latest"]?.hasPrefix("Flagship System One model · released ") == true)
+    // The model's paragraph-long description is deliberately left out: it only
+    // ever showed as a truncated fragment in a detail row.
+    #expect(details["jev-latest"]?.hasPrefix("Released ") == true)
+    #expect(details["jev-latest"]?.contains("Flagship") == false)
     #expect(details["jev-preview"] == "Available")
     #expect(snapshot.details.count == 3)
     #expect(snapshot.note?.headline == "2 models")
