@@ -56,7 +56,10 @@ public actor ServiceStatusClient {
     }
   }
 
-  public func fetch(_ provider: ProviderID, now: Date = Date()) async -> ProviderServiceStatus {
+  /// Nil when the provider has no official status page. Nothing is fetched
+  /// and no status is invented for it.
+  public func fetch(_ provider: ProviderID, now: Date = Date()) async -> ProviderServiceStatus? {
+    guard let pageURL = Self.pageURL(provider) else { return nil }
     if let cached = self.cache[provider],
       now.timeIntervalSince(cached.fetchedAt) < self.cacheLifetime
     {
@@ -72,7 +75,7 @@ public actor ServiceStatusClient {
           provider: provider,
           health: .unknown,
           detail: "Official status unavailable",
-          pageURL: Self.pageURL(provider),
+          pageURL: pageURL,
           fetchedAt: now)
     }
     self.cache[provider] = result
@@ -80,17 +83,19 @@ public actor ServiceStatusClient {
   }
 
   private func fetchFresh(_ provider: ProviderID, now: Date) async throws -> ProviderServiceStatus {
-    let endpoint = ProviderDescriptor.forProvider(provider).statusFeedURL
+    guard let endpoint = ProviderDescriptor.forProvider(provider).statusFeedURL else {
+      throw StatusError.invalidResponse
+    }
     var request = URLRequest(url: endpoint)
     request.setValue("Reserve/1.0", forHTTPHeaderField: "User-Agent")
     let (data, response) = try await ProviderHTTPSession.boundedData(
       for: request, using: self.session, maximumBytes: 512_000)
     guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count <= 512_000
     else { throw StatusError.invalidResponse }
-    switch provider {
-    case .openAI, .anthropic, .cursor, .copilot:
+    switch ProviderDescriptor.forProvider(provider).statusFormat {
+    case .statuspage:
       return try Self.decodeStatuspage(data, provider: provider, now: now)
-    case .grok:
+    case .rss:
       return Self.decodeXAI(data, now: now)
     }
   }
@@ -113,7 +118,7 @@ public actor ServiceStatusClient {
       provider: provider,
       health: health,
       detail: summary.status?.description ?? health.displayName,
-      pageURL: Self.pageURL(provider),
+      pageURL: try Self.requiredPageURL(provider),
       fetchedAt: now,
       notices: summary.notices(now: now))
   }
@@ -138,12 +143,17 @@ public actor ServiceStatusClient {
       provider: .grok,
       health: ongoing == nil ? .operational : (isOutage ? .outage : .degraded),
       detail: title ?? "All systems operational",
-      pageURL: Self.pageURL(.grok),
+      pageURL: Self.pageURL(.grok) ?? URL(string: "https://status.x.ai")!,
       fetchedAt: now)
   }
 
-  private static func pageURL(_ provider: ProviderID) -> URL {
+  private static func pageURL(_ provider: ProviderID) -> URL? {
     ProviderDescriptor.forProvider(provider).statusURL
+  }
+
+  private static func requiredPageURL(_ provider: ProviderID) throws -> URL {
+    guard let url = Self.pageURL(provider) else { throw StatusError.invalidResponse }
+    return url
   }
 }
 

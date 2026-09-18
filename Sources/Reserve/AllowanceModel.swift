@@ -146,9 +146,12 @@ enum ProviderSetupAction: String, Equatable {
   case update
   case signIn
   case allowAccess
+  /// Key-connected plans (Z.ai, Kimi) connect by pasting an API key.
+  case addKey
 
   var buttonTitle: String {
     switch self {
+    case .addKey: "Add key"
     case .install: "Set up"
     case .update: "Update"
     case .signIn: "Sign in"
@@ -162,6 +165,7 @@ enum ProviderSetupAction: String, Equatable {
     case .update: "Update \(provider.displayName) to resume plan limits"
     case .signIn: "Sign in to \(provider.displayName) to show plan limits"
     case .allowAccess: "Waiting for permission to read usage"
+    case .addKey: "Add a \(provider.displayName) API key to show plan limits"
     }
   }
 
@@ -170,15 +174,18 @@ enum ProviderSetupAction: String, Equatable {
       if self == .install { return "Open official installation instructions for \(provider.displayName)" }
       if self == .update { return "Open official update instructions for \(provider.displayName)" }
     }
+    let helperName = ProviderHelperCatalog.definition(for: provider)?.displayName ?? provider.displayName
     return switch self {
     case .install:
-      "Install \(ProviderHelperCatalog.definition(for: provider).displayName) without using Terminal"
+      "Install \(helperName) without using Terminal"
     case .update:
-      "Update \(ProviderHelperCatalog.definition(for: provider).displayName) and reconnect"
+      "Update \(helperName) and reconnect"
     case .signIn:
       "Sign in with \(provider.displayName) in your browser"
     case .allowAccess:
       "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
+    case .addKey:
+      "Paste a \(provider.displayName) API key. Reserve keeps it in the macOS Keychain."
     }
   }
 }
@@ -276,8 +283,11 @@ enum AllowanceBuilder {
       details: state.snapshot?.details ?? [])
   }
 
+  /// API-key plans need no local tool, so the lookup is skipped for them.
   private static func connectionToolAvailable(for provider: ProviderID) -> Bool {
-    let executable = ProviderDescriptor.forProvider(provider).helper.executable
+    let descriptor = ProviderDescriptor.forProvider(provider)
+    guard !descriptor.usesAPIKey else { return true }
+    guard let executable = descriptor.helper?.executable else { return false }
     return BinaryLocator.find(executable) != nil
   }
 
@@ -317,6 +327,12 @@ enum AllowanceBuilder {
     for state: ProviderViewState,
     connectionToolAvailable: Bool? = nil
   ) -> ProviderSetupAction? {
+    if ProviderDescriptor.forProvider(state.provider).usesAPIKey {
+      // No helper, CLI sign-in or Keychain consent applies; only the key does.
+      if state.requiresConnection { return .addKey }
+      guard state.snapshot == nil, state.error == nil else { return nil }
+      return .addKey
+    }
     if state.requiresKeychainAccess { return .allowAccess }
     if state.requiresUpdate { return .update }
     if state.requiresInstallation { return .install }

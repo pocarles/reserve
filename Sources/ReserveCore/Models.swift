@@ -6,6 +6,9 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   case grok
   case cursor
   case copilot
+  // Appended so the persisted raw values of earlier providers never shift.
+  case zai
+  case kimi
 
   public var id: String { self.rawValue }
 

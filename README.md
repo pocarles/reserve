@@ -1,7 +1,8 @@
 # Reserve
 
 Reserve is a native macOS menu-bar app that shows reported subscription
-capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, and Copilot.
+capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, Copilot, the Z.ai GLM
+Coding Plan and Kimi Code.
 Optional insights show provider-reported account activity or activity from this Mac.
 Copilot support is experimental and still needs an authenticated release check.
 
@@ -46,7 +47,7 @@ Reserve says so in a window where you can try again or cancel.
 Claude and Cursor require explicit **Allow usage access** before Reserve reads
 their protected sign-in. macOS may also ask you to approve access. That window
 closes on its own once Reserve reads fresh usage, or explains why it could not.
-Cursor and Copilot start disabled. On first launch, the other providers
+Cursor, Copilot, Z.ai and Kimi start disabled. On first launch, the other providers
 start enabled only when their helper is already installed. Saved choices are preserved.
 
 - `codex`, signed into an OpenAI subscription;
@@ -55,7 +56,33 @@ start enabled only when their helper is already installed. Saved choices are pre
 - `cursor-agent`, authenticated with `cursor-agent login`, for an individual
   Cursor account. Teams and Enterprise Admin API keys are not supported; and
 - Copilot CLI, signed into GitHub. Setup opens GitHub’s installation instructions
-  if the helper is missing.
+  if the helper is missing;
+- Z.ai GLM Coding Plan, connected with an API key; and
+- Kimi Code, connected with an API key.
+
+### Plans connected with an API key
+
+Z.ai and Kimi Code have no helper and no sign-in. **Connect** asks for an API
+key instead: paste it, or choose **Get a key** to open the provider's key page.
+The key is saved only in the macOS Keychain and is sent only to that provider's
+usage endpoint. **Remove** in Settings > Providers deletes the key, stops
+checks, and clears the cached usage. Both show the same 5-hour and weekly
+meters, reset times, pace, alerts and menu-bar source as the other providers.
+
+- Z.ai: create an API key at z.ai (Manage API keys) on the account that holds
+  the GLM Coding Plan. Reserve reads `api.z.ai/api/monitor/usage/quota/limit`.
+  Only the international z.ai platform is supported; China-mainland
+  `open.bigmodel.cn` keys are not.
+- Kimi Code: create an API key in the Kimi Code console (kimi.com/code). This is
+  the Kimi Code subscription, not the Moonshot API platform listed under
+  Settings > API. Reserve reads `api.kimi.com/coding/v1/usages`.
+
+Both usage endpoints are unofficial: they are what the providers' own tools
+use, they are not documented, and they may change without notice. If a reply
+is not understood, Reserve says so rather than showing a guessed 0%. Neither
+provider offers a read-only key, so the key you paste can also call models;
+create a dedicated key just for Reserve. Z.ai publishes no status page, so its
+card shows no service status; Kimi uses Moonshot AI's status page.
 
 A saved sign-in expires on its own after a few hours. When Reserve finds one
 that is expired or about to expire, it asks the provider's official helper to
@@ -253,6 +280,10 @@ incremental scans. OAuth tokens, account identifiers, local paths, prompts,
 responses, cookies, authorization headers, raw provider payloads, and process
 logs are never cached. Cursor's normalized daily and model totals may be cached
 with the same bounds as other aggregate usage data.
+
+Z.ai and Kimi plan keys are kept as generic-password items under the
+`com.pocarles.reserve.plan-keys` Keychain service, separate from the API keys
+above. They are never written to preferences, the snapshot cache, or logs.
 
 Local totals come from session logs under `~/.claude/projects`,
 `~/.codex/sessions`, and `~/.grok/sessions`; only bounded daily aggregates are

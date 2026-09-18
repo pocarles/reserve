@@ -65,17 +65,90 @@ enum ConnectionFlowSelfTest {
     var openedBrowserCount = 0
     var lastOpenedBrowserURL: URL?
     var browserOpens = true
+    var loginCommands: [ProviderID] = []
+    // Plan keys live in memory here, so no real Keychain item is written.
+    var savedPlanKeys: [ProviderID: String] = [:]
+    let memoryKeys = PlanKeyStorage(
+      hasKey: { savedPlanKeys[$0] != nil },
+      save: { key, provider in
+        guard key.count >= 16 else {
+          throw UsageProviderError.credentialsNotFound("\(provider.displayName) needs a single-line API key.")
+        }
+        savedPlanKeys[provider] = key
+      },
+      delete: { savedPlanKeys[$0] = nil })
     let store = UsageStore(
       defaults: defaults, startAutomatically: false, cache: cache,
       fetchOverride: { provider, allowAccess in
         try await responses.fetch(provider, allowAccess: allowAccess)
       },
-      loginCommandOverride: { _ in
-        ("/bin/sh", [directory.appendingPathComponent("login.sh").path])
+      loginCommandOverride: { provider in
+        loginCommands.append(provider)
+        return ("/bin/sh", [directory.appendingPathComponent("login.sh").path])
       },
-      openLoginURL: { url in openedBrowserCount += 1; lastOpenedBrowserURL = url; return browserOpens })
+      openLoginURL: { url in openedBrowserCount += 1; lastOpenedBrowserURL = url; return browserOpens },
+      planKeys: memoryKeys)
     let coordinator = ProviderSetupCoordinator(store: store)
     defer { coordinator.close() }
+
+    // Key-connected plans: off by default, connected by pasting a key, never
+    // through a helper, CLI sign-in, browser or Keychain-consent prompt.
+    for provider in [ProviderID.zai, .kimi] {
+      expect(!store.isEnabled(provider), "\(provider.displayName) did not start disabled")
+      expect(AllowanceBuilder.setupAction(for: ProviderViewState(provider: provider)) == .addKey,
+        "\(provider.displayName) offered a sign-in or install instead of a key")
+      var rejected = ProviderViewState(provider: provider)
+      rejected.requiresConnection = true
+      rejected.error = "rejected fixture"
+      expect(ProviderSetupCoordinator.phase(after: rejected) == .needsKey,
+        "a rejected \(provider.displayName) key did not ask for a new key")
+
+      await responses.set(.success)
+      coordinator.start(provider)
+      expect(coordinator.phase == .needsKey && coordinator.panel?.isVisible == true,
+        "\(provider.displayName) did not ask for an API key")
+      let keyField = coordinator.panel?.contentView.flatMap { root in
+        LifecycleSelfTest.descendants(of: root).compactMap { $0 as? NSSecureTextField }
+          .first { $0.identifier?.rawValue == "connection-key" }
+      }
+      expect(keyField != nil && keyField?.isHiddenOrHasHiddenAncestor == false,
+        "\(provider.displayName) key field is not a visible secure field")
+      keyField?.stringValue = "short"
+      click("connection-primary", in: coordinator.panel)
+      expect(coordinator.phase == .needsKey && savedPlanKeys[provider] == nil,
+        "an invalid \(provider.displayName) key was accepted")
+      keyField?.stringValue = "test-\(provider.rawValue)-key-0123456789"
+      click("connection-primary", in: coordinator.panel)
+      await settle { coordinator.activeProvider == nil }
+      expect(coordinator.activeProvider == nil && store.isEnabled(provider)
+        && store.states[provider]?.snapshot != nil && savedPlanKeys[provider] != nil,
+        "saving a \(provider.displayName) key did not connect it")
+      expect(keyField?.stringValue.isEmpty == true, "the pasted key stayed in the field")
+
+      // A rejected key reopens the key prompt rather than a browser sign-in.
+      await responses.set(.signedOut)
+      coordinator.start(provider)
+      await settle { coordinator.phase == .needsKey }
+      expect(coordinator.phase == .needsKey && coordinator.panel?.isVisible == true,
+        "a rejected \(provider.displayName) key did not ask for a replacement")
+      coordinator.close()
+
+      store.removePlanKey(provider)
+      expect(!store.isEnabled(provider) && store.states[provider]?.snapshot == nil
+        && savedPlanKeys[provider] == nil && !store.hasPlanKey(provider),
+        "removing the \(provider.displayName) key did not disconnect it")
+      // Disconnect rewrites the cache in the background.
+      var cached = await cache.load()
+      for _ in 0..<50 where cached[provider] != nil {
+        try? await Task.sleep(for: .milliseconds(20))
+        cached = await cache.load()
+      }
+      expect(cached[provider] == nil, "a removed \(provider.displayName) key left a cached snapshot")
+    }
+    expect(loginCommands.isEmpty && openedBrowserCount == 0,
+      "a key-connected plan started a CLI sign-in or opened a browser")
+    expect(!store.keychainReadAllowed(for: .zai) && !store.keychainReadAllowed(for: .kimi),
+      "a key-connected plan was granted Claude/Cursor Keychain consent")
 
     // A manually installed helper starts disabled, and a failed refresh must
     // keep the last good snapshot while disconnect clears it.
@@ -356,6 +429,23 @@ enum ConnectionFlowSelfTest {
       do { try preview.render(to: evidence.appendingPathComponent("\(name).png")) }
       catch { failures.append("\(name) screenshot could not be saved") }
     }
+    let keyPreview = ProviderConnectionPanel(provider: .kimi)
+    defer { keyPreview.close() }
+    for (name, phase) in [
+      ("kimi-key", ProviderSetupCoordinator.Phase.needsKey), ("kimi-checking", .savingKey),
+    ] {
+      keyPreview.update(phase: phase)
+      keyPreview.show()
+      try? await Task.sleep(for: .milliseconds(50))
+      if let root = keyPreview.contentView {
+        for field in LifecycleSelfTest.descendants(of: root).compactMap({ $0 as? NSTextField })
+        where !field.isHiddenOrHasHiddenAncestor {
+          expect(root.bounds.contains(field.convert(field.bounds, to: root)), "\(name) text exceeds window")
+        }
+      }
+      do { try keyPreview.render(to: evidence.appendingPathComponent("\(name).png")) }
+      catch { failures.append("\(name) screenshot could not be saved") }
+    }
     let manualPreview = ProviderConnectionPanel(provider: .copilot)
     defer { manualPreview.close() }
     for (name, phase) in [
@@ -420,7 +510,7 @@ enum ConnectionFlowSelfTest {
           failures.append("explicit access did not finish cleanly while a sweep waited")
         }
       } else if scenario == "bounded-sweep" {
-        let enabled: Set<ProviderID> = [.openAI, .grok, .cursor, .copilot]
+        let enabled: Set<ProviderID> = [.openAI, .grok, .cursor, .copilot, .zai, .kimi]
         for provider in enabled {
           store.setEnabled(provider, enabled: true, refreshImmediately: false)
         }

@@ -755,6 +755,11 @@ enum LifecycleSelfTest {
       "Cursor no longer starts disabled with Keychain access off")
     result.expect(!store.isEnabled(.copilot), "Copilot no longer starts disabled")
     result.expect(
+      !store.isEnabled(.zai) && !store.isEnabled(.kimi)
+        && store.monthlySubscriptionCost(for: .zai) == nil
+        && store.monthlySubscriptionCost(for: .kimi) == nil,
+      "Z.ai and Kimi no longer start disabled without a cost")
+    result.expect(
       store.localHistoryEnabled,
       "local history no longer remains available after updating Reserve")
     store.localHistoryEnabled = false

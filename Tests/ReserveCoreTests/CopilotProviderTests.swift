@@ -208,9 +208,21 @@ import Testing
       let descriptor = ProviderDescriptor.forProvider(provider)
       #expect(descriptor.id == provider)
       #expect(!descriptor.displayName.isEmpty)
-      #expect(descriptor.helper.provider == provider)
-      #expect(!descriptor.helper.executable.isEmpty)
-      for url in [descriptor.accountURL, descriptor.statusURL, descriptor.statusFeedURL, descriptor.helper.installerURL] {
+      var urls = [descriptor.accountURL]
+      if descriptor.usesAPIKey {
+        // Key-connected plans have no helper; the key page is their setup URL.
+        #expect(descriptor.helper == nil)
+        #expect(descriptor.apiKeyConnection != nil)
+        urls += descriptor.apiKeyConnection.map { [$0.keySettingsURL] } ?? []
+      } else {
+        #expect(descriptor.helper?.provider == provider)
+        #expect(descriptor.helper?.executable.isEmpty == false)
+        urls += descriptor.helper.map { [$0.installerURL] } ?? []
+        // Every helper-backed provider has an official status page.
+        #expect(descriptor.statusURL != nil && descriptor.statusFeedURL != nil)
+      }
+      urls += [descriptor.statusURL, descriptor.statusFeedURL].compactMap { $0 }
+      for url in urls {
         #expect(url.scheme == "https")
         #expect(url.host != nil)
       }
@@ -228,7 +240,7 @@ import Testing
     #expect(ProviderDescriptor.forProvider(.anthropic).loginArguments == ["auth", "login", "--claudeai"])
     #expect(ProviderDescriptor.forProvider(.copilot).trustedLoginHosts == ["github.com"])
     #expect(ProviderDescriptor.forProvider(.copilot).installationStrategy == .manualHelper)
-    #expect(ProviderDescriptor.forProvider(.copilot).helper.updateArguments.isEmpty)
-    #expect(ProviderDescriptor.forProvider(.openAI).helper.updateArguments == ["update"])
+    #expect(ProviderDescriptor.forProvider(.copilot).helper?.updateArguments.isEmpty == true)
+    #expect(ProviderDescriptor.forProvider(.openAI).helper?.updateArguments == ["update"])
   }
 }
