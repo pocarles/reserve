@@ -219,4 +219,16 @@ struct BinaryLocatorTrustTests {
         "reserve-trust-cli",
         environment: ["PATH": "\(open):relative:\(sandbox.path("closed"))"]) == trusted)
   }
+
+  @Test func relativePathEntryIsIgnoredEvenWhenItResolvesToATrustedFile() throws {
+    // `URL(fileURLWithPath:)` would resolve `bin` against the working directory
+    // before validation, so a relative entry must be dropped, not validated.
+    let sandbox = try Sandbox()
+    try sandbox.executable("cwd/bin/reserve-trust-relative")
+    let previous = FileManager.default.currentDirectoryPath
+    #expect(FileManager.default.changeCurrentDirectoryPath(sandbox.path("cwd")))
+    defer { FileManager.default.changeCurrentDirectoryPath(previous) }
+    #expect(
+      BinaryLocator.find("reserve-trust-relative", environment: ["PATH": "bin"]) == nil)
+  }
 }

@@ -23,9 +23,12 @@ public enum BinaryLocator {
     _ name: String, environment: [String: String] = ProcessInfo.processInfo.environment
   ) -> String? {
     let home = FileManager.default.homeDirectoryForCurrentUser.path
+    // Relative entries (`.`, `bin`) would resolve against Reserve's working
+    // directory before validation ever saw them, so they are dropped here.
     let pathEntries = (environment["PATH"] ?? "")
       .split(separator: ":")
       .map(String.init)
+      .filter { $0.hasPrefix("/") }
     for directory in Self.preferredDirectories(home: home) {
       if let candidate = Self.executable(name, in: directory) { return candidate }
     }
