@@ -333,9 +333,15 @@ public actor LocalUsageScanner {
         var record = index.records[key]
         if record?.size != metadata.size || record?.modifiedAt != metadata.modifiedAt {
           let requiredBytes = min(self.codexTailBytes, max(0, Int(clamping: metadata.size)))
-          if requiredBytes <= remainingBytes {
+          // The path check above is only a cheap "anything new?" filter. What
+          // gets read, and the stamp recorded for it, come from the validated
+          // descriptor; a path swapped for a link, FIFO or foreign file since
+          // enumeration is skipped and its previous record left as it was.
+          if requiredBytes <= remainingBytes, let opened = DescriptorBoundFile.open(file) {
+            defer { opened.close() }
+            let metadata = opened.metadata
             let parsed = try self.parseCodexTail(
-              file, deadline: deadline, remainingBytes: &remainingBytes)
+              opened, deadline: deadline, remainingBytes: &remainingBytes)
             record = CachedFile(
               provider: .openAI,
               size: metadata.size,
@@ -387,10 +393,22 @@ public actor LocalUsageScanner {
         }
         if (record?.size != metadata.size || record?.modifiedAt != metadata.modifiedAt
           || (record?.offset ?? 0) < metadata.size
-        ), remainingBytes > 0 {
+        ), remainingBytes > 0,
+          // Skipped, like a vanished file, if the path is no longer a regular
+          // file this user owns; the reads and the new stamp below all come from
+          // this one descriptor.
+          let opened = DescriptorBoundFile.open(file)
+        {
+          defer { opened.close() }
+          let metadata = opened.metadata
+          if metadata.size < (record?.offset ?? 0) {
+            record = CachedFile(
+              provider: .anthropic, size: 0, modifiedAt: 0, offset: 0,
+              days: [:], recentRows: [:], recentOrder: [])
+          }
           var updated = record!
           let scanResult = try self.scanLines(
-            file, from: updated.offset,
+            opened, from: updated.offset,
             discardingOversizedLine: updated.discardingOversizedLine ?? false,
             deadline: deadline, remainingBytes: &remainingBytes
           ) { data in
@@ -457,8 +475,14 @@ public actor LocalUsageScanner {
             offset: metadata.size, days: [:], recentRows: [:], recentOrder: [])
           index.records[key] = record
           indexChanged = true
-        } else if readableBytes <= remainingBytes {
-          let data = BoundedFileReader.read(file, maximumBytes: 256 * 1024)
+        } else if readableBytes <= remainingBytes,
+          let opened = DescriptorBoundFile.open(file, maximumBytes: 256 * 1_024)
+        {
+          // Opened and validated once: the bytes and the stamp describe the same
+          // file, and one that grew past the limit mid-read yields no data.
+          defer { opened.close() }
+          let metadata = opened.metadata
+          let data = opened.readToEnd(maximumBytes: 256 * 1_024)
           remainingBytes -= data?.count ?? 0
           let parsed = data.flatMap(Self.parseGrokSignal)
           record = CachedFile(
@@ -548,21 +572,24 @@ public actor LocalUsageScanner {
   private static let maximumScannedFiles = 5_000
   private static let maximumEnumeratedEntries = 20_000
 
-  private func metadata(_ file: URL) throws -> (size: Int64, modifiedAt: TimeInterval, date: Date) {
-    let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-    let date = values.contentModificationDate ?? .distantPast
-    return (Int64(values.fileSize ?? 0), date.timeIntervalSince1970, date)
+  /// Path-level (`lstat`) size and modification time, used only to decide
+  /// whether a file needs reading at all. It is converted exactly as the
+  /// descriptor's `fstat` is when a file is read, so the stamp stored then
+  /// compares equal here while the file is untouched.
+  private func metadata(_ file: URL) throws -> DescriptorBoundFile.Metadata {
+    try DescriptorBoundFile.linkMetadata(file)
   }
 
   private func parseCodexTail(
-    _ file: URL,
+    _ file: DescriptorBoundFile,
     deadline: Date,
     remainingBytes: inout Int
   ) throws -> (timestamp: Date, totals: UsageTotals)? {
-    let handle = try FileHandle(forReadingFrom: file)
-    defer { try? handle.close() }
-    let size = try handle.seekToEnd()
-    var start = size
+    let handle = file.handle
+    // The tail ends where the validated `fstat` said the file ended, the same
+    // size the record is stamped with; anything appended since is picked up by
+    // the next scan because the stamp will no longer match.
+    var start = UInt64(max(0, file.metadata.size))
     var data = Data()
     while start > 0, data.count < self.codexTailBytes, remainingBytes > 0 {
       try Self.checkDeadline(deadline)
@@ -636,15 +663,14 @@ public actor LocalUsageScanner {
   }
 
   private func scanLines(
-    _ file: URL,
+    _ file: DescriptorBoundFile,
     from offset: Int64,
     discardingOversizedLine: Bool,
     deadline: Date,
     remainingBytes: inout Int,
     visit: (Data) -> Void
   ) throws -> (offset: Int64, discardingOversizedLine: Bool) {
-    let handle = try FileHandle(forReadingFrom: file)
-    defer { try? handle.close() }
+    let handle = file.handle
     try handle.seek(toOffset: UInt64(max(0, offset)))
     let buffer = BoundedLineBuffer(
       maximumBytes: self.maximumLineBytes,
