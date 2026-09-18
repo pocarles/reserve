@@ -1068,7 +1068,12 @@ final class UsageStore {
             windowMinutes: openAIWindowMinutes, resetsAt: now.addingTimeInterval(4.2 * 86400)),
         ],
         fetchedAt: now.addingTimeInterval(-48),
-        source: "Codex app-server"),
+        source: "Codex app-server",
+        details: [
+          UsageDetail("Account", "preview@example.com"),
+          UsageDetail("Credits", "1,250 left"),
+          UsageDetail("Lifetime tokens", "5.4B"),
+        ]),
       localUsage: LocalUsageSummary(
         provider: .openAI, periodDays: 30,
         inputTokens: 18_620_000_000,
@@ -1099,7 +1104,11 @@ final class UsageStore {
         fetchedAt: now.addingTimeInterval(-83),
         source: "Claude OAuth",
         includedSpend: IncludedSpend(
-          label: "Extra usage", usedMinorUnits: 2_845, limitMinorUnits: 10_000)),
+          label: "Extra usage", usedMinorUnits: 2_845, limitMinorUnits: 10_000),
+        details: [
+          UsageDetail("Account", "preview@example.com"),
+          UsageDetail("Subscribed since", UsageDetailFormat.date(now.addingTimeInterval(-240 * 86_400))),
+        ]),
       localUsage: LocalUsageSummary(
         provider: .anthropic, periodDays: 30,
         inputTokens: 3_750_000_000,
@@ -1185,7 +1194,8 @@ final class UsageStore {
       snapshot: UsageSnapshot(provider: .copilot, planName: "Pro", windows: [
         UsageWindow(id: "premium_interactions", label: "Premium usage", usedPercent: 18,
           resetsAt: now.addingTimeInterval(18 * 86_400))], fetchedAt: now,
-        source: "Copilot account quota"))
+        source: "Copilot account quota",
+        details: [UsageDetail("Premium requests", "54 of 300 used"), UsageDetail("Chat", "Unlimited")]))
     self.changed()
   }
 

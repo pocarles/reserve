@@ -211,7 +211,44 @@ public struct CursorProvider: UsageProvider {
       billingRenewsAt: billingEnd,
       monthlyPriceMinorUnits: monthlyPrice,
       accountUsage: accountUsage,
-      detailedUsageUnavailable: detailedUsageUnavailable)
+      detailedUsageUnavailable: detailedUsageUnavailable,
+      details: Self.details(current: current, includedCents: plan.planInfo?.includedAmountCents))
+  }
+
+  /// Plan totals behind the two model meters, and a team's shared pool.
+  static func details(
+    current: CursorCurrentPeriodUsageResponse, includedCents: Int?
+  ) -> [UsageDetail] {
+    var details: [UsageDetail] = []
+    let usage = current.planUsage
+    // Cursor usually reports only the per-model spend behind the two meters;
+    // the plan total is their sum when no total is given.
+    let modelSpend = [usage?.autoSpend, usage?.apiSpend].compactMap { $0 }
+    let modelLimit = [usage?.autoLimit, usage?.apiLimit].compactMap { $0 }
+    let totalSpend = usage?.totalSpend ?? usage?.includedSpend
+      ?? (modelSpend.isEmpty ? nil : modelSpend.reduce(0, +))
+    let totalLimit = usage?.limit ?? includedCents
+      ?? (modelLimit.isEmpty ? nil : modelLimit.reduce(0, +))
+    if let spent = totalSpend, spent >= 0, let limit = totalLimit, limit > 0 {
+      let percent = usage?.totalPercentUsed ?? Double(spent) / Double(limit) * 100
+      details.append(UsageDetail(
+        "Included usage",
+        "\(APIConsumptionClient.money(spent)) of \(APIConsumptionClient.money(limit)) · \(Int(min(100, percent).rounded()))% used"))
+    } else if let percent = usage?.totalPercentUsed {
+      details.append(UsageDetail("Included usage", "\(Int(min(100, percent).rounded()))% used"))
+    }
+    // Only a team limit has a shared pool; an individual account can repeat
+    // its own cap in these fields.
+    if let pool = current.spendLimitUsage,
+      pool.limitType.localizedCaseInsensitiveContains("team"),
+      let limit = pool.overallLimit, limit > 0,
+      let used = pool.overallUsed, used >= 0
+    {
+      details.append(UsageDetail(
+        "Team pool",
+        "\(APIConsumptionClient.money(used)) of \(APIConsumptionClient.money(limit)) used"))
+    }
+    return details
   }
 
   public static func keychainCredentialIsAvailableWithoutPrompt() -> Bool {

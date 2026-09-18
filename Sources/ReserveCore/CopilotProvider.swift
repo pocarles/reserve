@@ -42,6 +42,7 @@ public struct CopilotProvider: UsageProvider {
     else { throw UsageProviderError.invalidResponse("Copilot quota data was not recognized.") }
 
     var windows: [UsageWindow] = []
+    var details: [UsageDetail] = []
     let knownLabels = ["premium_interactions": "Premium requests", "chat": "Chat", "completions": "Completions"]
     for key in response.quotaSnapshots.keys.sorted() {
       guard let quota = response.quotaSnapshots[key] else { continue }
@@ -52,7 +53,16 @@ public struct CopilotProvider: UsageProvider {
       else { throw UsageProviderError.invalidResponse("Copilot returned an invalid allowance.") }
       // Unlimited products are not a separate 100%-remaining allowance. Keep
       // unknown future quota kinds visible, without guessing their unit or plan.
-      if quota.isUnlimitedEntitlement || quota.entitlementRequests == -1 { continue }
+      let label = knownLabels[key] ?? key.replacingOccurrences(of: "_", with: " ").capitalized
+      if quota.isUnlimitedEntitlement || quota.entitlementRequests == -1 {
+        details.append(UsageDetail(label, "Unlimited"))
+        continue
+      }
+      if quota.entitlementRequests > 0 {
+        details.append(UsageDetail(
+          label,
+          "\(UsageDetailFormat.number(quota.usedRequests)) of \(UsageDetailFormat.number(quota.entitlementRequests)) used"))
+      }
       let reset: Date?
       if let raw = quota.resetDate {
         let date = UsageDateParser.iso8601(raw)
@@ -62,7 +72,6 @@ public struct CopilotProvider: UsageProvider {
         else { continue }
         reset = parsed
       } else { reset = nil }
-      let label = knownLabels[key] ?? key.replacingOccurrences(of: "_", with: " ").capitalized
       windows.append(UsageWindow(
         id: key, label: label, usedPercent: 100 - quota.remainingPercentage,
         // The API supplies a reset date, not the period's start. Do not assume
@@ -78,7 +87,13 @@ public struct CopilotProvider: UsageProvider {
       return lhs.id < rhs.id
     }
     return UsageSnapshot(provider: .copilot, windows: windows, fetchedAt: now,
-      source: "Copilot account quota", detailedUsageUnavailable: true)
+      source: "Copilot account quota", detailedUsageUnavailable: true,
+      details: details.sorted { lhs, rhs in
+        // Premium requests lead, matching the meters.
+        if lhs.label == "Premium requests" { return rhs.label != "Premium requests" }
+        if rhs.label == "Premium requests" { return false }
+        return lhs.label < rhs.label
+      })
   }
 }
 

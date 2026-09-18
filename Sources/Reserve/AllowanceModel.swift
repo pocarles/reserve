@@ -113,6 +113,8 @@ struct ProviderSummary {
   var historyPossible = false
   /// Whether this provider's history comes from logs on this Mac.
   var localHistorySupported = false
+  /// Provider facts for the expanded details only (account, credits, counts).
+  var details: [UsageDetail] = []
 
   var primary: Allowance? { self.allowances.first { $0.isPrimary } ?? self.allowances.first }
   var secondary: [Allowance] { self.allowances.filter { !$0.isPrimary } }
@@ -270,7 +272,8 @@ enum AllowanceBuilder {
       localHistoryEnabled: state.localHistoryEnabled,
       historyPossible: capabilities.contains(.localHistory)
         || capabilities.contains(.accountHistory),
-      localHistorySupported: capabilities.contains(.localHistory))
+      localHistorySupported: capabilities.contains(.localHistory),
+      details: state.snapshot?.details ?? [])
   }
 
   private static func connectionToolAvailable(for provider: ProviderID) -> Bool {

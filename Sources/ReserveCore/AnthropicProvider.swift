@@ -18,6 +18,7 @@ public struct AnthropicProvider: UsageProvider {
   private let ineffectiveRenewal: ClaudeIneffectiveRenewalHook
   private let keychainCandidateLoader: ClaudeKeychainCandidateLoader?
   private let credentialFileURLs: [URL]?
+  private let accountProfileURLs: [URL]
 
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -40,6 +41,7 @@ public struct AnthropicProvider: UsageProvider {
     self.ineffectiveRenewal = ClaudeSessionRenewer.ineffectiveRenewalHook
     self.keychainCandidateLoader = nil
     self.credentialFileURLs = nil
+    self.accountProfileURLs = ClaudeAccountProfile.defaultURLs(environment: environment)
   }
 
   /// The renewal and Keychain hooks exist so tests never launch Claude Code or
@@ -53,7 +55,8 @@ public struct AnthropicProvider: UsageProvider {
     renewer: ClaudeSessionRenewalHook? = nil,
     ineffectiveRenewal: ClaudeIneffectiveRenewalHook? = nil,
     keychainCandidateLoader: ClaudeKeychainCandidateLoader? = nil,
-    credentialFileURLs: [URL]? = nil
+    credentialFileURLs: [URL]? = nil,
+    accountProfileURLs: [URL] = []
   ) {
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
@@ -65,6 +68,7 @@ public struct AnthropicProvider: UsageProvider {
     self.ineffectiveRenewal = ineffectiveRenewal ?? ClaudeSessionRenewer.ineffectiveRenewalHook
     self.keychainCandidateLoader = keychainCandidateLoader
     self.credentialFileURLs = credentialFileURLs
+    self.accountProfileURLs = accountProfileURLs
   }
 
   public func fetch() async throws -> UsageSnapshot {
@@ -104,39 +108,7 @@ public struct AnthropicProvider: UsageProvider {
       throw Self.signInExpired
     }
 
-    var windows: [UsageWindow] = []
-    if let fiveHour = response.fiveHour?.window(id: "five-hour", label: "5 hours") {
-      windows.append(fiveHour)
-    }
-    if let sevenDay = response.sevenDay?.window(id: "weekly", label: "Weekly") {
-      windows.append(sevenDay)
-    }
-    if let sonnet = response.sevenDaySonnet?.window(
-      id: "sonnet-weekly", label: "Sonnet weekly")
-    {
-      windows.append(sonnet)
-    }
-    if let opus = response.sevenDayOpus?.window(id: "opus-weekly", label: "Opus weekly") {
-      windows.append(opus)
-    }
-    if let limits = response.limits {
-      for (index, limit) in limits.prefix(28).enumerated() where limit.isActive != false {
-        guard let percent = limit.percent,
-          let name = limit.scope?.model?.displayName,
-          !name.isEmpty
-        else { continue }
-        let id = limit.scope?.model?.id ?? "scoped-\(index)"
-        if windows.contains(where: { $0.id == id }) { continue }
-        windows.append(
-          UsageWindow(
-            id: id,
-            label: "\(name) weekly",
-            usedPercent: percent,
-            windowMinutes: 10080,
-            resetsAt: UsageDateParser.iso8601(limit.resetsAt)))
-      }
-    }
-
+    let windows = Self.windows(from: response)
     guard !windows.isEmpty else {
       throw UsageProviderError.unavailable("Anthropic did not return subscription usage windows.")
     }
@@ -146,7 +118,49 @@ public struct AnthropicProvider: UsageProvider {
         ?? ClaudePlanFormatter.plan(from: credentials.rateLimitTier),
       windows: windows,
       source: credentials.source,
-      includedSpend: response.extraUsage?.includedSpend)
+      includedSpend: response.extraUsage?.includedSpend,
+      details: (self.accountProfileURLs.lazy.compactMap(ClaudeAccountProfile.load).first?.details() ?? [])
+        + (response.extraUsage?.isEnabled == false ? [UsageDetail("Extra usage", "Off")] : []))
+  }
+
+  /// The plan windows, then any model-scoped limits, from one usage response.
+  static func windows(from response: ClaudeUsageResponse) -> [UsageWindow] {
+      var windows: [UsageWindow] = []
+      if let fiveHour = response.fiveHour?.window(id: "five-hour", label: "5 hours") {
+        windows.append(fiveHour)
+      }
+      if let sevenDay = response.sevenDay?.window(id: "weekly", label: "Weekly") {
+        windows.append(sevenDay)
+      }
+      if let sonnet = response.sevenDaySonnet?.window(
+        id: "sonnet-weekly", label: "Sonnet weekly")
+      {
+        windows.append(sonnet)
+      }
+      if let opus = response.sevenDayOpus?.window(id: "opus-weekly", label: "Opus weekly") {
+        windows.append(opus)
+      }
+      if let limits = response.limits {
+        for (index, limit) in limits.prefix(28).enumerated() where limit.isActive != false {
+          guard let percent = limit.percent,
+            let name = limit.scope?.model?.displayName,
+            !name.isEmpty
+          else { continue }
+          // Most scoped limits are weekly; a five-hour one says so in its kind.
+          let isFiveHour = limit.kind.map(ClaudeLimit.isFiveHourKind) ?? false
+          let modelID = limit.scope?.model?.id ?? "scoped-\(index)"
+          let id = isFiveHour ? "\(modelID)-five-hour" : modelID
+          if windows.contains(where: { $0.id == id }) { continue }
+          windows.append(
+            UsageWindow(
+              id: id,
+              label: isFiveHour ? "\(name) · 5 hours" : "\(name) weekly",
+              usedPercent: percent,
+              windowMinutes: isFiveHour ? 300 : 10080,
+              resetsAt: UsageDateParser.iso8601(limit.resetsAt)))
+        }
+      }
+    return windows
   }
 
   static let signInExpired = UsageProviderError.unauthorized(
@@ -845,12 +859,30 @@ struct ClaudeLimit: Decodable, Sendable {
   let resetsAt: String?
   let scope: ClaudeLimitScope?
   let isActive: Bool?
+  let kind: String?
 
   enum CodingKeys: String, CodingKey {
+    case kind
     case percent
     case resetsAt = "resets_at"
     case scope
     case isActive = "is_active"
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.percent = try container.decodeIfPresent(Double.self, forKey: .percent)
+    self.resetsAt = try container.decodeIfPresent(String.self, forKey: .resetsAt)
+    self.scope = try container.decodeIfPresent(ClaudeLimitScope.self, forKey: .scope)
+    self.isActive = try container.decodeIfPresent(Bool.self, forKey: .isActive)
+    // Only refines the period; an unexpected shape must not cost the limits.
+    self.kind = try? container.decodeIfPresent(String.self, forKey: .kind)
+  }
+
+  /// Scoped limits are weekly unless their kind names a five-hour period.
+  static func isFiveHourKind(_ kind: String) -> Bool {
+    let normalized = kind.lowercased().replacingOccurrences(of: "-", with: "_")
+    return normalized == "five_hour" || normalized.hasPrefix("five_hour_")
   }
 }
 
@@ -865,5 +897,88 @@ struct ClaudeLimitModel: Decodable, Sendable {
   enum CodingKeys: String, CodingKey {
     case id
     case displayName = "display_name"
+  }
+}
+
+/// The account Claude Code signed in with, from its own settings file. Only
+/// these few display fields are read; tokens never live in this file.
+struct ClaudeAccountProfile: Decodable, Sendable {
+  let emailAddress: String?
+  let organizationName: String?
+  let organizationType: String?
+  let organizationRole: String?
+  let subscriptionCreatedAt: String?
+  let claudeCodeTrialEndsAt: String?
+
+  private struct Settings: Decodable { let oauthAccount: ClaudeAccountProfile? }
+
+  /// Same order as the credential files: the configured directory, then home.
+  static func defaultURLs(environment: [String: String]) -> [URL] {
+    var urls: [URL] = []
+    if let configured = environment["CLAUDE_CONFIG_DIR"], !configured.isEmpty {
+      urls.append(URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        .appendingPathComponent(".claude.json"))
+    }
+    urls.append(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json"))
+    return urls
+  }
+
+  /// The settings file also holds Claude Code's project history and can be
+  /// several megabytes, so it is parsed again only when it changes on disk.
+  private static let cache = ClaudeAccountProfileCache()
+
+  static func load(from url: URL) -> ClaudeAccountProfile? {
+    guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+    else { return nil }
+    let stamp = "\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)-\(values.fileSize ?? 0)"
+    // A cached miss (file without an account) is kept too, so it is not re-read.
+    if let cached = self.cache.value(for: url.path, stamp: stamp) { return cached }
+    let profile = BoundedFileReader.read(url, maximumBytes: 16 * 1_048_576)
+      .flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }?.oauthAccount
+    self.cache.store(profile, for: url.path, stamp: stamp)
+    return profile
+  }
+
+  func details(now: Date = Date()) -> [UsageDetail] {
+    var details: [UsageDetail] = []
+    if let email = self.emailAddress {
+      details.append(UsageDetail("Account", email, isPersonal: true))
+    }
+    // A personal account's organization is just the person's own name again.
+    if let name = self.organizationName, !name.isEmpty,
+      // Consumer plans (claude_pro, claude_max) sit in an automatic
+      // one-person organization named after the account.
+      !(self.organizationType?.lowercased().hasPrefix("claude_") ?? false),
+      !name.localizedCaseInsensitiveContains("'s Organization")
+    {
+      let role = self.organizationRole.map { " · \($0.replacingOccurrences(of: "_", with: " ").capitalized)" } ?? ""
+      details.append(UsageDetail("Organization", name + role, isPersonal: true))
+    }
+    if let created = UsageDateParser.iso8601(self.subscriptionCreatedAt) {
+      details.append(UsageDetail("Subscribed since", UsageDetailFormat.date(created)))
+    }
+    if let trialEnd = UsageDateParser.iso8601(self.claudeCodeTrialEndsAt), trialEnd > now {
+      details.append(UsageDetail("Trial ends", UsageDetailFormat.date(trialEnd)))
+    }
+    return details
+  }
+}
+
+/// One parsed profile per settings path, keyed by modification time and size.
+private final class ClaudeAccountProfileCache: @unchecked Sendable {
+  private let lock = NSLock()
+  private var entries: [String: (stamp: String, profile: ClaudeAccountProfile?)] = [:]
+
+  func value(for path: String, stamp: String) -> ClaudeAccountProfile?? {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    guard let entry = self.entries[path], entry.stamp == stamp else { return nil }
+    return .some(entry.profile)
+  }
+
+  func store(_ profile: ClaudeAccountProfile?, for path: String, stamp: String) {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    self.entries[path] = (stamp, profile)
   }
 }

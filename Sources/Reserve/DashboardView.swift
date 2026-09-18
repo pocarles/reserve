@@ -1272,7 +1272,8 @@ private final class UsageDetailGrid: NSView {
     self.identifier = NSUserInterfaceItemIdentifier("usage-detail-\(summary.provider.rawValue)")
     let usage = summary.localUsage
     let accountData = usage?.origin == .providerAccount
-    var rows: [NSView] = []
+    // Who is signed in and what the provider says about the account come first.
+    var rows: [NSView] = summary.details.map { Self.fact($0.label, $0.value) }
     if let usage {
       rows.append(
         Self.cell(
@@ -1288,6 +1289,24 @@ private final class UsageDetailGrid: NSView {
           // API-equivalent value is modeled from token counts either way, so it
           // carries the approximation mark.
           "≈ \(DashboardFormat.money(usage.apiEquivalentCostUSD))"))
+      if usage.inputTokens > 0 || usage.outputTokens > 0 {
+        rows.append(
+          Self.fact(
+            "Input / output, 30 days",
+            "\(DashboardFormat.tokens(usage.inputTokens)) / \(DashboardFormat.tokens(usage.outputTokens))"))
+      }
+      if usage.cachedInputTokens > 0 || usage.cacheWriteInputTokens > 0 {
+        rows.append(
+          Self.fact(
+            "Cache read / write, 30 days",
+            "\(DashboardFormat.tokens(usage.cachedInputTokens)) / \(DashboardFormat.tokens(usage.cacheWriteInputTokens))"))
+      }
+      if usage.cycleTokens > 0 {
+        rows.append(
+          Self.fact(
+            "This billing cycle",
+            "\(DashboardFormat.tokens(usage.cycleTokens)) tokens · ≈ \(DashboardFormat.money(usage.cycleAPIEquivalentCostUSD))"))
+      }
     }
     if let models = usage?.modelCosts.prefix(3), !models.isEmpty {
       let text = models.map {
@@ -1341,6 +1360,10 @@ private final class UsageDetailGrid: NSView {
           "Plan renews", DashboardFormat.moment(renewal, now: now),
           identifier: "usage-renews-\(summary.provider.rawValue)"))
     }
+    // Anything the status page reports right now, not only a provider-wide outage.
+    for notice in summary.serviceStatus?.notices ?? [] {
+      rows.append(Self.fact("Service", notice))
+    }
     // The data source is deliberately not listed here: it names transports
     // ("Codex app-server", "Claude OAuth") that mean nothing to most people.
     // Settings > Providers still shows it for anyone who wants it.
@@ -1389,6 +1412,29 @@ private final class UsageDetailGrid: NSView {
   /// sentence the banner wraps it in.
   private static func age(_ date: Date, now: Date) -> String {
     DashboardFormat.updated(date, now: now).replacingOccurrences(of: "Updated ", with: "")
+  }
+
+  /// A label and a value that may be long, such as an email address. The value
+  /// takes the remaining width and truncates in the middle, keeping both ends.
+  private static func fact(_ label: String, _ value: String) -> NSView {
+    let caption = ReserveLabel(
+      label, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+    ).fitted()
+    caption.setContentCompressionResistancePriority(.required, for: .horizontal)
+    let valueLabel = ReserveLabel(
+      value, font: ReserveFont.digits(ReserveType.metadata, .semibold), color: ReserveColor.text)
+    valueLabel.lineBreakMode = .byTruncatingMiddle
+    valueLabel.toolTip = value
+    // Measured like the other detail values, but never wider than the room the
+    // caption leaves, so a long value truncates instead of pushing it aside.
+    let spacing: CGFloat = 12
+    let room = DashboardMetrics.cardContentWidth
+      - ceil(caption.attributedStringValue.size().width) - 2 - spacing
+    valueLabel.width(min(ceil(valueLabel.attributedStringValue.size().width) + 2, max(40, room)))
+    let row = NSStackView.row([caption, NSStackView.spacer(), valueLabel], spacing: spacing)
+    row.identifier = NSUserInterfaceItemIdentifier("usage-fact")
+    row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+    return row
   }
 
   private static func cell(

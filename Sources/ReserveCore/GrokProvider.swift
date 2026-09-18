@@ -126,7 +126,13 @@ public struct GrokProvider: UsageProvider {
       windows: windows,
       source: "Grok Build billing API",
       includedSpend: config.includedSpend,
-      billingRenewsAt: isMonthlyBillingPeriod ? reset : nil)
+      billingRenewsAt: isMonthlyBillingPeriod ? reset : nil,
+      details: [
+        config.prepaidBalance.flatMap { $0.val > 0 ? $0 : nil }.map {
+          UsageDetail("Prepaid balance", APIConsumptionClient.money($0.val))
+        },
+        response.onDemandEnabled.map { UsageDetail("On-demand usage", $0 ? "On" : "Off") },
+      ].compactMap { $0 })
   }
 
   private static func isMonthlyBillingPeriod(type: String?, minutes: Int?) -> Bool {
@@ -531,9 +537,11 @@ struct GrokBillingEnvelope: Decodable, Sendable {
   let config: GrokBillingConfig?
   let subscriptionTier: String?
   let legacyConfig: GrokBillingConfig?
+  let onDemandEnabled: Bool?
 
   enum CodingKeys: String, CodingKey {
     case config
+    case onDemandEnabled
     case subscriptionTier
     case subscriptionTierSnake = "subscription_tier"
     case creditUsagePercent
@@ -549,6 +557,7 @@ struct GrokBillingEnvelope: Decodable, Sendable {
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     self.config = try container.decodeIfPresent(GrokBillingConfig.self, forKey: .config)
+    self.onDemandEnabled = try? container.decodeIfPresent(Bool.self, forKey: .onDemandEnabled)
     self.subscriptionTier =
       try container.decodeIfPresent(String.self, forKey: .subscriptionTier)
       ?? container.decodeIfPresent(String.self, forKey: .subscriptionTierSnake)
@@ -599,6 +608,7 @@ struct GrokBillingConfig: Decodable, Sendable {
   let onDemandCap: GrokCent?
   let onDemandUsed: GrokCent?
   let isUnifiedBillingUser: Bool?
+  var prepaidBalance: GrokCent? = nil
 
   var usedPercent: Double? {
     if let creditUsagePercent { return creditUsagePercent }

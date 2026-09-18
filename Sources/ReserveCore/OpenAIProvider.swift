@@ -35,16 +35,20 @@ public struct OpenAIProvider: UsageProvider {
     let response = try rpc.decodeResult(OpenAIRateLimitsResponse.self, from: limitMessage)
     let selected = response.rateLimitsByLimitId?["codex"] ?? response.rateLimits
 
+    // The account read is local to the helper. It fills a missing plan, and the
+    // signed-in email only when details are wanted (the same moment account
+    // activity is), so an ordinary refresh does not pay for it.
     var planName = OpenAIPlanFormatter.plan(from: selected.planType)
-    if planName == nil,
+    var account: OpenAIAccountResponse.Account?
+    if planName == nil || self.includeAccountActivity,
       let message = try? await rpc.request(
-        method: "account/read",
-        params: ["refreshToken": false],
-        timeout: .seconds(3)),
-      let account = try? rpc.decodeResult(OpenAIAccountResponse.self, from: message)
+      method: "account/read",
+      params: ["refreshToken": false],
+      timeout: .seconds(3))
     {
-      planName = OpenAIPlanFormatter.plan(from: account.account?.planType)
+      account = (try? rpc.decodeResult(OpenAIAccountResponse.self, from: message))?.account
     }
+    if planName == nil { planName = OpenAIPlanFormatter.plan(from: account?.planType) }
 
     let windows = response.usageWindows
     guard !windows.isEmpty else {
@@ -66,7 +70,65 @@ public struct OpenAIProvider: UsageProvider {
       windows: windows,
       source: "Codex app-server",
       availableResetCount: response.rateLimitResetCredits?.availableCount,
-      accountTokenActivity: activity)
+      accountTokenActivity: activity,
+      details: OpenAIDetails.details(limits: selected, account: account, activity: activity))
+  }
+}
+
+/// Facts the Codex helper reports beyond the limit windows.
+enum OpenAIDetails {
+  static func details(
+    limits: OpenAIRateLimitSnapshot,
+    account: OpenAIAccountResponse.Account?,
+    activity: OpenAIAccountActivity?
+  ) -> [UsageDetail] {
+    var details: [UsageDetail] = []
+    if let email = account?.email, !email.isEmpty {
+      details.append(UsageDetail("Account", email, isPersonal: true))
+    }
+    if let reached = self.blockedReason(limits) { details.append(UsageDetail("Status", reached)) }
+    if let credits = limits.credits {
+      if credits.unlimited == true {
+        details.append(UsageDetail("Credits", "Unlimited"))
+      } else if credits.hasCredits == true, let balance = credits.balance,
+        let value = Double(balance), value.isFinite
+      {
+        details.append(UsageDetail("Credits", "\(UsageDetailFormat.number(value)) left"))
+      }
+    }
+    if let limit = limits.individualLimit {
+      var text = "\(limit.used) of \(limit.limit) used"
+      if let remaining = limit.remainingPercent { text += " · \(remaining)% left" }
+      // Seconds since 1970; anything outside a sane range is not a date.
+      if let reset = limit.resetsAt, (1_500_000_000...4_102_444_800) ~= reset {
+        text += " · resets \(UsageDetailFormat.date(Date(timeIntervalSince1970: TimeInterval(reset))))"
+      }
+      details.append(UsageDetail("Spend cap", text))
+    }
+    if let activity {
+      if let lifetime = activity.lifetimeTokens {
+        details.append(UsageDetail("Lifetime tokens", UsageDetailFormat.tokens(lifetime)))
+      }
+      if let peak = activity.peakDailyTokens {
+        details.append(UsageDetail("Busiest day", "\(UsageDetailFormat.tokens(peak)) tokens"))
+      }
+      if let current = activity.currentStreakDays, let longest = activity.longestStreakDays {
+        details.append(UsageDetail("Streak", "\(current) days · longest \(longest) days"))
+      }
+    }
+    return details
+  }
+
+  static func blockedReason(_ limits: OpenAIRateLimitSnapshot) -> String? {
+    if limits.spendControlReached == true { return "Spend cap reached" }
+    switch limits.rateLimitReachedType {
+    case "rate_limit_reached": return "Usage limit reached"
+    case "workspace_owner_credits_depleted", "workspace_member_credits_depleted":
+      return "Workspace credits used up"
+    case "workspace_owner_usage_limit_reached", "workspace_member_usage_limit_reached":
+      return "Workspace usage limit reached"
+    default: return nil
+    }
   }
 }
 
@@ -179,6 +241,23 @@ struct OpenAIRateLimitSnapshot: Decodable, Sendable {
   let secondary: OpenAIRateLimitWindow?
   let planType: String?
   let limitName: String?
+  var credits: Credits?
+  var individualLimit: SpendLimit?
+  var rateLimitReachedType: String?
+  var spendControlReached: Bool?
+
+  struct Credits: Decodable, Sendable {
+    let hasCredits: Bool?
+    let unlimited: Bool?
+    let balance: String?
+  }
+
+  struct SpendLimit: Decodable, Sendable {
+    let used: String
+    let limit: String
+    let remainingPercent: Int?
+    let resetsAt: Int?
+  }
 
   init() { primary = nil; secondary = nil; planType = nil; limitName = nil }
 
@@ -188,6 +267,7 @@ struct OpenAIRateLimitSnapshot: Decodable, Sendable {
     case planType
     case planTypeSnake = "plan_type"
     case limitName
+    case credits, individualLimit, rateLimitReachedType, spendControlReached
   }
 
   init(from decoder: Decoder) throws {
@@ -198,6 +278,11 @@ struct OpenAIRateLimitSnapshot: Decodable, Sendable {
     self.planType =
       try container.decodeIfPresent(String.self, forKey: .planType)
       ?? container.decodeIfPresent(String.self, forKey: .planTypeSnake)
+    // Optional extras: a shape Reserve does not recognise must never cost the limits.
+    self.credits = try? container.decodeIfPresent(Credits.self, forKey: .credits)
+    self.individualLimit = try? container.decodeIfPresent(SpendLimit.self, forKey: .individualLimit)
+    self.rateLimitReachedType = try? container.decodeIfPresent(String.self, forKey: .rateLimitReachedType)
+    self.spendControlReached = try? container.decodeIfPresent(Bool.self, forKey: .spendControlReached)
   }
 }
 
@@ -257,5 +342,6 @@ struct OpenAIAccountResponse: Decodable, Sendable {
 
   struct Account: Decodable, Sendable {
     let planType: String?
+    let email: String?
   }
 }
