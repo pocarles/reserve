@@ -18,6 +18,7 @@ public struct AnthropicProvider: UsageProvider {
   private let ineffectiveRenewal: ClaudeIneffectiveRenewalHook
   private let keychainCandidateLoader: ClaudeKeychainCandidateLoader?
   private let credentialFileURLs: [URL]?
+  private let accountProfileURL: URL?
 
   public init(
     environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -40,6 +41,7 @@ public struct AnthropicProvider: UsageProvider {
     self.ineffectiveRenewal = ClaudeSessionRenewer.ineffectiveRenewalHook
     self.keychainCandidateLoader = nil
     self.credentialFileURLs = nil
+    self.accountProfileURL = ClaudeAccountProfile.defaultURL(environment: environment)
   }
 
   /// The renewal and Keychain hooks exist so tests never launch Claude Code or
@@ -53,7 +55,8 @@ public struct AnthropicProvider: UsageProvider {
     renewer: ClaudeSessionRenewalHook? = nil,
     ineffectiveRenewal: ClaudeIneffectiveRenewalHook? = nil,
     keychainCandidateLoader: ClaudeKeychainCandidateLoader? = nil,
-    credentialFileURLs: [URL]? = nil
+    credentialFileURLs: [URL]? = nil,
+    accountProfileURL: URL? = nil
   ) {
     self.environment = environment
     self.allowKeychainRead = allowKeychainRead
@@ -65,6 +68,7 @@ public struct AnthropicProvider: UsageProvider {
     self.ineffectiveRenewal = ineffectiveRenewal ?? ClaudeSessionRenewer.ineffectiveRenewalHook
     self.keychainCandidateLoader = keychainCandidateLoader
     self.credentialFileURLs = credentialFileURLs
+    self.accountProfileURL = accountProfileURL
   }
 
   public func fetch() async throws -> UsageSnapshot {
@@ -125,14 +129,21 @@ public struct AnthropicProvider: UsageProvider {
           let name = limit.scope?.model?.displayName,
           !name.isEmpty
         else { continue }
-        let id = limit.scope?.model?.id ?? "scoped-\(index)"
+        // Most scoped limits are weekly; a five-hour one says so in its kind.
+        let isFiveHour = limit.kind.map {
+          $0.localizedCaseInsensitiveContains("five_hour")
+            || $0.localizedCaseInsensitiveContains("5h")
+            || $0.localizedCaseInsensitiveContains("session")
+        } ?? false
+        let modelID = limit.scope?.model?.id ?? "scoped-\(index)"
+        let id = isFiveHour ? "\(modelID)-five-hour" : modelID
         if windows.contains(where: { $0.id == id }) { continue }
         windows.append(
           UsageWindow(
             id: id,
-            label: "\(name) weekly",
+            label: isFiveHour ? "\(name) · 5 hours" : "\(name) weekly",
             usedPercent: percent,
-            windowMinutes: 10080,
+            windowMinutes: isFiveHour ? 300 : 10080,
             resetsAt: UsageDateParser.iso8601(limit.resetsAt)))
       }
     }
@@ -146,7 +157,9 @@ public struct AnthropicProvider: UsageProvider {
         ?? ClaudePlanFormatter.plan(from: credentials.rateLimitTier),
       windows: windows,
       source: credentials.source,
-      includedSpend: response.extraUsage?.includedSpend)
+      includedSpend: response.extraUsage?.includedSpend,
+      details: (self.accountProfileURL.flatMap(ClaudeAccountProfile.load)?.details() ?? [])
+        + (response.extraUsage?.isEnabled == false ? [UsageDetail("Extra usage", "Off")] : []))
   }
 
   static let signInExpired = UsageProviderError.unauthorized(
@@ -845,8 +858,10 @@ struct ClaudeLimit: Decodable, Sendable {
   let resetsAt: String?
   let scope: ClaudeLimitScope?
   let isActive: Bool?
+  let kind: String?
 
   enum CodingKeys: String, CodingKey {
+    case kind
     case percent
     case resetsAt = "resets_at"
     case scope
@@ -865,5 +880,53 @@ struct ClaudeLimitModel: Decodable, Sendable {
   enum CodingKeys: String, CodingKey {
     case id
     case displayName = "display_name"
+  }
+}
+
+/// The account Claude Code signed in with, from its own settings file. Only
+/// these few display fields are read; tokens never live in this file.
+struct ClaudeAccountProfile: Decodable, Sendable {
+  let emailAddress: String?
+  let organizationName: String?
+  let organizationType: String?
+  let organizationRole: String?
+  let subscriptionCreatedAt: String?
+  let claudeCodeTrialEndsAt: String?
+
+  private struct Settings: Decodable { let oauthAccount: ClaudeAccountProfile? }
+
+  static func defaultURL(environment: [String: String]) -> URL {
+    if let configured = environment["CLAUDE_CONFIG_DIR"], !configured.isEmpty {
+      return URL(fileURLWithPath: (configured as NSString).expandingTildeInPath)
+        .appendingPathComponent(".claude.json")
+    }
+    return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude.json")
+  }
+
+  static func load(from url: URL) -> ClaudeAccountProfile? {
+    guard let data = BoundedFileReader.read(url, maximumBytes: 16 * 1_048_576) else { return nil }
+    return (try? JSONDecoder().decode(Settings.self, from: data))?.oauthAccount
+  }
+
+  func details(now: Date = Date()) -> [UsageDetail] {
+    var details: [UsageDetail] = []
+    if let email = self.emailAddress { details.append(UsageDetail("Account", email)) }
+    // A personal account's organization is just the person's own name again.
+    if let name = self.organizationName, !name.isEmpty,
+      // Consumer plans (claude_pro, claude_max) sit in an automatic
+      // one-person organization named after the account.
+      !(self.organizationType?.lowercased().hasPrefix("claude_") ?? false),
+      !name.localizedCaseInsensitiveContains("'s Organization")
+    {
+      let role = self.organizationRole.map { " · \($0.replacingOccurrences(of: "_", with: " ").capitalized)" } ?? ""
+      details.append(UsageDetail("Organization", name + role))
+    }
+    if let created = UsageDateParser.iso8601(self.subscriptionCreatedAt) {
+      details.append(UsageDetail("Subscribed since", UsageDetailFormat.date(created)))
+    }
+    if let trialEnd = UsageDateParser.iso8601(self.claudeCodeTrialEndsAt), trialEnd > now {
+      details.append(UsageDetail("Trial ends", UsageDetailFormat.date(trialEnd)))
+    }
+    return details
   }
 }

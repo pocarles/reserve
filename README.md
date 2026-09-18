@@ -247,7 +247,10 @@ Local totals come from session logs under `~/.claude/projects`,
 retained. Reserve never scans Cursor transcripts or prompt text. It may read
 `~/.claude/.credentials.json` and
 `~/.grok/auth.json` when present (`GROK_AUTH_PATH` and `GROK_HOME` are
-honoured, in that order). Claude Code can instead keep its sign-in in
+honoured, in that order). To name the signed-in Claude account in a card's
+expanded details, Reserve also reads the account email, organization and
+subscription dates from Claude Code's `~/.claude.json` (or
+`$CLAUDE_CONFIG_DIR/.claude.json`); nothing else in that file is used. Claude Code can instead keep its sign-in in
 Keychain; Reserve reads it only after the user chooses **Allow access**, through
 the signed macOS `security` tool, and retains it in memory only. Reserve starts
 that tool directly, captures bounded output through a private pipe, and never

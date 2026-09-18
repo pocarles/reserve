@@ -22,19 +22,24 @@ public struct ProviderServiceStatus: Codable, Equatable, Sendable {
   public let detail: String
   public let pageURL: URL
   public let fetchedAt: Date
+  /// Open incidents, affected components and upcoming maintenance, one line
+  /// each, for the expanded details. Optional so older caches still decode.
+  public let notices: [String]?
 
   public init(
     provider: ProviderID,
     health: ServiceHealth,
     detail: String,
     pageURL: URL,
-    fetchedAt: Date = Date()
+    fetchedAt: Date = Date(),
+    notices: [String] = []
   ) {
     self.provider = provider
     self.health = health
     self.detail = String(detail.prefix(256))
     self.pageURL = pageURL
     self.fetchedAt = fetchedAt
+    self.notices = notices.isEmpty ? nil : notices.prefix(4).map { String($0.prefix(160)) }
   }
 }
 
@@ -109,7 +114,8 @@ public actor ServiceStatusClient {
       health: health,
       detail: summary.status?.description ?? health.displayName,
       pageURL: Self.pageURL(provider),
-      fetchedAt: now)
+      fetchedAt: now,
+      notices: summary.notices(now: now))
   }
 
   static func decodeXAI(_ data: Data, now: Date = Date()) -> ProviderServiceStatus {
@@ -133,7 +139,8 @@ public actor ServiceStatusClient {
       health: ongoing == nil ? .operational : (isOutage ? .outage : .degraded),
       detail: title ?? "All systems operational",
       pageURL: Self.pageURL(.grok),
-      fetchedAt: now)
+      fetchedAt: now,
+      notices: title.map { [$0] } ?? [])
   }
 
   private static func pageURL(_ provider: ProviderID) -> URL {
@@ -147,7 +154,69 @@ private struct StatuspageSummary: Decodable {
     let description: String?
   }
 
+  struct Component: Decodable {
+    let name: String?
+    let status: String?
+    let group: Bool?
+  }
+
+  struct Incident: Decodable {
+    let name: String?
+    let status: String?
+  }
+
+  struct Maintenance: Decodable {
+    let name: String?
+    let status: String?
+    let scheduledFor: String?
+
+    enum CodingKeys: String, CodingKey {
+      case name, status
+      case scheduledFor = "scheduled_for"
+    }
+  }
+
   let status: Status?
+  let components: [Component]?
+  let incidents: [Incident]?
+  let scheduledMaintenances: [Maintenance]?
+
+  enum CodingKeys: String, CodingKey {
+    case status, components, incidents
+    case scheduledMaintenances = "scheduled_maintenances"
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.status = try container.decodeIfPresent(Status.self, forKey: .status)
+    // The overall indicator is what matters; the lists are best effort.
+    self.components = try? container.decodeIfPresent([Component].self, forKey: .components)
+    self.incidents = try? container.decodeIfPresent([Incident].self, forKey: .incidents)
+    self.scheduledMaintenances = try? container.decodeIfPresent(
+      [Maintenance].self, forKey: .scheduledMaintenances)
+  }
+
+  func notices(now: Date) -> [String] {
+    var notices: [String] = []
+    for incident in (self.incidents ?? []).prefix(8)
+    where incident.status != "resolved" && incident.status != "postmortem" {
+      if let name = incident.name, !name.isEmpty { notices.append(name) }
+    }
+    for component in (self.components ?? []).prefix(64)
+    where component.group != true && component.status.map({ $0 != "operational" }) == true {
+      guard let name = component.name, let status = component.status else { continue }
+      notices.append("\(name): \(status.replacingOccurrences(of: "_", with: " "))")
+    }
+    for maintenance in (self.scheduledMaintenances ?? []).prefix(8)
+    where maintenance.status != "completed" {
+      guard let name = maintenance.name, !name.isEmpty else { continue }
+      let when = UsageDateParser.iso8601(maintenance.scheduledFor).map {
+        " · \($0.formatted(date: .abbreviated, time: .shortened))"
+      } ?? ""
+      notices.append("Maintenance: \(name)\(when)")
+    }
+    return notices
+  }
 }
 
 private enum StatusError: Error {

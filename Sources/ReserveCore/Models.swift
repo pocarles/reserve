@@ -187,6 +187,65 @@ public enum UsagePaceState: Equatable, Sendable {
   }
 }
 
+/// One provider fact that only appears in a card's expanded details, such as
+/// the signed-in account or a credit balance. Providers phrase the value;
+/// the dashboard shows it as a plain label and value.
+public struct UsageDetail: Codable, Equatable, Sendable {
+  public static let maximumCount = 16
+  public static let maximumLabelCharacters = 40
+  public static let maximumValueCharacters = 120
+  public let label: String
+  public let value: String
+
+  public init(_ label: String, _ value: String) {
+    self.label = String(label.trimmingCharacters(in: .whitespacesAndNewlines)
+      .prefix(Self.maximumLabelCharacters))
+    self.value = String(value.trimmingCharacters(in: .whitespacesAndNewlines)
+      .prefix(Self.maximumValueCharacters))
+  }
+
+  private enum CodingKeys: String, CodingKey { case label, value }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      try container.decode(String.self, forKey: .label),
+      try container.decode(String.self, forKey: .value))
+  }
+
+  /// Drops empty entries and repeated labels, keeping the first of each.
+  public static func sanitized(_ details: [UsageDetail]) -> [UsageDetail] {
+    var seen: Set<String> = []
+    return Array(
+      details.filter { !$0.label.isEmpty && !$0.value.isEmpty && seen.insert($0.label).inserted }
+        .prefix(Self.maximumCount))
+  }
+}
+
+/// Shared phrasing for detail values, so every provider reads the same way.
+public enum UsageDetailFormat {
+  public static func number(_ value: Double) -> String {
+    let formatter = NumberFormatter()
+    formatter.numberStyle = .decimal
+    formatter.maximumFractionDigits = value < 100 ? 2 : 0
+    return formatter.string(from: NSNumber(value: value)) ?? String(format: "%.0f", value)
+  }
+
+  /// 1.2K, 3.4M, 5.6B: token counts are read at a glance, not to the unit.
+  public static func tokens(_ value: Int64) -> String {
+    let amount = Double(value)
+    for (threshold, suffix) in [(1e9, "B"), (1e6, "M"), (1e3, "K")] where amount >= threshold {
+      let scaled = amount / threshold
+      return (scaled >= 100 ? String(format: "%.0f", scaled) : String(format: "%.1f", scaled)) + suffix
+    }
+    return String(value)
+  }
+
+  public static func date(_ date: Date) -> String {
+    date.formatted(date: .abbreviated, time: .omitted)
+  }
+}
+
 public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public static let maximumWindows = 32
   public static let maximumPlanNameCharacters = 96
@@ -207,6 +266,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
   public let checkedAt: Date
   public let availableResetCount: Int?
   public let accountTokenActivity: OpenAIAccountActivity?
+  public let details: [UsageDetail]
 
   public init(
     provider: ProviderID,
@@ -223,7 +283,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     observationTimeKnown: Bool = true,
     checkedAt: Date? = nil,
     availableResetCount: Int? = nil,
-    accountTokenActivity: OpenAIAccountActivity? = nil
+    accountTokenActivity: OpenAIAccountActivity? = nil,
+    details: [UsageDetail] = []
   ) {
     self.provider = provider
     self.planName = planName.map { String($0.prefix(Self.maximumPlanNameCharacters)) }
@@ -240,12 +301,14 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     self.checkedAt = checkedAt ?? fetchedAt
     self.availableResetCount = availableResetCount.map { max(0, $0) }
     self.accountTokenActivity = accountTokenActivity
+    self.details = UsageDetail.sanitized(details)
   }
 
   private enum CodingKeys: String, CodingKey {
     case provider, planName, windows, fetchedAt, source, includedSpend, billingRenewsAt
     case monthlyPriceMinorUnits, accountUsage, detailedUsageUnavailable
     case creditBalanceMinorUnits, observationTimeKnown, checkedAt, availableResetCount, accountTokenActivity
+    case details
   }
 
   public init(from decoder: Decoder) throws {
@@ -268,7 +331,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
         ?? true,
       checkedAt: try container.decodeIfPresent(Date.self, forKey: .checkedAt),
       availableResetCount: try container.decodeIfPresent(Int.self, forKey: .availableResetCount),
-      accountTokenActivity: try container.decodeIfPresent(OpenAIAccountActivity.self, forKey: .accountTokenActivity))
+      accountTokenActivity: try container.decodeIfPresent(OpenAIAccountActivity.self, forKey: .accountTokenActivity),
+      details: try container.decodeIfPresent([UsageDetail].self, forKey: .details) ?? [])
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -287,6 +351,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
     try container.encode(self.checkedAt, forKey: .checkedAt)
     try container.encodeIfPresent(self.availableResetCount, forKey: .availableResetCount)
     try container.encodeIfPresent(self.accountTokenActivity, forKey: .accountTokenActivity)
+    if !self.details.isEmpty { try container.encode(self.details, forKey: .details) }
     if self.detailedUsageUnavailable {
       try container.encode(true, forKey: .detailedUsageUnavailable)
     }
@@ -314,7 +379,8 @@ public struct UsageSnapshot: Codable, Equatable, Sendable, Identifiable {
       detailedUsageUnavailable: self.detailedUsageUnavailable,
       creditBalanceMinorUnits: self.creditBalanceMinorUnits,
       observationTimeKnown: self.observationTimeKnown, checkedAt: self.checkedAt,
-      availableResetCount: self.availableResetCount, accountTokenActivity: self.accountTokenActivity)
+      availableResetCount: self.availableResetCount, accountTokenActivity: self.accountTokenActivity,
+      details: self.details)
   }
 }
 

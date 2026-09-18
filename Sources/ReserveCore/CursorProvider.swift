@@ -211,7 +211,34 @@ public struct CursorProvider: UsageProvider {
       billingRenewsAt: billingEnd,
       monthlyPriceMinorUnits: monthlyPrice,
       accountUsage: accountUsage,
-      detailedUsageUnavailable: detailedUsageUnavailable)
+      detailedUsageUnavailable: detailedUsageUnavailable,
+      details: Self.details(current: current, includedCents: plan.planInfo?.includedAmountCents))
+  }
+
+  /// Plan totals behind the two model meters, and a team's shared pool.
+  static func details(
+    current: CursorCurrentPeriodUsageResponse, includedCents: Int?
+  ) -> [UsageDetail] {
+    var details: [UsageDetail] = []
+    let usage = current.planUsage
+    if let spent = usage?.totalSpend ?? usage?.includedSpend, spent >= 0,
+      let limit = usage?.limit ?? includedCents, limit > 0
+    {
+      let percent = usage?.totalPercentUsed ?? Double(spent) / Double(limit) * 100
+      details.append(UsageDetail(
+        "Included usage",
+        "\(APIConsumptionClient.money(spent)) of \(APIConsumptionClient.money(limit)) · \(Int(min(100, percent).rounded()))% used"))
+    } else if let percent = usage?.totalPercentUsed {
+      details.append(UsageDetail("Included usage", "\(Int(min(100, percent).rounded()))% used"))
+    }
+    if let pool = current.spendLimitUsage, let limit = pool.overallLimit, limit > 0,
+      let used = pool.overallUsed, used >= 0
+    {
+      details.append(UsageDetail(
+        "Team pool",
+        "\(APIConsumptionClient.money(used)) of \(APIConsumptionClient.money(limit)) used"))
+    }
+    return details
   }
 
   public static func keychainCredentialIsAvailableWithoutPrompt() -> Bool {
