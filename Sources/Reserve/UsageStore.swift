@@ -196,6 +196,8 @@ final class UsageStore {
   /// Which provider row is open in the popover. Transient interface state, so
   /// it is deliberately not persisted.
   var expandedProvider: ProviderID?
+  /// The one API row whose details are open, if any.
+  var expandedAPIProvider: APIConsumptionProvider?
   private var staleProviders: Set<ProviderID> = []
   private var incidentProviders: Set<ProviderID> = []
   private let localUsageScanInterval: TimeInterval = 30 * 60

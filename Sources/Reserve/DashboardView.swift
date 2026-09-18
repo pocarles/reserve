@@ -14,6 +14,8 @@ struct DashboardActions {
   /// Enabled API measurements. Empty unless a key has been saved, so the
   /// section stays out of the subscription view.
   let apiConsumptionReadings: () -> [APIConsumptionReading]
+  /// Opens or closes one API row's details.
+  var toggleAPIDetail: (APIConsumptionProvider) -> Void = { _ in }
 }
 
 @MainActor
@@ -32,6 +34,7 @@ struct APIConsumptionReading {
   let snapshot: APIConsumptionSnapshot?
   let error: String?
   let isRefreshing: Bool
+  var isExpanded = false
 }
 
 @MainActor
@@ -122,6 +125,8 @@ final class DashboardViewController: NSViewController {
       parts.append(reading.snapshot.map { String($0.primary?.usedMinorUnits ?? 0) } ?? "-")
       parts.append(reading.snapshot?.breakdown.map(\.id).joined(separator: ",") ?? "-")
       parts.append(reading.snapshot?.note?.headline ?? "-")
+      parts.append(reading.isExpanded ? "open" : "-")
+      parts.append(reading.snapshot?.details.map { $0.label + "=" + $0.value }.joined(separator: ",") ?? "-")
     }
     return parts.joined(separator: "\u{1}")
   }
@@ -248,7 +253,7 @@ final class UsageDashboardView: NSView {
       last = empty
     }
     if let consumption = APIConsumptionSection(
-      readings: actions.apiConsumptionReadings(), now: now)
+      readings: actions.apiConsumptionReadings(), now: now, toggle: actions.toggleAPIDetail)
     {
       stack.addArrangedSubview(consumption)
       last = consumption
@@ -447,7 +452,10 @@ final class DashboardMenuButton: NSButton {
 /// API spend, kept apart from subscription limits. Absent unless a key was saved.
 @MainActor
 private final class APIConsumptionSection: NSView {
-  init?(readings: [APIConsumptionReading], now: Date) {
+  init?(
+    readings: [APIConsumptionReading], now: Date,
+    toggle: @escaping (APIConsumptionProvider) -> Void = { _ in }
+  ) {
     guard !readings.isEmpty else { return nil }
     super.init(frame: .zero)
     self.identifier = NSUserInterfaceItemIdentifier("api-consumption")
@@ -458,7 +466,8 @@ private final class APIConsumptionSection: NSView {
       color: ReserveColor.muted)
     var rows: [NSView] = [title]
     for reading in readings {
-      rows.append(Self.row(reading, now: now))
+      rows.append(Self.row(reading, now: now, toggle: toggle))
+      if reading.isExpanded { rows.append(contentsOf: Self.details(reading)) }
     }
     let stack = NSStackView.column(rows, spacing: 7)
     stack.translatesAutoresizingMaskIntoConstraints = false
@@ -481,7 +490,48 @@ private final class APIConsumptionSection: NSView {
     path.fill()
   }
 
-  private static func row(_ reading: APIConsumptionReading, now: Date) -> NSView {
+  /// Everything the provider reported beyond the headline, plus the full error
+  /// when there is one, since the row can only show its start.
+  private static func details(_ reading: APIConsumptionReading) -> [NSView] {
+    // Indented to the provider name, so the details read as belonging to it.
+    let indent: CGFloat = 32
+    let width = DashboardMetrics.contentWidth - 24 - indent
+    var facts = reading.snapshot?.details.map {
+      DashboardFact.row($0.label, $0.value, width: width)
+    } ?? []
+    // The row already shows a short error in full; only a long one is repeated.
+    if let error = reading.error, error.count > 44 {
+      let note = ReserveLabel(
+        error, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted)
+      note.usesSingleLineMode = false
+      note.cell?.wraps = true
+      note.cell?.isScrollable = false
+      note.lineBreakMode = .byWordWrapping
+      note.maximumNumberOfLines = 3
+      note.preferredMaxLayoutWidth = width
+      note.widthAnchor.constraint(equalToConstant: width).isActive = true
+      facts.insert(note, at: 0)
+    }
+    if facts.isEmpty {
+      facts.append(
+        reading.error != nil
+          ? DashboardFact.row("To fix", "Replace the key in Settings → API", width: width)
+          : DashboardFact.row("Details", "Nothing more reported", width: width))
+    }
+    return facts.map { fact in
+      let gutter = NSView()
+      gutter.translatesAutoresizingMaskIntoConstraints = false
+      gutter.widthAnchor.constraint(equalToConstant: indent).isActive = true
+      let line = NSStackView.row([gutter, fact], spacing: 0)
+      line.identifier = NSUserInterfaceItemIdentifier("api-detail-\(reading.provider.rawValue)")
+      return line
+    }
+  }
+
+  private static func row(
+    _ reading: APIConsumptionReading, now: Date,
+    toggle: @escaping (APIConsumptionProvider) -> Void
+  ) -> NSView {
     let logo = ProviderLogo(api: reading.provider)
     let name = ReserveLabel(
       reading.provider.displayName,
@@ -522,7 +572,11 @@ private final class APIConsumptionSection: NSView {
       detail, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
     ).flexible()
     caption.toolTip = reading.error ?? reading.snapshot?.breakdownSummary ?? detail
-    let row = NSStackView.row([logo, name, amount, caption], spacing: 8)
+    let disclosure = APIDetailDisclosureButton(
+      provider: reading.provider, isExpanded: reading.isExpanded, action: toggle)
+    // The spacer takes the spare width, so every row's chevron lines up on the right.
+    let row = NSStackView.row(
+      [logo, name, amount, caption, NSStackView.spacer(), disclosure], spacing: 8)
     row.identifier = NSUserInterfaceItemIdentifier(
       "api-consumption-\(reading.provider.rawValue)")
     row.widthAnchor.constraint(
@@ -1263,6 +1317,46 @@ final class DetailDisclosureButton: NSButton {
   @objc private func performAction() { self.handler(self.provider) }
 }
 
+/// The same chevron for an API row. A separate type because the row belongs to
+/// an API account, not to a subscription provider.
+@MainActor
+final class APIDetailDisclosureButton: NSButton {
+  private let provider: APIConsumptionProvider
+  private let handler: (APIConsumptionProvider) -> Void
+
+  init(
+    provider: APIConsumptionProvider, isExpanded: Bool,
+    action: @escaping (APIConsumptionProvider) -> Void
+  ) {
+    self.provider = provider
+    self.handler = action
+    super.init(frame: .zero)
+    self.title = ""
+    self.image = NSImage(
+      systemSymbolName: isExpanded ? "chevron.up" : "chevron.down",
+      accessibilityDescription: isExpanded ? "Hide details" : "Show details")
+    self.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+    self.contentTintColor = ReserveColor.muted
+    self.isBordered = false
+    self.toolTip = isExpanded ? "Hide details" : "Show everything this key reports"
+    self.setAccessibilityLabel(
+      "\(isExpanded ? "Hide" : "Show") \(provider.displayName) API details")
+    self.identifier = NSUserInterfaceItemIdentifier("disclose-api-\(provider.rawValue)")
+    self.target = self
+    self.action = #selector(self.performAction)
+    self.widthAnchor.constraint(equalToConstant: 18).isActive = true
+    self.heightAnchor.constraint(equalToConstant: 18).isActive = true
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func resetCursorRects() {
+    self.addCursorRect(self.bounds, cursor: .pointingHand)
+  }
+
+  @objc private func performAction() { self.handler(self.provider) }
+}
+
 /// Layer 2: activity and provider value, the numbers the glance view no longer
 /// carries.
 @MainActor
@@ -1417,6 +1511,16 @@ private final class UsageDetailGrid: NSView {
   /// A label and a value that may be long, such as an email address. The value
   /// takes the remaining width and truncates in the middle, keeping both ends.
   private static func fact(_ label: String, _ value: String) -> NSView {
+    DashboardFact.row(label, value, width: DashboardMetrics.cardContentWidth)
+  }
+}
+
+/// A label and a value that may be long, such as an email address or a model
+/// description. The value is measured, but never wider than the room the
+/// caption leaves, so it truncates in the middle instead of pushing it aside.
+@MainActor
+enum DashboardFact {
+  static func row(_ label: String, _ value: String, width: CGFloat) -> NSView {
     let caption = ReserveLabel(
       label, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
     ).fitted()
@@ -1428,14 +1532,16 @@ private final class UsageDetailGrid: NSView {
     // Measured like the other detail values, but never wider than the room the
     // caption leaves, so a long value truncates instead of pushing it aside.
     let spacing: CGFloat = 12
-    let room = DashboardMetrics.cardContentWidth
-      - ceil(caption.attributedStringValue.size().width) - 2 - spacing
+    let room = width - ceil(caption.attributedStringValue.size().width) - 2 - spacing
     valueLabel.width(min(ceil(valueLabel.attributedStringValue.size().width) + 2, max(40, room)))
     let row = NSStackView.row([caption, NSStackView.spacer(), valueLabel], spacing: spacing)
     row.identifier = NSUserInterfaceItemIdentifier("usage-fact")
-    row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+    row.widthAnchor.constraint(equalToConstant: width).isActive = true
     return row
   }
+}
+
+extension UsageDetailGrid {
 
   private static func cell(
     _ label: String, _ value: String, identifier: String? = nil,
