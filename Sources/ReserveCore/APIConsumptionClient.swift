@@ -201,6 +201,8 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
   public let note: APIConsumptionNote?
   public let fetchedAt: Date
   public let source: String
+  /// Everything else the provider reported, shown only when the row is opened.
+  public let details: [UsageDetail]
 
   public init(
     provider: APIConsumptionProvider,
@@ -208,9 +210,11 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
     breakdown: [APIConsumptionItem] = [],
     note: APIConsumptionNote? = nil,
     fetchedAt: Date = Date(),
-    source: String
+    source: String,
+    details: [UsageDetail] = []
   ) {
     self.provider = provider
+    self.details = UsageDetail.sanitized(details)
     self.note = note
     self.windows = Array(windows.prefix(Self.maximumWindows))
     self.breakdown = Array(
@@ -223,7 +227,19 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
   }
 
   private enum CodingKeys: String, CodingKey {
-    case provider, windows, breakdown, note, fetchedAt, source
+    case provider, windows, breakdown, note, fetchedAt, source, details
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(self.provider, forKey: .provider)
+    try container.encode(self.windows, forKey: .windows)
+    try container.encode(self.breakdown, forKey: .breakdown)
+    try container.encodeIfPresent(self.note, forKey: .note)
+    try container.encode(self.fetchedAt, forKey: .fetchedAt)
+    try container.encode(self.source, forKey: .source)
+    let persistable = self.details.filter { !$0.isPersonal }
+    if !persistable.isEmpty { try container.encode(persistable, forKey: .details) }
   }
 
   public init(from decoder: Decoder) throws {
@@ -234,7 +250,8 @@ public struct APIConsumptionSnapshot: Codable, Equatable, Sendable, Identifiable
       breakdown: try container.decodeIfPresent([APIConsumptionItem].self, forKey: .breakdown) ?? [],
       note: try container.decodeIfPresent(APIConsumptionNote.self, forKey: .note),
       fetchedAt: try container.decode(Date.self, forKey: .fetchedAt),
-      source: try container.decode(String.self, forKey: .source))
+      source: try container.decode(String.self, forKey: .source),
+      details: (try? container.decodeIfPresent([UsageDetail].self, forKey: .details)) ?? [])
   }
 
   /// The one contributor worth naming at a glance: present only when a single
@@ -442,11 +459,14 @@ public struct APIConsumptionClient: Sendable {
     var minorUnits = 0
     var currency = "USD"
     var byLineItem: [String: Int] = [:]
+    var byDay: [Date: Int] = [:]
     for page in pages.pages {
       for bucket in page.data ?? [] {
+        let day = bucket.startTime.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         for result in bucket.results ?? [] {
           let amount = Self.minorUnits(from: result.amount?.value)
           minorUnits += amount
+          if let day { byDay[day, default: 0] += amount }
           if let code = result.amount?.currency, !code.isEmpty { currency = code.uppercased() }
           if let name = result.lineItem?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty {
             byLineItem[name, default: 0] += amount
@@ -463,7 +483,9 @@ public struct APIConsumptionClient: Sendable {
       ],
       breakdown: byLineItem.map { APIConsumptionItem(label: $0.key, usedMinorUnits: $0.value) },
       fetchedAt: now,
-      source: pages.grouped ? "OpenAI Costs API" : "OpenAI Costs API (ungrouped)")
+      source: pages.grouped ? "OpenAI Costs API" : "OpenAI Costs API (ungrouped)",
+      details: Self.dailyDetails(byDay, now: now)
+        + Self.breakdownDetails(byLineItem))
   }
 
   // MARK: Anthropic
@@ -506,11 +528,14 @@ public struct APIConsumptionClient: Sendable {
 
     var minorUnits = 0
     var byModel: [String: Int] = [:]
+    var byDay: [Date: Int] = [:]
     for page in pages.pages {
       for bucket in page.data ?? [] {
+        let day = UsageDateParser.iso8601(bucket.startingAt)
         for result in bucket.results ?? [] {
           let amount = Self.minorUnits(fromDecimalCents: result.amount)
           minorUnits += amount
+          if let day { byDay[day, default: 0] += amount }
           let name =
             result.model?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
             ?? result.description?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
@@ -527,7 +552,9 @@ public struct APIConsumptionClient: Sendable {
       ],
       breakdown: byModel.map { APIConsumptionItem(label: $0.key, usedMinorUnits: $0.value) },
       fetchedAt: now,
-      source: pages.grouped ? "Anthropic Cost API" : "Anthropic Cost API (ungrouped)")
+      source: pages.grouped ? "Anthropic Cost API" : "Anthropic Cost API (ungrouped)",
+      details: Self.dailyDetails(byDay, now: now)
+        + Self.breakdownDetails(byModel))
   }
 
   // MARK: OpenRouter
@@ -582,7 +609,8 @@ public struct APIConsumptionClient: Sendable {
       provider: .openRouter,
       windows: windows,
       fetchedAt: now,
-      source: "OpenRouter key API")
+      source: "OpenRouter key API",
+      details: Self.openRouterDetails(usage))
   }
 
   // MARK: xAI
@@ -633,7 +661,12 @@ public struct APIConsumptionClient: Sendable {
             detail: "\(Self.money(remaining)) left")
         ],
         fetchedAt: now,
-        source: "xAI Management API")
+        source: "xAI Management API",
+        details: [
+          UsageDetail("Balance", Self.money(remaining)),
+          UsageDetail("Credits bought", Self.money(purchased)),
+          UsageDetail("Spent from credits", Self.money(purchased - remaining)),
+        ])
     }
     // Without a trustworthy cap, report the balance as the balance rather than
     // inventing a spend figure to sit in a spend field.
@@ -643,7 +676,9 @@ public struct APIConsumptionClient: Sendable {
       note: APIConsumptionNote(
         headline: Self.money(remaining), detail: "prepaid credits left"),
       fetchedAt: now,
-      source: "xAI Management API")
+      source: "xAI Management API",
+      details: [UsageDetail("Balance", Self.money(remaining))]
+        + (purchased > 0 ? [UsageDetail("Credits bought", Self.money(purchased))] : []))
   }
 
   private func xAI<Response: Decodable>(
@@ -676,10 +711,10 @@ public struct APIConsumptionClient: Sendable {
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     let data = try await self.data(for: request, provider: .typeSafe)
     let page = try Self.decode(TypeSafeModelsPage.self, from: data, provider: .typeSafe)
-    let names = page.models.compactMap { model -> String? in
-      let name = model.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-      return name.isEmpty ? nil : name
+    let named = page.models.filter {
+      !($0.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
     }
+    let names = named.compactMap { $0.name?.trimmingCharacters(in: .whitespacesAndNewlines) }
     guard !names.isEmpty else {
       throw UsageProviderError.unavailable("TypeSafe did not return any models for this key.")
     }
@@ -693,7 +728,18 @@ public struct APIConsumptionClient: Sendable {
         detail: names.prefix(4).joined(separator: ", ")
           + " · $0.042 per million tokens in, output free"),
       fetchedAt: now,
-      source: "TypeSafe Models API")
+      source: "TypeSafe Models API",
+      details: [UsageDetail("Price", "$0.042 per million input tokens · output free")]
+        + named.prefix(UsageDetail.maximumCount - 1).map { model in
+          let name = model.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+          let released = UsageDateParser.iso8601(model.releaseDate)
+            ?? model.releaseDate.flatMap { $0.count == 10 ? UsageDateParser.iso8601($0 + "T00:00:00Z") : nil }
+          let parts = [
+            model.description?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
+            released.map { "released \(UsageDetailFormat.date($0))" },
+          ].compactMap { $0 }
+          return UsageDetail(name, parts.isEmpty ? "Available" : parts.joined(separator: " · "))
+        })
   }
 
   // MARK: Paging
@@ -807,6 +853,70 @@ public struct APIConsumptionClient: Sendable {
     }
   }
 
+  /// Today, the last seven days and the busiest day, from daily cost buckets.
+  static func dailyDetails(_ byDay: [Date: Int], now: Date) -> [UsageDetail] {
+    guard !byDay.isEmpty else { return [] }
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "UTC") ?? .current
+    let today = calendar.startOfDay(for: now)
+    let weekStart = today.addingTimeInterval(-6 * 86_400)
+    var details = [
+      UsageDetail("Today", Self.money(byDay.filter { $0.key >= today }.values.reduce(0, +)))
+    ]
+    // The buckets start on the 1st, so a full week only exists from the 7th.
+    if calendar.component(.day, from: today) >= 7 {
+      details.append(UsageDetail(
+        "Last 7 days", Self.money(byDay.filter { $0.key >= weekStart }.values.reduce(0, +))))
+    }
+    if let busiest = byDay.max(by: { $0.value < $1.value }), busiest.value > 0 {
+      details.append(UsageDetail(
+        "Busiest day",
+        "\(Self.money(busiest.value)) on \(busiest.key.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted, timeZone: calendar.timeZone)))"))
+    }
+    let days = max(1, calendar.dateComponents([.day], from: byDay.keys.min() ?? today, to: today).day.map { $0 + 1 } ?? 1)
+    details.append(UsageDetail(
+      "Daily average", Self.money(byDay.values.reduce(0, +) / days)))
+    return details
+  }
+
+  /// Every contributor to this month's spend, largest first.
+  static func breakdownDetails(_ items: [String: Int]) -> [UsageDetail] {
+    items.filter { $0.value > 0 }
+      .sorted { $0.value > $1.value }
+      .prefix(8)
+      .map { UsageDetail($0.key, Self.money($0.value)) }
+  }
+
+  fileprivate static func openRouterDetails(_ key: OpenRouterKeyEnvelope.Key) -> [UsageDetail] {
+    var details: [UsageDetail] = []
+    if let label = key.label?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty {
+      details.append(UsageDetail("Key", label))
+    }
+    details.append(UsageDetail("All time", Self.money(Self.minorUnits(from: key.usage))))
+    if let cap = key.limit, cap > 0 {
+      var text = "\(Self.money(Self.minorUnits(from: cap)))"
+      if let reset = key.limitReset?.nonEmpty { text += " · resets \(reset)" }
+      if key.includeBYOKInLimit == true { text += " · includes your own keys" }
+      details.append(UsageDetail("Credit limit", text))
+    } else {
+      details.append(UsageDetail("Credit limit", "None"))
+    }
+    let byok = Self.minorUnits(from: key.byokUsage)
+    if byok > 0 {
+      details.append(UsageDetail(
+        "Your own provider keys",
+        "\(Self.money(Self.minorUnits(from: key.byokUsageMonthly))) this month · \(Self.money(byok)) all time"))
+    }
+    if let free = key.freeModelDailyRequests, let limit = free.limit, limit > 0 {
+      details.append(UsageDetail("Free-model requests today", "\(free.used ?? 0) of \(limit)"))
+    }
+    if key.isFreeTier == true { details.append(UsageDetail("Tier", "Free")) }
+    if let expires = UsageDateParser.iso8601(key.expiresAt) {
+      details.append(UsageDetail("Key expires", UsageDetailFormat.date(expires)))
+    }
+    return details
+  }
+
   static func money(_ minorUnits: Int) -> String {
     let amount = Double(minorUnits) / 100
     return amount >= 100
@@ -887,6 +997,12 @@ private struct OpenAICostsPage: Decodable {
   }
   struct Bucket: Decodable {
     let results: [Result]?
+    let startTime: Int?
+
+    enum CodingKeys: String, CodingKey {
+      case results
+      case startTime = "start_time"
+    }
   }
   let data: [Bucket]?
   let hasMore: Bool?
@@ -908,6 +1024,12 @@ private struct AnthropicCostPage: Decodable {
   }
   struct Bucket: Decodable {
     let results: [Result]?
+    let startingAt: String?
+
+    enum CodingKeys: String, CodingKey {
+      case results
+      case startingAt = "starting_at"
+    }
   }
   let data: [Bucket]?
   let hasMore: Bool?
@@ -936,8 +1058,18 @@ private struct OpenRouterKeyEnvelope: Decodable {
     let limitRemaining: Double?
     let isFreeTier: Bool?
     let freeModelDailyRequests: FreeModelRequests?
+    var limitReset: String? = nil
+    var includeBYOKInLimit: Bool? = nil
+    var byokUsage: Double? = nil
+    var byokUsageMonthly: Double? = nil
+    var expiresAt: String? = nil
 
     enum CodingKeys: String, CodingKey {
+      case limitReset = "limit_reset"
+      case includeBYOKInLimit = "include_byok_in_limit"
+      case byokUsage = "byok_usage"
+      case byokUsageMonthly = "byok_usage_monthly"
+      case expiresAt = "expires_at"
       case label, usage, limit
       case usageDaily = "usage_daily"
       case usageWeekly = "usage_weekly"

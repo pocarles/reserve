@@ -807,6 +807,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let clockAndDisclosureUpdatesWork = Self.dashboardClockAndDisclosureChecks()
     let expandRequestsDetails = self.expandingAProviderRequestsItsDetails()
     let historyPlaceholdersAreHonest = Self.historyPlaceholderChecks()
+    let apiDetailsOpen = Self.apiDetailChecks()
     guard providerCards == ProviderID.allCases.count, actionsPresent, quitRemainsReachable,
       logosPresent, bundledProviderArtworkPresent, scrollingMatchesAvailableSpace, contentFits,
       dashboardFits, fifthProviderReachable, headlinePresent,
@@ -827,11 +828,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       primaryWindowIgnoresComponentShares, urgentWindowBecomesPrimary, compactMoneyKeepsCurrency,
       localizedTimeUsesRegionalClock,
       semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork,
-      expandRequestsDetails, historyPlaceholdersAreHonest
+      expandRequestsDetails, historyPlaceholdersAreHonest, apiDetailsOpen
     else {
       return (
         false,
-        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork), expandRequestsDetails=\(expandRequestsDetails), historyPlaceholders=\(historyPlaceholdersAreHonest)"
+        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork), expandRequestsDetails=\(expandRequestsDetails), historyPlaceholders=\(historyPlaceholdersAreHonest), apiDetails=\(apiDetailsOpen)"
       )
     }
     return (
@@ -1248,7 +1249,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         provider: provider,
         snapshot: self.store.apiConsumption[provider],
         error: self.store.apiConsumptionErrors[provider],
-        isRefreshing: self.store.apiConsumptionRefreshing.contains(provider))
+        isRefreshing: self.store.apiConsumptionRefreshing.contains(provider),
+        isExpanded: self.store.expandedAPIProvider == provider)
     }
   }
 
@@ -1287,7 +1289,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           self.expandDashboard()
         },
         quit: { NSApplication.shared.terminate(nil) },
-        apiConsumptionReadings: { [weak self] in self?.apiConsumptionReadings() ?? [] }))
+        apiConsumptionReadings: { [weak self] in self?.apiConsumptionReadings() ?? [] },
+        toggleAPIDetail: { [weak self] provider in
+          guard let self else { return }
+          self.store.expandedAPIProvider =
+            self.store.expandedAPIProvider == provider ? nil : provider
+          self.expandDashboard()
+        }))
     self.dashboardController = controller
     self.popover.contentViewController = controller
     return controller
@@ -1333,6 +1341,48 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
   /// An expanded card with no activity yet says what it is waiting for, and a
   /// provider that can never have activity says nothing at all.
+  /// An API row opens onto everything its key reported, shows the whole error
+  /// when the key was refused, and stays closed otherwise.
+  private static func apiDetailChecks() -> Bool {
+    let now = Date()
+    let openRouter = APIConsumptionSnapshot(
+      provider: .openRouter,
+      windows: [APIConsumptionWindow(id: "month", label: "This month", usedMinorUnits: 59)],
+      fetchedAt: now, source: "self-test",
+      details: [
+        UsageDetail("Key", "laptop"), UsageDetail("All time", "$40.50"),
+        UsageDetail("Credit limit", "$20.00 · resets monthly"),
+      ])
+    let typeSafe = APIConsumptionSnapshot(
+      provider: .typeSafe, windows: [],
+      note: APIConsumptionNote(headline: "2 models", detail: "jev-latest, jev-preview"),
+      fetchedAt: now, source: "self-test",
+      details: [UsageDetail("jev-latest", "Flagship System One model")])
+    let readings = [
+      APIConsumptionReading(
+        provider: .openRouter, snapshot: openRouter, error: nil, isRefreshing: false,
+        isExpanded: true),
+      APIConsumptionReading(
+        provider: .xAI, snapshot: nil,
+        error: "xAI refused this management key. Check that it has billing read access.",
+        isRefreshing: false, isExpanded: true),
+      APIConsumptionReading(
+        provider: .typeSafe, snapshot: typeSafe, error: nil, isRefreshing: false),
+    ]
+    let view = UsageDashboardView(
+      states: [], selectedMenuBarProvider: nil, isRefreshing: false, now: now,
+      actions: DashboardActions(
+        refreshAll: {}, connectProvider: { _ in }, selectMenuBarProvider: { _ in },
+        openSettings: {}, openInsights: {}, dismiss: {}, toggleProviderDetail: { _ in },
+        quit: {}, apiConsumptionReadings: { readings }))
+    view.layoutSubtreeIfNeeded()
+    let identifiers = Self.descendants(of: view).compactMap { $0.identifier?.rawValue }
+    return identifiers.filter { $0 == "api-detail-openRouter" }.count == 3
+      && identifiers.filter { $0 == "api-detail-xAI" }.count == 1
+      && !identifiers.contains("api-detail-typeSafe")
+      && ["openRouter", "xAI", "typeSafe"].allSatisfy { identifiers.contains("disclose-api-\($0)") }
+  }
+
   private static func historyPlaceholderChecks() -> Bool {
     let now = Date()
     func state(_ provider: ProviderID, localHistoryEnabled: Bool) -> ProviderViewState {
