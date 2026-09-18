@@ -1,8 +1,9 @@
 # Reserve
 
 Reserve is a native macOS menu-bar app that shows reported subscription
-capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, Copilot, the Z.ai GLM
-Coding Plan and Kimi Code.
+capacity for OpenAI Codex, Anthropic Claude, Grok, Cursor, Copilot, Gemini
+(Google AI Pro and Ultra, through the Antigravity CLI), the Z.ai GLM Coding Plan
+and Kimi Code.
 Optional insights show provider-reported account activity or activity from this Mac.
 Copilot support is experimental and still needs an authenticated release check.
 
@@ -47,7 +48,7 @@ Reserve says so in a window where you can try again or cancel.
 Claude and Cursor require explicit **Allow usage access** before Reserve reads
 their protected sign-in. macOS may also ask you to approve access. That window
 closes on its own once Reserve reads fresh usage, or explains why it could not.
-Cursor, Copilot, Z.ai and Kimi start disabled. On first launch, the other providers
+Cursor, Copilot, Gemini, Z.ai and Kimi start disabled. On first launch, the other providers
 start enabled only when their helper is already installed. Saved choices are preserved.
 
 - `codex`, signed into an OpenAI subscription;
@@ -57,8 +58,34 @@ start enabled only when their helper is already installed. Saved choices are pre
   Cursor account. Teams and Enterprise Admin API keys are not supported; and
 - Copilot CLI, signed into GitHub. Setup opens GitHub’s installation instructions
   if the helper is missing;
+- Antigravity CLI (`agy`) 1.1.11 or newer, signed into a Google account with a
+  Google AI Pro or Ultra plan (see [Gemini](#gemini));
 - Z.ai GLM Coding Plan, connected with an API key; and
 - Kimi Code, connected with an API key.
+
+### Gemini
+
+Since 2026-06-18, Gemini CLI no longer serves Google AI Pro, Ultra or free
+individual accounts; those plans run through the Antigravity CLI (`agy`), with
+5-hour and weekly limits per model group. Reserve shows each group's limits as
+its own meter: the Gemini models group leads, and the Claude and GPT models
+group sits beside it, like Claude's per-model limits.
+
+Reserve reads them only by running agy's own usage command,
+`agy -p /usage --output-format json`, which answers without starting a
+conversation or spending quota. Reserve never reads agy's Google sign-in, never
+calls Google's quota endpoints itself and never talks to agy's local server. It
+first checks `agy --version` and refuses to ask an agy older than 1.1.11,
+because older releases could send `/usage` to the model as a prompt. Each check
+runs with no terminal, no input, a minimal environment (auto-update off, no
+unrelated API keys) and a 30-second limit.
+
+**Connect** can install agy with Google's official installer
+(`antigravity.google/cli/install.sh`, into `~/.local/bin`). agy has no separate
+sign-in or update command, so Reserve never starts it for either: open Terminal,
+run `agy` and sign in with Google there (running it also updates it), then
+choose **Check again**. Google publishes no Antigravity status page Reserve can
+read, so the Gemini card shows no service status.
 
 ### Plans connected with an API key
 

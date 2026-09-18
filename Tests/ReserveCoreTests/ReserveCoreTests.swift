@@ -438,14 +438,14 @@ struct ReserveCoreTests {
   func testProviderHelperCatalogUsesOnlyFixedOfficialHTTPSInstallers() throws {
     // Key-connected plans (Z.ai, Kimi) have no helper and nothing to install.
     let helperProviders = ProviderID.allCases.filter { !ProviderDescriptor.forProvider($0).usesAPIKey }
-    XCTAssertEqual(helperProviders, [.openAI, .anthropic, .grok, .cursor, .copilot])
+    XCTAssertEqual(helperProviders, [.openAI, .anthropic, .grok, .cursor, .copilot, .gemini])
     XCTAssertTrue(ProviderHelperCatalog.definition(for: .zai) == nil)
     XCTAssertTrue(ProviderHelperCatalog.definition(for: .kimi) == nil)
     let definitions = helperProviders.compactMap(ProviderHelperCatalog.definition)
     XCTAssertEqual(definitions.map(\.provider), helperProviders)
     XCTAssertEqual(
       Set(definitions.compactMap(\.installerURL.host)),
-      Set(["chatgpt.com", "claude.ai", "x.ai", "cursor.com", "docs.github.com"]))
+      Set(["chatgpt.com", "claude.ai", "x.ai", "cursor.com", "docs.github.com", "antigravity.google"]))
     XCTAssertTrue(definitions.allSatisfy { definition in
       definition.installerURL.scheme == "https"
         && !definition.executable.isEmpty
@@ -453,7 +453,8 @@ struct ReserveCoreTests {
     for provider in helperProviders {
       XCTAssertEqual(
         ProviderHelperCatalog.definition(for: provider)?.updateArguments,
-        provider == .copilot ? [] : ["update"])
+        // Copilot is installed by hand; agy updates itself when it runs.
+        [.copilot, .gemini].contains(provider) ? [] : ["update"])
     }
 
     try ProviderHelperInstaller.validateInstallerFormat(
@@ -488,7 +489,7 @@ struct ReserveCoreTests {
 
   @Test
   func testCursorIsFourthProviderAndStartsWithDistinctPools() throws {
-    XCTAssertEqual(ProviderID.allCases.count, 7)
+    XCTAssertEqual(ProviderID.allCases.count, 8)
     XCTAssertEqual(ProviderID.allCases.firstIndex(of: .cursor), 3)
     XCTAssertEqual(ProviderID.cursor.displayName, "Cursor")
     let data = Data(

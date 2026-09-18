@@ -218,8 +218,13 @@ import Testing
         #expect(descriptor.helper?.provider == provider)
         #expect(descriptor.helper?.executable.isEmpty == false)
         urls += descriptor.helper.map { [$0.installerURL] } ?? []
-        // Every helper-backed provider has an official status page.
-        #expect(descriptor.statusURL != nil && descriptor.statusFeedURL != nil)
+        // Every helper-backed provider has an official status page, except
+        // Gemini: Google publishes no Antigravity feed Reserve can read.
+        if provider == .gemini {
+          #expect(descriptor.statusURL == nil && descriptor.statusFeedURL == nil)
+        } else {
+          #expect(descriptor.statusURL != nil && descriptor.statusFeedURL != nil)
+        }
       }
       urls += [descriptor.statusURL, descriptor.statusFeedURL].compactMap { $0 }
       for url in urls {

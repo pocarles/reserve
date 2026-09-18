@@ -48,6 +48,17 @@ public struct ProviderDescriptor: Sendable {
   public let trustedLoginHosts: Set<String>
   public let apiKeyConnection: APIKeyConnection?
   public var supportsAutomaticHelperInstallation: Bool { self.installationStrategy == .automaticHelper }
+  /// An installable helper that has no update command of its own (the
+  /// Antigravity CLI updates itself when the person runs it) is never started
+  /// by Reserve just to update it.
+  public var supportsAutomaticHelperUpdate: Bool {
+    self.supportsAutomaticHelperInstallation && self.helper?.updateArguments.isEmpty == false
+  }
+  /// A helper with no sign-in command signs in only inside its own interactive
+  /// terminal session, which Reserve cannot drive. The person runs it there.
+  public var signsInFromTerminal: Bool {
+    !self.usesAPIKey && self.helper != nil && self.loginArguments.isEmpty
+  }
   public var usesAPIKey: Bool { self.authenticationStrategy == .apiKey }
 
   public static func forProvider(_ id: ProviderID) -> Self {
@@ -94,6 +105,21 @@ public struct ProviderDescriptor: Sendable {
           keyHint: "id.secret",
           keySettingsURL: URL(string: "https://z.ai/manage-apikey/apikey-list")!,
           endpointHost: ZaiProvider.endpointHost))
+    case .gemini:
+      // Google AI Pro, Ultra and free individual plans are served by the
+      // Antigravity CLI (`agy`) since Gemini CLI stopped serving them on
+      // 2026-06-18. Its installer (antigravity.google/docs/cli/install) is a
+      // non-interactive script that installs into ~/.local/bin. agy has no
+      // update command (it updates itself during normal runs) and no sign-in
+      // command (running `agy` signs in), so Reserve never starts it for
+      // either. Google publishes no Antigravity status page with a Statuspage
+      // or RSS feed; Google Cloud's status page covers Vertex AI, not these
+      // plans, so none is configured.
+      Self(id: id, displayName: "Gemini", executable: GeminiProvider.executable,
+        helperName: "Antigravity CLI", installer: "https://antigravity.google/cli/install.sh",
+        account: "https://antigravity.google/docs/plans/", status: nil,
+        capabilities: [.liveAllowance, .limitMeters], updateArguments: [],
+        loginArguments: [], loginDisplayName: "Antigravity CLI", trustedLoginHosts: [])
     case .kimi:
       // Moonshot AI's official Statuspage covers the Kimi service.
       Self(apiKeyProvider: id, displayName: "Kimi",
@@ -107,9 +133,9 @@ public struct ProviderDescriptor: Sendable {
 
   private init(
     id: ProviderID, displayName: String, executable: String, helperName: String,
-    installer: String, account: String, status: String, statusFormat: StatusFormat = .statuspage,
+    installer: String, account: String, status: String?, statusFormat: StatusFormat = .statuspage,
     capabilities: Capabilities, authenticationStrategy: AuthenticationStrategy = .cliOAuth,
-    installationStrategy: InstallationStrategy = .automaticHelper,
+    installationStrategy: InstallationStrategy = .automaticHelper, updateArguments: [String]? = nil,
     loginArguments: [String], loginDisplayName: String, trustedLoginHosts: Set<String>
   ) {
     self.id = id
@@ -117,10 +143,12 @@ public struct ProviderDescriptor: Sendable {
     self.helper = ProviderHelperDefinition(
       provider: id, executable: executable, displayName: helperName,
       installerURL: URL(string: installer)!,
-      updateArguments: installationStrategy == .automaticHelper ? ["update"] : [])
+      updateArguments: updateArguments ?? (installationStrategy == .automaticHelper ? ["update"] : []))
     self.accountURL = URL(string: account)!
-    self.statusURL = URL(string: status)!
-    self.statusFeedURL = URL(string: status + (statusFormat == .rss ? "/feed.xml" : "/api/v2/summary.json"))!
+    self.statusURL = status.flatMap { URL(string: $0) }
+    self.statusFeedURL = status.flatMap {
+      URL(string: $0 + (statusFormat == .rss ? "/feed.xml" : "/api/v2/summary.json"))
+    }
     self.statusFormat = statusFormat
     self.capabilities = capabilities
     self.authenticationStrategy = authenticationStrategy

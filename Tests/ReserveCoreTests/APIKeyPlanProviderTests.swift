@@ -387,13 +387,13 @@ struct APIKeyPlanProviderTests {
     #expect(ProviderDescriptor.forProvider(.zai).apiKeyConnection?.endpointHost == "api.z.ai")
     #expect(ProviderDescriptor.forProvider(.kimi).apiKeyConnection?.endpointHost == "api.kimi.com")
     // Existing providers keep their helpers.
-    for provider in [ProviderID.openAI, .anthropic, .grok, .cursor, .copilot] {
+    for provider in [ProviderID.openAI, .anthropic, .grok, .cursor, .copilot, .gemini] {
       #expect(!ProviderDescriptor.forProvider(provider).usesAPIKey)
       #expect(ProviderDescriptor.forProvider(provider).helper != nil)
     }
     // New cases are appended, so earlier persisted raw values are unchanged.
     #expect(ProviderID.allCases.map(\.rawValue)
-      == ["openAI", "anthropic", "grok", "cursor", "copilot", "zai", "kimi"])
+      == ["openAI", "anthropic", "grok", "cursor", "copilot", "zai", "kimi", "gemini"])
   }
 
   @Test func statusChecksSkipAProviderWithoutAnOfficialPage() async {

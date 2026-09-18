@@ -387,8 +387,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       identifiers.contains("provider-logo-\($0.rawValue)")
     }
     let bundledProviderArtworkPresent = ProviderID.allCases.allSatisfy {
-      // Copilot uses a system symbol; Z.ai and Kimi use a neutral initial.
-      if [.copilot, .zai, .kimi].contains($0) {
+      // Copilot uses a system symbol; Z.ai, Kimi and Gemini use a neutral initial.
+      if [.copilot, .zai, .kimi, .gemini].contains($0) {
         let image = ProviderArtwork.image(for: $0)
         return image.isValid && image.size.width > 0 && image.size.height > 0
           && !image.representations.isEmpty

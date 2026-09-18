@@ -174,7 +174,14 @@ enum ProviderSetupAction: String, Equatable {
       if self == .install { return "Open official installation instructions for \(provider.displayName)" }
       if self == .update { return "Open official update instructions for \(provider.displayName)" }
     }
+    let descriptor = ProviderDescriptor.forProvider(provider)
     let helperName = ProviderHelperCatalog.definition(for: provider)?.displayName ?? provider.displayName
+    if self == .update, !descriptor.supportsAutomaticHelperUpdate {
+      return "Run \(helperName) once in Terminal to update it, then check again"
+    }
+    if self == .signIn, descriptor.signsInFromTerminal {
+      return "Sign in by running \(helperName) in Terminal"
+    }
     return switch self {
     case .install:
       "Install \(helperName) without using Terminal"

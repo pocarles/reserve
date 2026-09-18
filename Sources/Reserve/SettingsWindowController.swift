@@ -585,6 +585,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
               "Cursor account usage totals from Cursor's authenticated DashboardService; Reserve does not read Cursor prompts or transcripts",
               "Optional quota updates shared by Claude Code; Reserve stores only limits and their observation time",
               "Copilot allowance and OpenAI account activity through their installed helpers, without sending prompts",
+              "Gemini plan limits by running the Antigravity CLI's own usage command (agy -p /usage), "
+                + "which starts no conversation and spends no quota; Reserve never reads agy's Google sign-in",
             ])
           ]),
         self.section(
@@ -818,6 +820,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     ]
     if provider == .copilot {
       rows.append(SettingsLabel("Experimental support · quota checks only", size: 11, color: .secondaryLabelColor))
+    }
+    if provider == .gemini {
+      rows.append(SettingsLabel(
+        "Antigravity CLI 1.1.11 or later · sign in by running agy in Terminal",
+        size: 11, color: .secondaryLabelColor))
     }
     if ProviderDescriptor.forProvider(provider).usesAPIKey {
       rows.append(self.formRow("API key:", self.planKeyControls(provider), labelWidth: 92))

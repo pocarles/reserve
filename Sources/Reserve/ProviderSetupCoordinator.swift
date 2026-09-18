@@ -11,6 +11,9 @@ final class ProviderSetupCoordinator {
     /// A provider whose helper Reserve cannot install waits here while the
     /// person finishes the official installation themselves.
     case waitingForManualSetup
+    /// A helper that signs in only in its own terminal session (the Antigravity
+    /// CLI) waits here while the person runs it; Reserve then checks again.
+    case waitingForTerminalSignIn
     /// A key-connected plan (Z.ai, Kimi) waits for a pasted API key, then
     /// checks usage with it while `savingKey`.
     case needsKey, savingKey
@@ -122,6 +125,20 @@ final class ProviderSetupCoordinator {
     guard let provider = self.activeProvider else { return }
     let generation = self.generation
     switch self.phase {
+    case .needsUpdate where !ProviderDescriptor.forProvider(provider).supportsAutomaticHelperUpdate
+      && ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation:
+      // A helper that updates itself when run (agy) is never launched bare by
+      // Reserve; the person runs it once, then checks again here.
+      self.present(.waitingForManualSetup)
+    case .needsSignIn where ProviderDescriptor.forProvider(provider).signsInFromTerminal:
+      // The first time explains where to sign in; after that the button only
+      // checks whether the person has done it.
+      if self.loginAttempted {
+        self.check()
+      } else {
+        self.loginAttempted = true
+        self.present(.waitingForTerminalSignIn)
+      }
     case .needsInstall, .needsUpdate:
       if !ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation {
         guard let helper = ProviderHelperCatalog.definition(for: provider) else { return }
@@ -174,7 +191,7 @@ final class ProviderSetupCoordinator {
       }
     case .failed, .unavailable, .accessDenied:
       self.check()
-    case .waitingForManualSetup:
+    case .waitingForManualSetup, .waitingForTerminalSignIn:
       self.check()
     case .needsKey:
       guard let key = self.panel?.enteredKey,
@@ -208,7 +225,7 @@ final class ProviderSetupCoordinator {
     let provider = self.activeProvider
     let cancelledSetup = !self.wasEnabled && [Phase.checking, .needsInstall, .needsUpdate,
       .needsSignIn, .signingIn, .needsAccess, .grantingAccess, .accessNotGranted,
-      .waitingForManualSetup, .needsKey, .savingKey].contains(self.phase)
+      .waitingForManualSetup, .waitingForTerminalSignIn, .needsKey, .savingKey].contains(self.phase)
     self.activeProvider = nil
     self.generation += 1
     if let observer { self.store.removeObserver(observer) }
@@ -421,6 +438,11 @@ final class ProviderConnectionPanel: NSPanel {
       self.message.stringValue = "Reserve opened the official \(helperName) instructions. Return here once it is installed, then choose Check again."
       self.privacy.stringValue = "Reserve never installs this helper for you and downloads nothing itself."
       action = "Check again"
+    case .waitingForTerminalSignIn:
+      self.heading.stringValue = "Sign in to \(name)"
+      self.message.stringValue = "Open Terminal and run \(helper?.executable ?? "the \(helperName)"). Sign in with your account there, then return here and choose Check again."
+      self.privacy.stringValue = "You sign in with \(helperName) itself. Reserve never sees your password or sign-in."
+      action = "Check again"
     case .needsKey:
       let connection = ProviderDescriptor.forProvider(self.provider).apiKeyConnection
       self.heading.stringValue = "Connect \(name)"
@@ -435,6 +457,19 @@ final class ProviderConnectionPanel: NSPanel {
       busy = true
     }
     self.keyRow?.isHidden = phase != .needsKey
+    if self.provider == .gemini {
+      self.privacy.stringValue = phase == .needsInstall
+        ? "Downloaded from antigravity.google. Installation starts only when you choose Install and continue."
+        : "Reserve only runs the Antigravity CLI's own usage command. It never starts a conversation or reads your Google sign-in."
+      if phase == .needsUpdate || phase == .waitingForManualSetup {
+        self.heading.stringValue = "Update \(helperName)"
+        self.message.stringValue = "Gemini usage needs Antigravity CLI 1.1.11 or later. Open Terminal and run agy once: it updates itself. Then choose Check again."
+        action = "Check again"
+      } else if phase == .waitingForTerminalSignIn || phase == .needsSignIn {
+        self.message.stringValue = "Open Terminal and run agy. Sign in with the Google account that has your Google AI plan, then return here and choose Check again."
+        action = "Check again"
+      }
+    }
     if self.provider == .copilot {
       self.privacy.stringValue = "Reserve asks the official Copilot CLI for allowance data. It never starts a conversation."
       if phase == .needsInstall || phase == .needsUpdate {

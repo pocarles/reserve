@@ -113,7 +113,9 @@ public final class ProviderHelperInstaller: @unchecked Sendable {
   }
 
   public func update(_ provider: ProviderID) async throws {
-    guard ProviderDescriptor.forProvider(provider).supportsAutomaticHelperInstallation,
+    // A helper without an update command must not be launched bare: that
+    // would start its interactive session, not an update.
+    guard ProviderDescriptor.forProvider(provider).supportsAutomaticHelperUpdate,
       let definition = ProviderHelperCatalog.definition(for: provider)
     else {
       throw ProviderHelperInstallerError.installFailed("Update \(provider.displayName) using its official installation instructions, then return to Reserve.")

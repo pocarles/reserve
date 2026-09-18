@@ -77,6 +77,7 @@ enum ProviderArtwork {
       // No mark is bundled for these; the neutral initial is their icon.
       case .zai: "Z"
       case .kimi: "K"
+      case .gemini: "G"
       }
     return self.initialImage(letter)
   }

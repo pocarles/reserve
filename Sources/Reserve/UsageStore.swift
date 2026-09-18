@@ -673,6 +673,15 @@ final class UsageStore {
       self.refresh(provider, queueIfBusy: true) { onFinished?() }
       return
     }
+    // A helper that signs in only inside its own terminal session (the
+    // Antigravity CLI) is never started here: without a terminal it would
+    // either fail or wait on a prompt. The person signs in there; this only
+    // checks whether that has happened.
+    if ProviderDescriptor.forProvider(provider).signsInFromTerminal {
+      if !self.isEnabled(provider) { onFinished?(); return }
+      self.refresh(provider, queueIfBusy: true) { onFinished?() }
+      return
+    }
     guard self.loginProcesses[provider]?.isRunning != true else { return }
     self.loginStorageFailures.remove(provider)
     if forceSignIn {
@@ -1111,7 +1120,7 @@ final class UsageStore {
       }
     let openAIWindowMinutes: Int? = scenario == .unknown ? nil : 10_080
     let grokFetchedAt = now.addingTimeInterval(scenario == .stale ? -42 * 60 : -126)
-    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19, 24, 27, 3, 15]) {
+    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19, 24, 27, 3, 15, 21]) {
       self.defaults.set(day, forKey: "subscription.renewalDay.\(provider.rawValue)")
     }
     self.states[.openAI] = ProviderViewState(
@@ -1277,6 +1286,18 @@ final class UsageStore {
     self.states[.kimi]?.serviceStatus = ProviderServiceStatus(
       provider: .kimi, health: .operational, detail: "All systems operational",
       pageURL: URL(string: "https://status.moonshot.cn")!)
+    self.states[.gemini] = ProviderViewState(provider: .gemini,
+      snapshot: UsageSnapshot(provider: .gemini, windows: [
+        UsageWindow(id: "gemini-weekly", label: "Weekly", usedPercent: 29,
+          windowMinutes: 10_080, resetsAt: now.addingTimeInterval(3.4 * 86_400)),
+        UsageWindow(id: "gemini-5h", label: "5 hours", usedPercent: 12,
+          windowMinutes: 300, resetsAt: now.addingTimeInterval(2.6 * 3600)),
+        UsageWindow(id: "3p-weekly", label: "Claude and GPT weekly", usedPercent: 8,
+          windowMinutes: 10_080, resetsAt: now.addingTimeInterval(5.1 * 86_400)),
+      ], fetchedAt: now.addingTimeInterval(-44),
+        source: "Antigravity CLI usage report", detailedUsageUnavailable: true,
+        details: [UsageDetail("Gemini Models", "Gemini Flash, Gemini Pro"),
+          UsageDetail("Claude and GPT models", "Claude Opus, Claude Sonnet, GPT-OSS")]))
     self.changed()
   }
 
@@ -1294,6 +1315,9 @@ final class UsageStore {
       // Key-connected plans stay off until a key is saved.
       "provider.zai.enabled": false,
       "provider.kimi.enabled": false,
+      // Gemini runs the Antigravity CLI, which signs in separately, so it is
+      // opt-in like Cursor and Copilot even when agy is installed.
+      "provider.gemini.enabled": false,
       // Reading Claude Code's Keychain item is another application's OAuth
       // token, so it is opt-in and stays off until asked for.
       "anthropic.keychainReadAllowed": false,
@@ -1487,10 +1511,12 @@ final class UsageStore {
     return nil
   }
 
-  /// Nil for API-key providers: they have no sign-in command to run.
+  /// Nil for API-key providers and terminal sign-ins: they have no sign-in
+  /// command to run.
   private static func loginConfiguration(for provider: ProviderID) -> LoginConfiguration? {
     let descriptor = ProviderDescriptor.forProvider(provider)
-    guard !descriptor.usesAPIKey, let helper = descriptor.helper else { return nil }
+    guard !descriptor.usesAPIKey, !descriptor.signsInFromTerminal, let helper = descriptor.helper
+    else { return nil }
     return LoginConfiguration(executable: helper.executable,
       arguments: descriptor.loginArguments, displayName: descriptor.loginDisplayName,
       trustedHosts: descriptor.trustedLoginHosts)
@@ -1707,6 +1733,7 @@ final class UsageStore {
       case .copilot: CopilotProvider()
       case .zai: ZaiProvider()
       case .kimi: KimiProvider()
+      case .gemini: GeminiProvider()
       }
     let previousHealth = self.states[provider]?.serviceStatus?.health
     let statusTask: Task<ProviderServiceStatus?, Never>? = self.fetchOverride == nil

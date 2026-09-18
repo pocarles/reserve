@@ -1017,8 +1017,8 @@ private enum Pricing {
 
   private static func rates(provider: ProviderID, model: String) -> Rates? {
     switch provider {
-    // Copilot, Z.ai and Kimi have no local session history to price.
-    case .copilot, .zai, .kimi: return nil
+    // Copilot, Z.ai, Kimi and Gemini have no local session history to price.
+    case .copilot, .zai, .kimi, .gemini: return nil
     case .openAI:
       if model.contains("5.6-sol") {
         return Rates(input: 5, cached: 0.5, cacheWrite: 6.25, output: 30)

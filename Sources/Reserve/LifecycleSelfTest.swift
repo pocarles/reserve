@@ -755,6 +755,9 @@ enum LifecycleSelfTest {
       "Cursor no longer starts disabled with Keychain access off")
     result.expect(!store.isEnabled(.copilot), "Copilot no longer starts disabled")
     result.expect(
+      !store.isEnabled(.gemini) && store.monthlySubscriptionCost(for: .gemini) == nil,
+      "Gemini no longer starts disabled without a cost")
+    result.expect(
       !store.isEnabled(.zai) && !store.isEnabled(.kimi)
         && store.monthlySubscriptionCost(for: .zai) == nil
         && store.monthlySubscriptionCost(for: .kimi) == nil,

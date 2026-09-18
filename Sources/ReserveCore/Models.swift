@@ -9,6 +9,7 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   // Appended so the persisted raw values of earlier providers never shift.
   case zai
   case kimi
+  case gemini
 
   public var id: String { self.rawValue }
 

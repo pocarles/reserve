@@ -26,6 +26,7 @@ struct ReserveProbe {
     case "copilot": selected = [.copilot]
     case "zai", "z.ai": selected = [.zai]
     case "kimi": selected = [.kimi]
+    case "gemini", "agy", "antigravity": selected = [.gemini]
     case nil, "all":
       // Key-connected plans are probed only when a key is saved, so "all"
       // does not report an unconfigured plan as a failure.
@@ -34,7 +35,7 @@ struct ReserveProbe {
       }
     default:
       FileHandle.standardError.write(
-        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|copilot|zai|kimi|local|all] [--insights]\n".utf8))
+        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|copilot|zai|kimi|gemini|local|all] [--insights]\n".utf8))
       exit(64)
     }
 
@@ -50,6 +51,7 @@ struct ReserveProbe {
         case .copilot: CopilotProvider()
         case .zai: ZaiProvider()
         case .kimi: KimiProvider()
+        case .gemini: GeminiProvider()
         }
       do {
         snapshots.append(try await fetcher.fetch())

@@ -25,6 +25,41 @@ public enum ProcessRunner {
     standardInput: FileHandle? = nil,
     timeout: Duration = .seconds(3)
   ) async throws -> String {
+    let result = try await Self.run(
+      executable: executable, arguments: arguments, environment: environment,
+      standardInput: standardInput, timeout: timeout)
+    guard result.status == 0 else {
+      throw UsageProviderError.processFailed(
+        "\(URL(fileURLWithPath: executable).lastPathComponent) exited with status \(result.status)."
+      )
+    }
+    guard !result.stdoutExceeded else {
+      throw UsageProviderError.invalidResponse("process output exceeded 64 KB")
+    }
+    return String(data: result.stdout, encoding: .utf8)?
+      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  }
+
+  /// The completed launch, whatever its exit status. `output` treats a
+  /// non-zero exit as a failure; a caller that has to tell a signed-out helper
+  /// from a broken one reads the status and the bounded stderr itself.
+  struct Result: Sendable {
+    let status: Int32
+    let stdout: Data
+    let stderr: Data
+    let stdoutExceeded: Bool
+  }
+
+  static func run(
+    executable: String,
+    arguments: [String],
+    environment: [String: String],
+    standardInput: FileHandle? = nil,
+    currentDirectory: URL? = nil,
+    timeout: Duration = .seconds(3),
+    maximumStdoutBytes: Int = 65_536,
+    maximumStderrBytes: Int = 0
+  ) async throws -> Result {
     try Task.checkCancellation()
     let process = Process()
     let stdout = Pipe()
@@ -32,6 +67,7 @@ public enum ProcessRunner {
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
     process.environment = environment
+    if let currentDirectory { process.currentDirectoryURL = currentDirectory }
     // A helper that prompts on stdin must not inherit Reserve's own input and
     // wait forever for a line that never arrives.
     if let standardInput { process.standardInput = standardInput }
@@ -69,11 +105,11 @@ public enum ProcessRunner {
     // Cancellation and deadlines need those threads even on a small Mac.
     DispatchQueue.global().async {
       events.continuation.yield(
-        .stdout(Self.capture(stdout.fileHandleForReading, maximumBytes: 65_536)))
+        .stdout(Self.capture(stdout.fileHandleForReading, maximumBytes: maximumStdoutBytes)))
     }
     DispatchQueue.global().async {
       events.continuation.yield(
-        .stderr(Self.capture(stderr.fileHandleForReading, maximumBytes: 0)))
+        .stderr(Self.capture(stderr.fileHandleForReading, maximumBytes: maximumStderrBytes)))
     }
 
     // The deadline remains armed until both pipes drain. A child spawned by the
@@ -107,7 +143,7 @@ public enum ProcessRunner {
 
     var status: Int32?
     var capturedStdout: CapturedOutput?
-    var capturedStderr = false
+    var capturedStderr: CapturedOutput?
     var timedOut = false
     eventLoop: for await event in events.stream {
       switch event {
@@ -115,13 +151,13 @@ public enum ProcessRunner {
         status = terminationStatus
       case .stdout(let output):
         capturedStdout = output
-      case .stderr:
-        capturedStderr = true
+      case .stderr(let output):
+        capturedStderr = output
       case .timedOut:
         timedOut = true
         break eventLoop
       }
-      if status != nil, capturedStdout != nil, capturedStderr, deadline.finish() {
+      if status != nil, capturedStdout != nil, capturedStderr != nil, deadline.finish() {
         break eventLoop
       }
     }
@@ -135,16 +171,9 @@ public enum ProcessRunner {
         "\(URL(fileURLWithPath: executable).lastPathComponent) ended without a complete result."
       )
     }
-    guard status == 0 else {
-      throw UsageProviderError.processFailed(
-        "\(URL(fileURLWithPath: executable).lastPathComponent) exited with status \(status)."
-      )
-    }
-    guard !capturedStdout.exceeded else {
-      throw UsageProviderError.invalidResponse("process output exceeded 64 KB")
-    }
-    return String(data: capturedStdout.data, encoding: .utf8)?
-      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return Result(
+      status: status, stdout: capturedStdout.data, stderr: capturedStderr?.data ?? Data(),
+      stdoutExceeded: capturedStdout.exceeded)
   }
 
   private static func capture(_ handle: FileHandle, maximumBytes: Int) -> CapturedOutput {
