@@ -1,14 +1,18 @@
 import Foundation
 
 enum BoundedFileReader {
+  /// The whole file, or `nil` unless it is a regular file owned by this user
+  /// and no larger than `maximumBytes`. The path is opened once and everything
+  /// after that — type, owner, size, the bytes themselves — comes from that one
+  /// descriptor (see `DescriptorBoundFile`), so the path cannot be swapped for
+  /// a link, FIFO or other file between the check and the read. A file that
+  /// grows past the limit while being read is refused too.
   static func read(_ url: URL, maximumBytes: Int) -> Data? {
     guard maximumBytes >= 0,
-      let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
-      values.isRegularFile == true,
-      let fileSize = values.fileSize,
-      fileSize <= maximumBytes
+      let file = DescriptorBoundFile.open(url, maximumBytes: maximumBytes)
     else { return nil }
-    return try? Data(contentsOf: url, options: .mappedIfSafe)
+    defer { file.close() }
+    return file.readToEnd(maximumBytes: maximumBytes)
   }
 
   /// Writes `data` so the finished file is `0600` and the directory is `0700`.

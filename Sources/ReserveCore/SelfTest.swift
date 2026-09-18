@@ -853,6 +853,12 @@ public enum ReserveSelfTests {
     // A world-writable directory must never supply an executable Reserve runs.
     let sandbox = FileManager.default.temporaryDirectory
       .appendingPathComponent("reserve-locator-\(UUID().uuidString)")
+    // Created on its own first: `createDirectory` applies its attributes to
+    // intermediate directories too, and a world-writable sandbox would now
+    // (correctly) disqualify the private directory beneath it as well.
+    try FileManager.default.createDirectory(
+      at: sandbox, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o755])
     let openDirectory = sandbox.appendingPathComponent("open")
     try FileManager.default.createDirectory(
       at: openDirectory, withIntermediateDirectories: true,

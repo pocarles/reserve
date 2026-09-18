@@ -1316,7 +1316,10 @@ struct ReserveCoreTests {
     do {
       _ = try await ProcessRunner.output(
         executable: "/bin/sh",
-        arguments: ["-c", "(sleep 5) & exit 0"],
+        // The descendant holds the pipe far longer than the bound below, so
+        // finishing under it proves the deadline covered the drain without
+        // depending on how quickly a loaded CI runner schedules the test.
+        arguments: ["-c", "(sleep 30) & exit 0"],
         environment: ProcessInfo.processInfo.environment,
         timeout: .milliseconds(200))
       XCTFail("descendant-held pipe should hit the deadline")
@@ -1325,7 +1328,7 @@ struct ReserveCoreTests {
     } catch {
       XCTFail("unexpected error: \(error)")
     }
-    XCTAssertLessThan(start.duration(to: .now), .seconds(2))
+    XCTAssertLessThan(start.duration(to: .now), .seconds(10))
   }
 
   @Test
