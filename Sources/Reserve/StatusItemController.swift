@@ -634,7 +634,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         let paceMatches: Bool =
           switch (meter.paceRemainingPercentForTesting, expectedPace) {
           case (nil, nil): true
-          case (.some(let rendered), .some(let expected)): abs(rendered - expected) < 0.001
+          // Pace moves with the clock: on a five-hour window 0.001 points is
+          // under a fifth of a second, less than a slow runner takes between
+          // drawing the meter and checking it.
+          case (.some(let rendered), .some(let expected)): abs(rendered - expected) < 0.05
           default: false
           }
         return abs(meter.remainingPercentForTesting - allowance.remainingPercent) < 0.001
