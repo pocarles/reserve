@@ -1234,7 +1234,13 @@ struct ReserveCoreTests {
     let usage = try await scanner.scan(now: now)
     let repeatedUsage = try await scanner.scan(now: now)
 
+    // Codex input already contains cached input, so the local total is input
+    // plus output (1,000 + 20), without adding the cached subset a second time.
+    XCTAssertEqual(usage[.openAI]?.inputTokens, 1_000)
+    XCTAssertEqual(usage[.openAI]?.cachedInputTokens, 600)
+    XCTAssertEqual(usage[.openAI]?.outputTokens, 20)
     XCTAssertEqual(usage[.openAI]?.totalTokens, 1_020)
+    XCTAssertEqual(usage[.openAI]?.todayTokens, 1_020)
     XCTAssertEqual(usage[.anthropic]?.totalTokens, 135)
     XCTAssertEqual(repeatedUsage, usage)
   }

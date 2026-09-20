@@ -619,8 +619,10 @@ enum ConnectionFlowSelfTest {
       if !value { failures.append(message) }
     }
     let previous = LocalUsageSummary(
-      provider: .openAI, periodDays: 30, inputTokens: 40, outputTokens: 10,
-      apiEquivalentCostUSD: 1.25, todayTokens: 7, fetchedAt: Date(timeIntervalSince1970: 1_700_000_000),
+      provider: .openAI, periodDays: 30, inputTokens: 40, cachedInputTokens: 25,
+      cacheWriteInputTokens: 0, outputTokens: 10,
+      apiEquivalentCostUSD: 1.25, todayTokens: 7, cycleTokens: 50,
+      fetchedAt: Date(timeIntervalSince1970: 1_700_000_000),
       source: "synthetic previous scan")
     let replacement = LocalUsageSummary(
       provider: .openAI, periodDays: 30, inputTokens: 80, outputTokens: 20,
@@ -670,10 +672,14 @@ enum ConnectionFlowSelfTest {
     manualCard.layoutSubtreeIfNeeded()
     let manualText = LifecycleSelfTest.descendants(of: manualCard).compactMap { ($0 as? NSTextField)?.stringValue }
     let manualIDs = Set(LifecycleSelfTest.descendants(of: manualCard).compactMap { $0.identifier?.rawValue })
-    expect(manualIDs.contains("usage-local-history-openAI") && manualIDs.contains("usage-checked-openAI"),
-      "expanded detail did not show quota and local history times separately")
-    expect(manualText.contains("Last checked") && manualText.contains("Local history"),
-      "quota last checked and local history were not labeled separately")
+    expect(!manualIDs.contains("usage-local-history-openAI") && manualIDs.contains("usage-checked-openAI"),
+      "expanded detail showed a redundant local-history timestamp or hid quota freshness")
+    expect(manualText.contains("Last checked") && !manualText.contains("Local history"),
+      "expanded detail did not keep only the useful freshness label")
+    expect(manualText.contains("Cached tokens, 30 days")
+      && !manualText.contains("Cache read / write, 30 days")
+      && !manualText.contains("This billing cycle"),
+      "expanded detail did not apply the compact token-row contract")
     expect(!manualText.contains { $0.contains("synthetic") || $0.contains("/Users") || $0.contains(".jsonl") },
       "local history detail exposed a scanner source or path")
 
