@@ -1759,17 +1759,11 @@ private final class UsageDetailGrid: NSView {
             "Input / output, 30 days",
             "\(DashboardFormat.tokens(usage.inputTokens)) / \(DashboardFormat.tokens(usage.outputTokens))"))
       }
-      if usage.cachedInputTokens > 0 || usage.cacheWriteInputTokens > 0 {
+      if usage.cachedInputTokens > 0 {
         rows.append(
           Self.fact(
-            "Cache read / write, 30 days",
-            "\(DashboardFormat.tokens(usage.cachedInputTokens)) / \(DashboardFormat.tokens(usage.cacheWriteInputTokens))"))
-      }
-      if usage.cycleTokens > 0 {
-        rows.append(
-          Self.fact(
-            "This billing cycle",
-            "\(DashboardFormat.tokens(usage.cycleTokens)) tokens · ≈ \(DashboardFormat.money(usage.cycleAPIEquivalentCostUSD))"))
+            "Cached tokens, 30 days",
+            DashboardFormat.tokens(usage.cachedInputTokens)))
       }
     }
     if let models = usage?.modelCosts.prefix(3), !models.isEmpty {
@@ -1839,17 +1833,7 @@ private final class UsageDetailGrid: NSView {
           alternateValues: ["just now", "59 min ago", "999h ago"],
           clockText: { date in Self.age(checked, now: date) }))
     }
-    // Token totals from this Mac have their own clock. A fresh quota check
-    // must not make an older scan look current.
     if summary.localHistorySupported, summary.localHistoryEnabled {
-      if let scanned = summary.localHistoryCheckedAt {
-        rows.append(
-          Self.cell(
-            "Local history", Self.age(scanned, now: now),
-            identifier: "usage-local-history-\(summary.provider.rawValue)",
-            alternateValues: ["just now", "59 min ago", "999h ago"],
-            clockText: { date in Self.age(scanned, now: date) }))
-      }
       if let failure = summary.localHistoryError {
         let note = ReserveLabel(
           failure, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
