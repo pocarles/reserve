@@ -9,6 +9,12 @@ struct ProviderViewState: Identifiable {
   var isRefreshing = false
   var isConnecting = false
   var localUsage: LocalUsageSummary?
+  /// When this Mac's session logs were last scanned successfully. Separate
+  /// from the quota snapshot, which can be fresh while these totals are not.
+  var localHistoryCheckedAt: Date?
+  /// A failed scan leaves the previous totals in place and says so here.
+  /// Cleared by the next successful scan. Never a path or log excerpt.
+  var localHistoryError: String?
   var subscriptionCostUSD: Double?
   var subscriptionCostLabel: String? = nil
   var renewalStart: Date?
@@ -20,6 +26,9 @@ struct ProviderViewState: Identifiable {
   var requiresUpdate = false
   var usageAccessDenied = false
   var localHistoryEnabled = false
+  /// Presentation preference copied onto each state so the dashboard can mask
+  /// personal details without reading preferences itself.
+  var hidesPersonalInfo = false
   /// The sign-in helper, or what Reserve prepares for it, could not be
   /// launched at all. That is not a sign-in the person left unfinished, and
   /// launching the same thing again cannot fix it, so it has its own state.
@@ -91,9 +100,17 @@ final class UsageStore {
 
   private let cache: SnapshotCache
   private let fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)?
+  /// Production uses one scanner so its in-memory index survives between
+  /// scans. Tests pass a closure so a scan can succeed or fail without
+  /// reading this Mac's session logs.
+  private let localUsageScanner = LocalUsageScanner()
+  private let localUsageScan: @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
+  /// Cache-only daily history. Production reads the one scanner's archive.
+  /// Test and preview stores get an empty loader so they never open the
+  /// production index. Range changes do not call this.
+  private let dailyHistoryLoad: @Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory]
   private let loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))?
   private let openLoginURL: (URL) -> Bool
-  private let localUsageScanner = LocalUsageScanner()
   private let serviceStatusClient = ServiceStatusClient()
   private let defaults: UserDefaults
   private let notifications: ReserveNotifications
@@ -126,7 +143,11 @@ final class UsageStore {
   private var refreshCompletions: [ProviderID: [() -> Void]] = [:]
   private var cancellationGenerations: [ProviderID: Int] = [:]
   private var refreshTasks: [ProviderID: Task<Void, Never>] = [:]
+  /// When a scan last finished successfully. A failure does not move this, so
+  /// the 30-minute interval cannot hide a retry behind a scan that found nothing.
   private var lastLocalUsageScanAt: Date?
+  /// Safe wording for the last failed scan. Nil after a successful scan.
+  private var localHistoryScanError: String?
   private var claudeQuotaWatcher: QuotaFileWatcher?
   /// One throttle per provider, because detail data is now asked for one card at
   /// a time as well as all at once from the Insights pane.
@@ -153,6 +174,10 @@ final class UsageStore {
         for provider in ProviderID.allCases where self.states[provider]?.localUsage?.origin != .providerAccount {
           self.states[provider]?.localUsage = nil
         }
+        // A disabled history pane must not keep showing a failed or fresh scan.
+        self.localHistoryScanError = nil
+        self.lastLocalUsageScanAt = nil
+        self.publishedDailyHistory = [:]
       }
       self.changed()
       if newValue {
@@ -222,9 +247,30 @@ final class UsageStore {
   private let planKeys: PlanKeyStorage
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
-  /// Which provider row is open in the popover. Transient interface state, so
-  /// it is deliberately not persisted.
-  var expandedProvider: ProviderID?
+  /// The provider whose detail panel is shown below the overview grid.
+  ///
+  /// Selection is a navigation choice rather than transient disclosure state:
+  /// reopening Reserve should return to the provider the person was looking at.
+  /// If that provider is no longer enabled, the first enabled provider is used
+  /// without destroying the saved choice, so re-enabling it restores it.
+  var expandedProvider: ProviderID? {
+    get {
+      if let raw = self.defaults.string(forKey: "dashboard.selectedProvider"),
+        let provider = ProviderID(rawValue: raw), self.isEnabled(provider)
+      {
+        return provider
+      }
+      return ProviderID.allCases.first(where: self.isEnabled)
+    }
+    set {
+      if let newValue {
+        self.defaults.set(newValue.rawValue, forKey: "dashboard.selectedProvider")
+      } else {
+        self.defaults.removeObject(forKey: "dashboard.selectedProvider")
+      }
+      self.changed()
+    }
+  }
   /// The one API row whose details are open, if any.
   var expandedAPIProvider: APIConsumptionProvider?
   private var staleProviders: Set<ProviderID> = []
@@ -237,6 +283,8 @@ final class UsageStore {
     notificationsActive: Bool? = nil,
     cache: SnapshotCache = SnapshotCache(),
     fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)? = nil,
+    localUsageScan: (@Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary])? = nil,
+    dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
     openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) },
     planKeys: PlanKeyStorage = .keychain,
@@ -246,6 +294,28 @@ final class UsageStore {
     self.loginHandoffDeadline = loginHandoffDeadline
     self.cache = cache
     self.fetchOverride = fetchOverride
+    if let localUsageScan {
+      self.localUsageScan = localUsageScan
+    } else if fetchOverride != nil || startAutomatically == false {
+      // A store built for tests or previews must not read this Mac's logs
+      // or the production usage index, even when a refresh asks for history.
+      self.localUsageScan = { _, _ in [:] }
+    } else {
+      let scanner = self.localUsageScanner
+      self.localUsageScan = { providers, now in
+        try await scanner.scan(periodDays: 30, now: now, providers: providers)
+      }
+    }
+    if let dailyHistoryLoad {
+      self.dailyHistoryLoad = dailyHistoryLoad
+    } else if fetchOverride != nil || startAutomatically == false {
+      self.dailyHistoryLoad = { _, _ in [:] }
+    } else {
+      let scanner = self.localUsageScanner
+      self.dailyHistoryLoad = { providers, now in
+        await scanner.cachedHistory(periodDays: 90, now: now, providers: providers)
+      }
+    }
     self.loginCommandOverride = loginCommandOverride
     self.openLoginURL = openLoginURL
     self.defaults = defaults
@@ -289,6 +359,9 @@ final class UsageStore {
       state.renewalStart = self.renewalStart(for: provider)
       state.nextRenewal = self.nextRenewal(for: provider)
       state.localHistoryEnabled = self.localHistoryEnabled
+      state.localHistoryCheckedAt = self.localHistoryEnabled ? self.lastLocalUsageScanAt : nil
+      state.localHistoryError = self.localHistoryEnabled ? self.localHistoryScanError : nil
+      state.hidesPersonalInfo = self.hidesPersonalInfo
       return state
     }
   }
@@ -384,12 +457,164 @@ final class UsageStore {
       onFinished: onFinished) { self.changed() }
   }
 
+  /// Zero means adaptive. Any other saved value is a fixed interval, including
+  /// the historical default of 30, so existing users keep the choice they made.
+  static let adaptiveRefreshSentinel = 0
+
   var refreshIntervalMinutes: Int {
-    get { max(1, self.defaults.integer(forKey: "refresh.intervalMinutes")) }
+    get {
+      let stored = self.defaults.integer(forKey: "refresh.intervalMinutes")
+      if stored == Self.adaptiveRefreshSentinel, self.refreshModeIsAdaptive { return 0 }
+      return max(1, stored)
+    }
     set {
-      self.defaults.set(max(1, newValue), forKey: "refresh.intervalMinutes")
+      if newValue == Self.adaptiveRefreshSentinel {
+        self.defaults.set(Self.adaptiveRefreshSentinel, forKey: "refresh.intervalMinutes")
+        self.defaults.set(true, forKey: "refresh.adaptive")
+      } else {
+        self.defaults.set(max(1, newValue), forKey: "refresh.intervalMinutes")
+        self.defaults.set(false, forKey: "refresh.adaptive")
+      }
       self.startScheduler()
     }
+  }
+
+  private var refreshModeIsAdaptive: Bool {
+    self.defaults.bool(forKey: "refresh.adaptive")
+  }
+
+  /// Fixed intervals report themselves. Adaptive asks the pure policy using
+  /// the last dashboard open and the machine state gathered here.
+  func effectiveRefreshIntervalMinutes(now: Date = Date(), constrained: Bool? = nil) -> Int {
+    let stored = self.refreshIntervalMinutes
+    guard stored == Self.adaptiveRefreshSentinel else { return max(1, stored) }
+    let machineConstrained = constrained ?? Self.machineIsRefreshConstrained()
+    return AdaptiveRefreshPolicy.minutes(
+      now: now,
+      lastDashboardOpenAt: self.lastDashboardOpenAt,
+      constrained: machineConstrained)
+  }
+
+  static func machineIsRefreshConstrained(
+    lowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled,
+    thermal: ProcessInfo.ThermalState = ProcessInfo.processInfo.thermalState
+  ) -> Bool {
+    if lowPowerMode { return true }
+    switch thermal {
+    case .serious, .critical: return true
+    default: return false
+    }
+  }
+
+  /// Recorded when the dashboard is shown. Adaptive refresh may move the next
+  /// tick forward; it never postpones one that was already sooner.
+  private(set) var lastDashboardOpenAt: Date?
+
+  func noteDashboardOpened(at date: Date = Date()) {
+    self.lastDashboardOpenAt = date
+    guard self.refreshIntervalMinutes == Self.adaptiveRefreshSentinel else { return }
+    self.bringAdaptiveTickForward(now: date)
+  }
+
+  var hidesPersonalInfo: Bool {
+    get { self.defaults.bool(forKey: "privacy.hidePersonalInfo") }
+    set {
+      self.defaults.set(newValue, forKey: "privacy.hidePersonalInfo")
+      self.changed()
+    }
+  }
+
+  var dashboardHotKey: DashboardHotKeyChoice {
+    get { DashboardHotKeyChoice.persisted(self.defaults.string(forKey: "hotkey.dashboard")) }
+    set {
+      self.defaults.set(newValue.rawValue, forKey: "hotkey.dashboard")
+      self.changed()
+    }
+  }
+
+  /// Last registration outcome. Settings reads this; quota updates do not
+  /// change it, so the hot key is not registered again.
+  private(set) var dashboardHotKeyStatus: DashboardHotKeyRegistration = .inactive
+
+  func setDashboardHotKeyStatus(_ status: DashboardHotKeyRegistration) {
+    guard self.dashboardHotKeyStatus != status else { return }
+    self.dashboardHotKeyStatus = status
+    self.changed()
+  }
+
+  /// Days of cached daily history Insights may chart. Switching this never
+  /// scans session logs; it only changes which cached range is presented.
+  var insightHistoryDays: Int {
+    get {
+      let stored = self.defaults.integer(forKey: "insights.historyDays")
+      return [7, 30, 90].contains(stored) ? stored : 30
+    }
+    set {
+      let days = [7, 30, 90].contains(newValue) ? newValue : 30
+      self.defaults.set(days, forKey: "insights.historyDays")
+      self.changed()
+    }
+  }
+
+  /// Published daily aggregates. Empty until a successful scan records them.
+  /// Range changes read this dictionary and do not scan.
+  private(set) var publishedDailyHistory: [ProviderID: [InsightHistoryDay]] = [:]
+  private var dailyHistoryLoads = 0
+
+  var dailyHistoryLoadCountForTesting: Int { self.dailyHistoryLoads }
+
+  func insightSeries(for provider: ProviderID, now: Date = Date()) -> InsightHistorySeries {
+    return InsightHistoryRange.series(
+      provider: provider,
+      days: self.insightHistoryDays,
+      now: now,
+      published: self.publishedDailyHistory)
+  }
+
+  /// Test-only publication. Production scans will call the same replacement
+  /// once the cache reader exists. Overlapping days replace; they do not add.
+  func publishDailyHistoryForTesting(_ days: [InsightHistoryDay], provider: ProviderID) {
+    var merged: [String: InsightHistoryDay] = [:]
+    for day in self.publishedDailyHistory[provider] ?? [] {
+      merged[day.day] = day
+    }
+    for day in days {
+      merged[day.day] = day
+    }
+    self.publishedDailyHistory[provider] = merged.values.sorted { $0.day < $1.day }
+    self.changed()
+  }
+
+  /// Replaces published days from a cache-only read. Does not scan session
+  /// roots. Disabled history and disabled providers are dropped.
+  func publishCachedHistory(_ histories: [ProviderID: CachedUsageHistory]) {
+    guard self.localHistoryEnabled else {
+      self.publishedDailyHistory = [:]
+      return
+    }
+    var next: [ProviderID: [InsightHistoryDay]] = [:]
+    for (provider, history) in histories {
+      guard self.isEnabled(provider),
+        ProviderDescriptor.forProvider(provider).capabilities.contains(.localHistory)
+      else { continue }
+      next[provider] = history.days.map {
+        InsightHistoryDay(day: $0.day, tokens: $0.tokens, costUSD: $0.costUSD)
+      }.sorted { $0.day < $1.day }
+    }
+    self.publishedDailyHistory = next
+    self.dailyHistoryLoads += 1
+  }
+
+  /// Cache-only load. Counts as a history load, never as a session scan.
+  func loadPublishedDailyHistory(now: Date = Date()) async {
+    guard self.localHistoryEnabled else {
+      self.publishedDailyHistory = [:]
+      self.dailyHistoryLoads += 1
+      return
+    }
+    let enabled = Set(ProviderID.allCases.filter { self.isEnabled($0) })
+    let loaded = await self.dailyHistoryLoad(enabled, now)
+    self.publishCachedHistory(loaded)
   }
 
   var notificationsEnabled: Bool {
@@ -580,7 +805,6 @@ final class UsageStore {
 
   func refreshAll(manual: Bool = true) {
     guard !self.isRefreshingAll else { return }
-    if !manual, ProcessInfo.processInfo.isLowPowerModeEnabled { return }
     // A refresh means every reading on screen, so the API measurements go with
     // the subscription round. Each provider dedupes its own in-flight read.
     self.refreshEnabledAPIConsumption()
@@ -589,7 +813,9 @@ final class UsageStore {
     for provider in ProviderID.allCases where self.isEnabled(provider) {
       self.states[provider]?.isRefreshing = true
     }
-    let scanLocalUsage = self.insightsVisible && self.beginLocalUsageRefresh(force: manual)
+    // An explicit Refresh checks this Mac even while Settings Insights is
+    // closed. Automatic sweeps still scan only while that pane is open.
+    let scanLocalUsage = (manual || self.insightsVisible) && self.beginLocalUsageRefresh(force: manual)
     self.changed()
     Task {
       if manual, self.fetchOverride == nil { await AnthropicProvider.clearPersistedRateLimitBlock() }
@@ -603,7 +829,7 @@ final class UsageStore {
     guard self.automaticRefreshEnabled, !self.isRefreshingAll else { return false }
     return Self.resumeRefreshNeeded(
       states: self.orderedStates.filter { self.isEnabled($0.provider) },
-      intervalMinutes: self.refreshIntervalMinutes,
+      intervalMinutes: self.effectiveRefreshIntervalMinutes(now: now),
       isRefreshingAll: self.isRefreshingAll,
       lastCompletedAt: self.lastRefreshCompletedAt,
       now: now)
@@ -639,7 +865,7 @@ final class UsageStore {
         states: ProviderID.allCases.compactMap { self.states[$0] }
           .filter { self.isEnabled($0.provider) },
         lastCompletedAt: self.lastRefreshCompletedAt,
-        intervalMinutes: self.refreshIntervalMinutes,
+        intervalMinutes: self.effectiveRefreshIntervalMinutes(now: now),
         now: now)
     else { return }
     self.refreshAll(manual: false)
@@ -1424,7 +1650,8 @@ final class UsageStore {
     self.defaults.register(defaults: [
       // Insights used local history before 1.3.0. Keep it available after an
       // update unless the person explicitly turned it off. Scans still only
-      // run while Insights is visible, so this does not add background work.
+      // run while Insights is visible, or when Refresh is used, so this does
+      // not add background work.
       "history.localEnabled": true,
       "provider.openAI.enabled": BinaryLocator.find("codex") != nil,
       "provider.anthropic.enabled": BinaryLocator.find("claude") != nil,
@@ -1445,6 +1672,10 @@ final class UsageStore {
       // costs far more than Reserve itself. Half-hourly is plenty; the interval
       // remains configurable.
       "refresh.intervalMinutes": 30,
+      "refresh.adaptive": false,
+      "privacy.hidePersonalInfo": false,
+      "hotkey.dashboard": DashboardHotKeyChoice.off.rawValue,
+      "insights.historyDays": 30,
       "notifications.enabled": true,
       // Smart alerts are the default stream: they only fire when the forecast
       // changes what you should do.
@@ -1662,6 +1893,7 @@ final class UsageStore {
       }
     }
     self.changed()
+    await self.loadPublishedDailyHistory()
     self.startScheduler()
     self.refreshAll(manual: false)
     self.refreshEnabledAPIConsumption()
@@ -1672,7 +1904,10 @@ final class UsageStore {
   /// card can both ask without one gating the other.
   private func beginLocalUsageRefresh(force: Bool) -> Bool {
     guard self.localHistoryEnabled, !self.isScanningLocalUsage else { return false }
-    if !force, let lastLocalUsageScanAt,
+    // A failed scan stays eligible even when the previous success is still
+    // inside the quiet period. Success freshness is left in place so the
+    // dashboard does not pretend the last good totals just disappeared.
+    if !force, self.localHistoryScanError == nil, let lastLocalUsageScanAt,
       Date().timeIntervalSince(lastLocalUsageScanAt) < self.localUsageScanInterval
     {
       return false
@@ -1713,19 +1948,38 @@ final class UsageStore {
     }
   }
 
-  private func startScheduler() {
+  /// When the current sleeper expects to fire. Compared, never extended, when
+  /// adaptive policy shortens the next wait.
+  private var schedulerFireAt: Date?
+
+  private func startScheduler(now: Date = Date()) {
     self.schedulerTask?.cancel()
-    let minutes = self.refreshIntervalMinutes
+    let minutes = max(1, self.effectiveRefreshIntervalMinutes(now: now))
+    let fireAt = now.addingTimeInterval(TimeInterval(minutes * 60))
+    self.schedulerFireAt = fireAt
     self.schedulerTask = Task { [weak self] in
-      while !Task.isCancelled {
-        try? await Task.sleep(for: .seconds(minutes * 60))
-        guard !Task.isCancelled else { break }
-        await MainActor.run {
-          self?.refreshAllIfWorthwhile()
-          self?.refreshEnabledAPIConsumption()
-        }
+      let delay = fireAt.timeIntervalSince(now)
+      if delay > 0 {
+        try? await Task.sleep(for: .seconds(delay))
+      }
+      guard !Task.isCancelled else { return }
+      await MainActor.run {
+        guard let self else { return }
+        self.refreshAllIfWorthwhile()
+        self.refreshEnabledAPIConsumption()
+        guard !Task.isCancelled else { return }
+        self.startScheduler()
       }
     }
+  }
+
+  /// Restarts the sleeper only when the new policy delay fires sooner than the
+  /// one already waiting. Opening the dashboard never postpones a tick.
+  private func bringAdaptiveTickForward(now: Date) {
+    let minutes = max(1, self.effectiveRefreshIntervalMinutes(now: now))
+    let candidate = now.addingTimeInterval(TimeInterval(minutes * 60))
+    if let scheduled = self.schedulerFireAt, candidate >= scheduled { return }
+    self.startScheduler(now: now)
   }
 
   private func refreshInSweep(_ provider: ProviderID) async {
@@ -1769,11 +2023,18 @@ final class UsageStore {
   private func performLocalUsageScan(notify: Bool = true) async {
     guard self.localHistoryEnabled else {
       self.isScanningLocalUsage = false
+      if notify { self.changed() }
       return
     }
     let now = Date()
-    let result = try? await self.localUsageScanner.scan(periodDays: 30, now: now, providers: Set(ProviderID.allCases.filter { self.isEnabled($0) }))
-    if self.localHistoryEnabled, let result {
+    let enabled = Set(ProviderID.allCases.filter { self.isEnabled($0) })
+    do {
+      let result = try await self.localUsageScan(enabled, now)
+      guard self.localHistoryEnabled else {
+        self.isScanningLocalUsage = false
+        if notify { self.changed() }
+        return
+      }
       for provider in ProviderID.allCases {
         guard self.isEnabled(provider) else { continue }
         let snapshot = self.states[provider]?.snapshot
@@ -1782,10 +2043,30 @@ final class UsageStore {
           snapshot: snapshot,
           scanned: result[provider])
       }
+      self.lastLocalUsageScanAt = now
+      self.localHistoryScanError = nil
+      await self.loadPublishedDailyHistory(now: now)
+    } catch {
+      // Keep the last successful totals. A failure must not look like a fresh
+      // scan, and must not start the 30-minute quiet period.
+      self.localHistoryScanError = Self.localHistoryFailureMessage(error)
     }
-    self.lastLocalUsageScanAt = now
     self.isScanningLocalUsage = false
     if notify { self.changed() }
+  }
+
+  /// What the dashboard may say about a failed local scan. Paths, file names
+  /// and raw scanner text stay out of the interface.
+  static func localHistoryFailureMessage(_ error: Error) -> String {
+    guard let providerError = error as? UsageProviderError else {
+      return "Local history could not be read. Totals are from the last successful scan."
+    }
+    switch providerError {
+    case .timedOut:
+      return "Local history scan timed out. Totals are from the last successful scan."
+    default:
+      return "Local history could not be read. Totals are from the last successful scan."
+    }
   }
 
   /// Cursor usage comes from its account API, not this Mac's session logs.
@@ -1977,6 +2258,19 @@ final class UsageStore {
       && self.states[.cursor]?.isConnecting == false
       && self.states[.cursor]?.localUsage == nil
       && self.states[.cursor]?.requiresKeychainAccess == true
+  }
+
+  /// Places synthetic local totals without scanning this Mac. Used only by the
+  /// refresh self-test, which cannot write `states` from outside the store.
+  func seedLocalUsageForSelfTest(_ usage: LocalUsageSummary?) {
+    self.states[.openAI]?.localUsage = usage
+  }
+
+  /// Replaces one snapshot for a presentation check, then the caller restores it.
+  func replaceSnapshotForSelfTest(_ provider: ProviderID, snapshot: UsageSnapshot?) -> UsageSnapshot? {
+    let previous = self.states[provider]?.snapshot
+    self.states[provider]?.snapshot = snapshot
+    return previous
   }
 
   /// Fires once when a provider's numbers go stale, and clears when they

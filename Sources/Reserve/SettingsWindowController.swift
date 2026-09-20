@@ -66,6 +66,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   /// of the controls it is building.
   private var isApplyingPane = false
   private var restoreAfterUpdatePresentation = false
+  /// Last document offset per pane, so a store refresh does not jump the reader.
+  private var savedScrollOffsets: [Pane: NSPoint] = [:]
 
   init(
     store: UsageStore,
@@ -118,6 +120,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let window = self.window, window.isVisible else { return }
     guard !self.isApplyingPane else { return }
     if window.firstResponder is NSText { return }
+    self.rememberScrollOffset()
     self.applyPane(animated: false)
   }
 
@@ -232,10 +235,38 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     window.title = self.pane.title
     let content = self.makeContentView()
     content.layoutSubtreeIfNeeded()
+    let screenLimit = (window.screen ?? NSScreen.main)?.visibleFrame.height ?? 800
+    let limit = max(SettingsLayout.minimumHeight, screenLimit - 80)
+    let natural = max(SettingsLayout.minimumHeight, content.frame.height)
+    let view: NSView
+    if natural > limit {
+      let scroll = NSScrollView()
+      scroll.identifier = NSUserInterfaceItemIdentifier("settings-scroll")
+      scroll.hasVerticalScroller = true
+      scroll.autohidesScrollers = false
+      scroll.scrollerStyle = .legacy
+      scroll.drawsBackground = false
+      scroll.documentView = content
+      let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+      content.frame.size.width = SettingsLayout.defaultSize.width - scrollerWidth
+      scroll.frame = NSRect(
+        x: 0, y: 0, width: SettingsLayout.defaultSize.width, height: limit)
+      // Non-flipped documents open at the bottom unless the clip is pinned
+      // to the top of the document.
+      let saved = self.savedScrollOffsets[self.pane]
+      let top = NSPoint(x: 0, y: max(0, content.frame.height - limit))
+      scroll.contentView.scroll(to: saved ?? top)
+      view = scroll
+      scroll.reflectScrolledClipView(scroll.contentView)
+      // The clip view ignores scroll(to:) until it is in a window.
+      scroll.contentView.postsBoundsChangedNotifications = false
+    } else {
+      view = content
+    }
     let size = NSSize(
-      width: max(SettingsLayout.defaultSize.width, content.fittingSize.width),
-      height: max(SettingsLayout.minimumHeight, content.frame.height))
-    window.contentView = content
+      width: SettingsLayout.defaultSize.width,
+      height: min(natural, limit))
+    window.contentView = view
     let frame = window.frame
     let target = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
     let newFrame = NSRect(
@@ -245,6 +276,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       height: target.height)
     window.setFrame(newFrame, display: true, animate: animated && !ReserveMotion.isReduced)
     window.contentMinSize = NSSize(width: size.width, height: SettingsLayout.minimumHeight)
+    if let scroll = window.contentView as? NSScrollView, let document = scroll.documentView {
+      let saved = self.savedScrollOffsets[self.pane]
+      let top = NSPoint(x: 0, y: max(0, document.frame.height - scroll.contentView.bounds.height))
+      scroll.contentView.scroll(to: saved ?? top)
+      scroll.reflectScrolledClipView(scroll.contentView)
+    }
   }
 
   private func makeContentView() -> NSView {
@@ -272,6 +309,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
             self.formRow("Refresh limits:", self.refreshIntervalControl()),
             self.formRow("Startup:", self.launchAtLoginCheckbox()),
             self.formRow("History:", self.localHistoryCheckbox()),
+            self.formRow("Open dashboard:", self.hotKeyControl()),
+            self.formRow("Privacy:", self.hidePersonalCheckbox()),
           ]),
         self.section(
           title: "Menu bar",
@@ -382,37 +421,59 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let rows = ProviderID.allCases.filter { self.store.isEnabled($0) }.map(self.insightRow)
     let states = ProviderID.allCases.compactMap { self.store.states[$0] }
       .filter { self.store.isEnabled($0.provider) }
-    let measured = states.filter { Self.activity(for: $0) != nil }
+    let rangeDays = self.store.insightHistoryDays
+    let published = states.map { state -> (ProviderViewState, InsightHistorySeries) in
+      (state, self.store.insightSeries(for: state.provider))
+    }
+    let measured = published.filter { $0.1.available && $0.1.coveredDays > 0 }
+    let coveredDays = measured.reduce(0) { $0 + $1.1.coveredDays }
+    let requestedDays = measured.reduce(0) { $0 + $1.1.requestedDays }
+    let pricedDays = Self.pricedDayCount(measured.map(\.1))
+    let apiValue = Self.coveredCost(measured.map(\.1))
     let origins = Set(states.compactMap { $0.localUsage?.origin })
-    let apiValue = states.reduce(0.0) { $0 + ($1.localUsage?.apiEquivalentCostUSD ?? 0) }
     let plans = states.compactMap { self.store.monthlySubscriptionCost(for: $0.provider) }
     let planTotal = plans.reduce(0, +)
-    let coverage = "\(measured.count) provider\(measured.count == 1 ? "" : "s") with history"
+    let coverage = requestedDays == 0
+      ? "\(measured.count) provider\(measured.count == 1 ? "" : "s") with history"
+      : "\(coveredDays) of \(requestedDays) cached days"
+    let priced = pricedDays == 0
+      ? "no priced days"
+      : "\(pricedDays) of \(max(coveredDays, pricedDays)) days priced"
     let trackedPlans = "\(plans.count) plan\(plans.count == 1 ? "" : "s") with known costs"
+    let rangeLabel = "last \(rangeDays) days"
+    let totalText = measured.isEmpty
+      ? (plans.isEmpty
+        ? "No usage history or monthly costs available"
+        : "No usage history yet. \(DashboardFormat.money(planTotal))/month across \(trackedPlans).")
+      : plans.isEmpty
+        ? "≈ \(Self.moneyOrUnavailable(apiValue)) estimated API value for \(rangeLabel). \(coverage). \(priced)."
+        : "≈ \(Self.moneyOrUnavailable(apiValue)) estimated API value for \(rangeLabel). \(coverage). \(priced). "
+          + "\(DashboardFormat.money(planTotal))/month across \(trackedPlans) is a separate reference."
     let total = SettingsLabel(
-      measured.isEmpty
-        ? (plans.isEmpty
-          ? "No usage history or monthly costs available"
-          : "No usage history yet · \(DashboardFormat.money(planTotal))/month across \(trackedPlans)")
-        : plans.isEmpty
-          ? "≈ \(DashboardFormat.money(apiValue)) estimated API value · \(coverage)"
-          : "≈ \(DashboardFormat.money(apiValue)) estimated API value from \(coverage) · "
-            + "\(DashboardFormat.money(planTotal))/month across \(trackedPlans)",
-      size: 13, weight: .medium, color: .labelColor)
+      totalText, size: 13, weight: .medium, color: .labelColor, wraps: true)
     total.identifier = NSUserInterfaceItemIdentifier("insights-total")
+    total.preferredMaxLayoutWidth = SettingsLayout.contentWidth
+    total.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
 
     let charts = states.compactMap { state -> NSView? in
+      let local = ProviderDescriptor.forProvider(state.provider).capabilities.contains(.localHistory)
+      if local {
+        let series = published.first { $0.0.provider == state.provider }?.1
+          ?? self.store.insightSeries(for: state.provider)
+        return self.heatmapRow(series)
+      }
       if let daily = state.snapshot?.accountTokenActivity?.dailyUsageBuckets, !daily.isEmpty {
-        return self.chartRow(provider: state.provider, series: daily)
+        let keys = Set(InsightHistoryRange.dayKeys(count: self.store.insightHistoryDays, now: Date()))
+        let sliced = daily.filter { keys.contains($0.day) }.sorted { $0.day < $1.day }
+        if !sliced.isEmpty {
+          return self.chartRow(provider: state.provider, series: sliced)
+        }
       }
-      guard let usage = state.localUsage else { return nil }
-      if usage.dailyTokens.contains(where: { $0.tokens > 0 }) {
-        return self.chartRow(provider: state.provider, series: usage.dailyTokens)
-      }
-      let reason = usage.origin == .providerAccount
-        ? "Daily history unavailable"
-        : "No daily activity"
-      return self.chartUnavailableRow(provider: state.provider, reason: reason)
+      return self.chartUnavailableRow(provider: state.provider, reason: "Daily history unavailable")
+    }
+    let accountRows = states.compactMap { state -> NSView? in
+      guard let usage = state.snapshot?.accountUsage, usage.origin == .providerAccount else { return nil }
+      return self.accountTotalRow(provider: state.provider, usage: usage)
     }
 
     let activityFooter: String
@@ -435,22 +496,27 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       identifier: "pane-insights",
       sections: [
         self.section(
+          title: "Range",
+          footer: "Cached days only. Changing the range does not read session files.",
+          rows: [self.historyRangeControl()]),
+        self.section(
           title: "Activity",
           footer: activityFooter,
           rows: rows),
         self.section(
-          title: "Daily tokens",
-          footer: charts.isEmpty
-            ? "History appears when the provider supplies it. Local history is optional in General."
-            : "One bar per day, newest on the right. A compressed square-root scale keeps "
-              + "ordinary days visible beside outliers. Each provider uses its own peak. "
-              + "Daily history unavailable means the provider supplied totals without a "
-              + "per-day breakdown.",
+          title: "Account totals",
+          footer: "Provider-reported 30-day account totals. Not the selected local range, and not a daily heatmap.",
+          rows: accountRows.isEmpty
+            ? [SettingsLabel("No account totals", size: 12, color: .tertiaryLabelColor)]
+            : accountRows),
+        self.section(
+          title: "Daily heatmap",
+          footer: "The selected range only. A filled cell is a cached day. An empty outline is a missing day, not zero. "
+            + "Cursor keeps its own account history and is not mixed with local logs.",
           rows: charts.isEmpty ? [SettingsLabel("—", size: 12, color: .tertiaryLabelColor)] : charts),
         self.section(
           title: "Comparable value and cost",
-          footer: "Reserve cannot know whether these tokens would otherwise have been bought "
-            + "through an API. Usage coverage and tracked monthly cost are stated separately.",
+          footer: "Estimated API equivalent for the selected range. Monthly subscription price below is a separate reference, not a prorated bill or savings.",
           rows: [total]),
       ])
   }
@@ -594,6 +660,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           rows: [
             self.bullets([
               "Aggregate token totals",
+              "Per-day token and estimated cost totals for up to 90 days, from scans Reserve already runs",
               "Normalized quota values and reset times",
               "Your preferences",
             ])
@@ -603,6 +670,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           rows: [
             self.bullets([
               "Prompts or responses",
+              "Personal identifiers in the daily history cache",
               "Raw provider payloads",
               "OAuth tokens, account identifiers or passwords",
               "API keys, including Z.ai and Kimi plan keys — those stay in the macOS Keychain",
@@ -645,13 +713,62 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   private func refreshIntervalControl() -> NSView {
     let popup = NSPopUpButton()
     popup.identifier = NSUserInterfaceItemIdentifier("settings-refresh-interval")
-    let intervals = [1, 5, 10, 15, 30]
-    popup.addItems(withTitles: intervals.map { "Every \($0) minute\($0 == 1 ? "" : "s")" })
-    popup.selectItem(at: intervals.firstIndex(of: self.store.refreshIntervalMinutes) ?? 2)
+    popup.addItems(withTitles: Self.refreshIntervalTitles)
+    let minutes = self.store.refreshIntervalMinutes
+    let index = Self.refreshIntervalMinutes.firstIndex(of: minutes) ?? 0
+    popup.selectItem(at: index)
     popup.target = self
     popup.action = #selector(self.intervalChanged(_:))
     popup.widthAnchor.constraint(equalToConstant: 190).isActive = true
     return popup
+  }
+
+  static let refreshIntervalMinutes = [0, 1, 5, 10, 15, 30]
+  static let refreshIntervalTitles = [
+    "Adaptive (2 to 30 min)",
+    "Every 1 minute", "Every 5 minutes", "Every 10 minutes",
+    "Every 15 minutes", "Every 30 minutes",
+  ]
+
+  private func hotKeyControl() -> NSView {
+    let popup = NSPopUpButton()
+    popup.identifier = NSUserInterfaceItemIdentifier("settings-dashboard-hotkey")
+    popup.addItems(withTitles: DashboardHotKeyChoice.allCases.map(\.title))
+    let index = DashboardHotKeyChoice.allCases.firstIndex(of: self.store.dashboardHotKey) ?? 0
+    popup.selectItem(at: index)
+    popup.target = self
+    popup.action = #selector(self.hotKeyChanged(_:))
+    popup.widthAnchor.constraint(equalToConstant: 190).isActive = true
+    let status = SettingsLabel(self.hotKeyStatusText(), size: 11, color: .secondaryLabelColor)
+    status.identifier = NSUserInterfaceItemIdentifier("settings-hotkey-status")
+    let stack = NSStackView(views: [popup, status])
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = 4
+    return stack
+  }
+
+  private func hotKeyStatusText() -> String {
+    switch self.store.dashboardHotKeyStatus {
+    case .inactive:
+      return "Off"
+    case .registered:
+      return "Registered. Opens the dashboard and does not close it."
+    case .conflict:
+      return "Already used by another app"
+    case .failed:
+      return "Could not register"
+    }
+  }
+
+  private func hidePersonalCheckbox() -> NSButton {
+    let button = NSButton(
+      checkboxWithTitle: "Hide personal info", target: self,
+      action: #selector(self.hidePersonalChanged(_:)))
+    button.state = self.store.hidesPersonalInfo ? .on : .off
+    button.identifier = NSUserInterfaceItemIdentifier("settings-hide-personal")
+    button.toolTip = "Masks account and organization on screen. Originals stay in memory."
+    return button
   }
 
   private func launchAtLoginCheckbox() -> NSView {
@@ -1251,26 +1368,50 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let logo = SettingsProviderLogo(provider: provider)
     let name = SettingsLabel(provider.displayName, size: 13, color: .labelColor)
     name.widthAnchor.constraint(equalToConstant: 92).isActive = true
-    let activity = self.store.states[provider].flatMap(Self.activity)
+    let series = self.store.insightSeries(for: provider)
+    let state = self.store.states[provider]
+    let activity = Self.rangeActivity(series: series, state: state)
     let today = SettingsLabel(
-      activity.map { "\(DashboardFormat.tokens($0.today)) today" }
+      activity?.today.map { "\(DashboardFormat.tokens($0)) today" }
         ?? (self.store.states[provider]?.snapshot?.detailedUsageUnavailable == true
           ? "Details unavailable" : "No usage data"),
       size: 12, color: .secondaryLabelColor)
     today.widthAnchor.constraint(equalToConstant: 130).isActive = true
     let rolling = SettingsLabel(
-      activity.map { "\(DashboardFormat.tokens($0.rolling)) in 30 days" } ?? "—",
+      activity?.rolling.map {
+        "\(DashboardFormat.tokens($0)) in \(max(series.requestedDays, self.store.insightHistoryDays)) days"
+      }
+        ?? "Unavailable",
       size: 12, color: .secondaryLabelColor)
     rolling.widthAnchor.constraint(equalToConstant: 150).isActive = true
-    // An API-equivalent value is modeled, so it is marked and kept in regular
-    // weight; only the total in "Comparable value and cost" is emphasised.
     let value = SettingsLabel(
-      activity?.value.map { "≈ \(DashboardFormat.money($0))" } ?? "—",
+      Self.rangeValueText(activity),
       size: 12, color: .labelColor)
+    value.identifier = NSUserInterfaceItemIdentifier("insights-value-\(provider.rawValue)")
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
     let row = NSStackView(views: [logo, name, today, rolling, spacer, value])
     row.identifier = NSUserInterfaceItemIdentifier("insight-\(provider.rawValue)")
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 8
+    row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+    return row
+  }
+
+  /// Account-wide 30-day totals. These stay labeled as account history and
+  /// are not treated as today's local tokens.
+  private func accountTotalRow(provider: ProviderID, usage: LocalUsageSummary) -> NSView {
+    let name = SettingsLabel(provider.displayName, size: 12, color: .secondaryLabelColor)
+    name.widthAnchor.constraint(equalToConstant: 92).isActive = true
+    let totals = SettingsLabel(
+      "\(DashboardFormat.tokens(usage.totalTokens)) in \(usage.periodDays) days, account",
+      size: 12, color: .secondaryLabelColor)
+    totals.identifier = NSUserInterfaceItemIdentifier("insights-account-\(provider.rawValue)")
+    let value = SettingsLabel(
+      "≈ \(DashboardFormat.money(usage.apiEquivalentCostUSD)) account",
+      size: 12, color: .labelColor)
+    let row = NSStackView(views: [name, totals, value])
     row.orientation = .horizontal
     row.alignment = .centerY
     row.spacing = 8
@@ -1303,6 +1444,97 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     return (recent.first(where: { $0.day == todayKey })?.tokens ?? 0, rolling, nil)
   }
 
+  /// Selected-range totals from published daily history. A nil token is missing,
+  /// not zero. Nonfinite costs stay unavailable. Token sums saturate.
+  private static func rangeActivity(
+    series: InsightHistorySeries,
+    state: ProviderViewState?
+  ) -> (today: Int64?, rolling: Int64?, value: Double?, pricedDays: Int, tokenDays: Int)? {
+    if series.available {
+      let covered = series.days.filter { $0.tokens != nil }
+      guard !covered.isEmpty else { return nil }
+      var rolling = Int64(0)
+      var overflow = false
+      var cost = 0.0
+      var pricedDays = 0
+      for day in covered {
+        let (sum, wrapped) = rolling.addingReportingOverflow(day.tokens ?? 0)
+        if wrapped { overflow = true } else { rolling = sum }
+        if let value = day.costUSD, value.isFinite, value >= 0 {
+          cost += value
+          pricedDays += 1
+        }
+      }
+      if overflow { rolling = Int64.max }
+      let todayKey = series.days.last?.day
+      let today = series.days.first { $0.day == todayKey }?.tokens
+      return (
+        today,
+        rolling,
+        pricedDays > 0 && cost.isFinite ? cost : nil,
+        pricedDays,
+        covered.count)
+    }
+    guard let state, let daily = state.snapshot?.accountTokenActivity?.dailyUsageBuckets,
+      !daily.isEmpty
+    else { return nil }
+    let keys = Set(series.days.map(\.day))
+    let recent = daily.filter { keys.contains($0.day) }
+    var rolling = Int64(0)
+    for item in recent {
+      let (sum, wrapped) = rolling.addingReportingOverflow(item.tokens)
+      rolling = wrapped ? Int64.max : sum
+    }
+    let todayKey = series.days.last?.day
+    let today = todayKey.flatMap { key in recent.first { $0.day == key }?.tokens }
+    return (today, recent.isEmpty ? nil : rolling, nil, 0, recent.count)
+  }
+
+  private static func rangeValueText(
+    _ activity: (today: Int64?, rolling: Int64?, value: Double?, pricedDays: Int, tokenDays: Int)?
+  ) -> String {
+    guard let activity else { return "Unavailable" }
+    guard activity.pricedDays > 0, let value = activity.value, value.isFinite else {
+      return "Cost unavailable"
+    }
+    let money = "≈ \(DashboardFormat.money(value))"
+    if activity.pricedDays < activity.tokenDays {
+      return "\(money), \(activity.pricedDays) of \(activity.tokenDays) days priced"
+    }
+    return money
+  }
+
+  /// Sum of finite published day costs. Nil when no covered day has a cost,
+  /// so an average price per token is never invented.
+  private static func coveredCost(_ series: [InsightHistorySeries]) -> Double? {
+    var total = 0.0
+    var any = false
+    for item in series where item.available {
+      for day in item.days {
+        guard let cost = day.costUSD, cost.isFinite, cost >= 0 else { continue }
+        total += cost
+        any = true
+      }
+    }
+    return any && total.isFinite ? total : nil
+  }
+
+  /// Days with a finite cost. Token coverage alone must not make the total
+  /// look fully priced.
+  private static func pricedDayCount(_ series: [InsightHistorySeries]) -> Int {
+    series.reduce(0) { count, item in
+      guard item.available else { return count }
+      return count + item.days.filter {
+        $0.tokens != nil && $0.costUSD?.isFinite == true && ($0.costUSD ?? -1) >= 0
+      }.count
+    }
+  }
+
+  private static func moneyOrUnavailable(_ value: Double?) -> String {
+    guard let value, value.isFinite else { return "unavailable" }
+    return DashboardFormat.money(value)
+  }
+
   private func appearanceModeControl() -> NSView {
     let control = NSSegmentedControl(
       labels: AppearanceMode.allCases.map(\.displayName),
@@ -1318,6 +1550,31 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func chartRow(provider: ProviderID, series: [DailyUsage]) -> NSView {
+    self.chartRow(provider: provider, series: series, caption: nil)
+  }
+
+  private func heatmapRow(_ series: InsightHistorySeries) -> NSView {
+    let name = SettingsLabel(series.provider.displayName, size: 12, color: .secondaryLabelColor)
+    name.widthAnchor.constraint(equalToConstant: 92).isActive = true
+    let chart = UsageHeatmapView(series: series)
+    chart.widthAnchor.constraint(
+      equalToConstant: SettingsLayout.contentWidth - 100 - 110).isActive = true
+    let caption = SettingsLabel(
+      "\(series.coveredDays)/\(series.requestedDays) days",
+      size: 11, color: .tertiaryLabelColor)
+    caption.identifier = NSUserInterfaceItemIdentifier(
+      "insights-coverage-\(series.provider.rawValue)")
+    caption.widthAnchor.constraint(equalToConstant: 110).isActive = true
+    caption.alignment = .right
+    let row = NSStackView(views: [name, chart, caption])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 8
+    row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
+    return row
+  }
+
+  private func chartRow(provider: ProviderID, series: [DailyUsage], caption: String?) -> NSView {
     let name = SettingsLabel(provider.displayName, size: 12, color: .secondaryLabelColor)
     name.widthAnchor.constraint(equalToConstant: 92).isActive = true
     let chart = ReserveSparkline(series: series, color: ReserveColor.chartPrimary)
@@ -1327,8 +1584,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     chart.widthAnchor.constraint(
       equalToConstant: SettingsLayout.contentWidth - 100 - 90).isActive = true
     let peak = series.map(\.tokens).max() ?? 0
-    let peakLabel = SettingsLabel(
-      "peak \(DashboardFormat.tokens(peak))", size: 11, color: .tertiaryLabelColor)
+    let peakText = caption ?? "peak \(DashboardFormat.tokens(peak))"
+    let peakLabel = SettingsLabel(peakText, size: 11, color: .tertiaryLabelColor)
     peakLabel.widthAnchor.constraint(equalToConstant: 90).isActive = true
     peakLabel.alignment = .right
     let row = NSStackView(views: [name, chart, peakLabel])
@@ -1337,6 +1594,25 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     row.spacing = 8
     row.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
     return row
+  }
+
+  private func historyRangeControl() -> NSView {
+    let popup = NSPopUpButton()
+    popup.identifier = NSUserInterfaceItemIdentifier("insights-history-range")
+    popup.addItems(withTitles: ["7 days", "30 days", "90 days"])
+    let days = [7, 30, 90]
+    popup.selectItem(at: days.firstIndex(of: self.store.insightHistoryDays) ?? 1)
+    popup.target = self
+    popup.action = #selector(self.historyRangeChanged(_:))
+    popup.setAccessibilityLabel("History range")
+    popup.widthAnchor.constraint(equalToConstant: 160).isActive = true
+    return popup
+  }
+
+  @objc private func historyRangeChanged(_ sender: NSPopUpButton) {
+    let days = [7, 30, 90]
+    let index = min(max(0, sender.indexOfSelectedItem), days.count - 1)
+    self.store.insightHistoryDays = days[index]
   }
 
   private func chartUnavailableRow(provider: ProviderID, reason: String) -> NSView {
@@ -1588,7 +1864,19 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func intervalChanged(_ sender: NSPopUpButton) {
-    self.store.refreshIntervalMinutes = [1, 5, 10, 15, 30][max(0, sender.indexOfSelectedItem)]
+    let choices = Self.refreshIntervalMinutes
+    let index = min(max(0, sender.indexOfSelectedItem), choices.count - 1)
+    self.store.refreshIntervalMinutes = choices[index]
+  }
+
+  @objc private func hotKeyChanged(_ sender: NSPopUpButton) {
+    let choices = DashboardHotKeyChoice.allCases
+    let index = min(max(0, sender.indexOfSelectedItem), choices.count - 1)
+    self.store.dashboardHotKey = choices[index]
+  }
+
+  @objc private func hidePersonalChanged(_ sender: NSButton) {
+    self.store.hidesPersonalInfo = sender.state == .on
   }
 
   @objc private func checkForUpdates(_: NSButton) {
@@ -1778,6 +2066,64 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       toolDetected: BinaryLocator.find(executable) != nil)
   }
 
+  /// Records each registration outcome so Settings can show it. Does not call Carbon.
+  func exerciseHotKeyStatusForSelfTest() -> Bool {
+    let original = self.store.dashboardHotKeyStatus
+    defer { self.store.setDashboardHotKeyStatus(original) }
+    self.store.setDashboardHotKeyStatus(.conflict)
+    self.pane = .general
+    self.applyPane(animated: false)
+    let conflict = self.statusText("settings-hotkey-status")
+    self.store.setDashboardHotKeyStatus(.failed(-50))
+    self.applyPane(animated: false)
+    let failed = self.statusText("settings-hotkey-status")
+    self.store.setDashboardHotKeyStatus(.registered)
+    self.applyPane(animated: false)
+    let registered = self.statusText("settings-hotkey-status")
+    self.store.setDashboardHotKeyStatus(.inactive)
+    self.applyPane(animated: false)
+    let off = self.statusText("settings-hotkey-status")
+    return conflict == "Already used by another app"
+      && failed == "Could not register"
+      && registered == "Registered. Opens the dashboard and does not close it."
+      && off == "Off"
+  }
+
+  private func statusText(_ identifier: String) -> String {
+    guard let window = self.window else { return "" }
+    return Self.descendants(of: window.contentView ?? NSView()).compactMap { $0 as? NSTextField }
+      .first { $0.identifier?.rawValue == identifier }?.stringValue ?? ""
+  }
+
+  private func rememberScrollOffset() {
+    guard let scroll = self.window?.contentView as? NSScrollView else { return }
+    self.savedScrollOffsets[self.pane] = scroll.contentView.bounds.origin
+  }
+
+  /// A scroll view exists only if the last row is inside the document, the
+  /// document is taller than the viewport, and a persistent scroller is shown.
+  /// Scrolling that row into view has to land it inside the clip.
+  private static func scrollReachable(_ row: NSView, scroll: NSScrollView, document: NSView) -> Bool {
+    document.layoutSubtreeIfNeeded()
+    scroll.layoutSubtreeIfNeeded()
+    let inDocument = row.convert(row.bounds, to: document)
+    guard inDocument.minY >= -0.5, inDocument.maxY <= document.frame.height + 0.5 else {
+      return false
+    }
+    guard document.frame.height <= scroll.contentView.bounds.height + 0.5
+      || (scroll.hasVerticalScroller && !scroll.autohidesScrollers)
+    else { return false }
+    if document.frame.height > scroll.contentView.bounds.height + 0.5 {
+      let target = NSPoint(x: 0, y: max(0, inDocument.maxY - scroll.contentView.bounds.height))
+      scroll.contentView.scroll(to: target)
+      scroll.reflectScrolledClipView(scroll.contentView)
+      let visible = scroll.contentView.documentVisibleRect
+      guard visible.insetBy(dx: -1, dy: -1).intersects(inDocument) else { return false }
+    }
+    let widthLimit = scroll.contentView.bounds.width + 1
+    return document.frame.width <= widthLimit
+  }
+
   private static func providerStatus(
     provider: ProviderID,
     hasSnapshot: Bool,
@@ -1799,6 +2145,54 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     view.subviews + view.subviews.flatMap { Self.descendants(of: $0) }
   }
 
+  /// The comparable-value label must wrap inside the pane width, and its
+  /// cell must be tall enough for every line. A scroll view nearby does not
+  /// count.
+  /// Lays out the window first. `layoutSubtreeIfNeeded` on the label alone
+  /// does not give it the section width, and `boundingRect` with font leading
+  /// is not the height `NSTextFieldCell` draws.
+  private static func insightsTotalFits(window: NSWindow) -> Bool {
+    guard let root = window.contentView else {
+      fputs("insights-total missing content view\n", stderr)
+      return false
+    }
+    root.layoutSubtreeIfNeeded()
+    window.layoutIfNeeded()
+    guard let label = Self.descendants(of: root).compactMap({ $0 as? NSTextField }).first(where: {
+      $0.identifier?.rawValue == "insights-total"
+    }), let cell = label.cell as? NSTextFieldCell else {
+      fputs("insights-total missing wrapping label\n", stderr)
+      return false
+    }
+    let width = SettingsLayout.contentWidth
+    let limit = NSSize(width: width, height: 10_000)
+    let needed = cell.cellSize(forBounds: NSRect(origin: .zero, size: limit))
+    let frame = label.convert(label.bounds, to: root)
+    // Width constraints apply to the alignment rect. Bounds are 2 pt wider
+    // on each side, so comparing bounds.width to contentWidth is always short.
+    let alignmentWidth = label.alignmentRect(forFrame: label.bounds).width
+    let full = label.stringValue
+    let spoken = label.accessibilityLabel() ?? ""
+    let fits = cell.wraps
+      && !full.isEmpty
+      && !full.contains("…")
+      && alignmentWidth <= width + 0.5
+      && alignmentWidth + 0.5 >= min(width, needed.width)
+      && label.bounds.height + 0.5 >= needed.height
+      && frame.maxX <= root.bounds.width + 0.5
+      && spoken == full
+    if !fits {
+      fputs(
+        "insights-total bounds=\(Int(label.bounds.width))x\(Int(label.bounds.height)) "
+          + "alignment=\(Int(alignmentWidth.rounded())) "
+          + "cell=\(Int(needed.width.rounded(.up)))x\(Int(needed.height.rounded(.up))) "
+          + "frameMaxX=\(Int(frame.maxX)) root=\(Int(root.bounds.width)) "
+          + "wraps=\(cell.wraps) lines=\(full.split(separator: "\n").count)\n",
+        stderr)
+    }
+    return fits
+  }
+
   // MARK: - Self test
 
   func validateForSelfTest() -> (success: Bool, details: String) {
@@ -1813,9 +2207,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     func fits(_ stackID: String) -> Bool {
       guard let content = window.contentView else { return false }
       content.layoutSubtreeIfNeeded()
-      return descendants().first { $0.identifier?.rawValue == stackID }.map {
-        $0.frame.minY >= -1 && $0.frame.maxY <= content.bounds.height + 1
-      } ?? false
+      guard let stack = descendants().first(where: { $0.identifier?.rawValue == stackID }) else {
+        return false
+      }
+      if let scroll = stack.enclosingScrollView ?? descendants().compactMap({ $0 as? NSScrollView }).first,
+        let document = scroll.documentView
+      {
+        return Self.scrollReachable(stack, scroll: scroll, document: document)
+      }
+      let frame = stack.convert(stack.bounds, to: content)
+      return content.bounds.insetBy(dx: -1, dy: -1).contains(frame)
     }
     func typographyIsReadable() -> Bool {
       let fonts = descendants().compactMap { ($0 as? NSControl)?.font }
@@ -1839,12 +2240,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.pane = pane
     self.store.insightsVisible = pane == .insights && self.window?.isVisible == true
       self.applyPane(animated: false)
-      let fitted = fits("pane-\(pane.rawValue)")
       let readable = typographyIsReadable()
-      let noScroll = !descendants().contains { $0 is NSScrollView }
-      allPanesFit = allPanesFit && fitted && noScroll
+      let fitted = fits("pane-\(pane.rawValue)")
+      allPanesFit = allPanesFit && fitted
       allPanesReadable = allPanesReadable && readable
-      paneResults.append("\(pane.rawValue)=\(fitted && readable && noScroll)")
+      paneResults.append("\(pane.rawValue)=\(fitted && readable)")
     }
 
     // General
@@ -1855,11 +2255,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       $0.identifier?.rawValue == "settings-refresh-interval"
     }
     let expectedIntervals = [
+      "Adaptive (2 to 30 min)",
       "Every 1 minute", "Every 5 minutes", "Every 10 minutes", "Every 15 minutes",
       "Every 30 minutes",
     ]
     let originalInterval = self.store.refreshIntervalMinutes
-    intervalPopup?.selectItem(at: 0)
+    intervalPopup?.selectItem(at: 1)
     let oneMinuteRefreshWorks =
       intervalPopup.flatMap { popup -> Bool? in
         guard let action = popup.action else { return nil }
@@ -1870,6 +2271,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let generalSuccess =
       intervalPopup?.itemTitles == expectedIntervals
       && oneMinuteRefreshWorks
+      && generalIDs.contains("settings-dashboard-hotkey")
+      && generalIDs.contains("settings-hide-personal")
       && generalIDs.contains("settings-launch-at-login")
       && generalIDs.contains("menu-bar-provider")
       && generalIDs.contains("menu-bar-remaining")
@@ -2048,9 +2451,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let insightsSuccess =
       ProviderID.allCases.allSatisfy { insightIDs.contains("insight-\($0.rawValue)") }
       && insightIDs.contains("insights-total")
-      && insightIDs.contains("insights-chart-cursor")
-      && insightLabels.contains { $0.contains("compressed square-root scale") }
+      && Self.insightsTotalFits(window: window)
+      && insightIDs.contains("insights-history-range")
+      && insightIDs.contains("insights-heatmap-openAI")
+      && insightIDs.contains("insights-chart-unavailable-cursor")
+      && insightLabels.contains { $0.contains("missing day, not zero") }
       && insightLabels.contains { $0.contains("Cursor uses provider-reported account totals") }
+      && insightLabels.contains { $0.contains("separate reference") }
+      && self.exerciseHotKeyStatusForSelfTest()
 
     self.pane = .privacy
     self.applyPane(animated: false)
@@ -2115,6 +2523,47 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   func renderProviders(to url: URL) throws { try self.renderPane(.providers, to: url) }
 
   func renderAPI(to url: URL) throws { try self.renderPane(.api, to: url) }
+
+  func renderInsightsOpaque(to url: URL, appearance: NSAppearance) throws {
+    self.window?.appearance = appearance
+    self.pane = .insights
+    self.store.insightsVisible = false
+    self.applyPane(animated: false)
+    guard let window = self.window, let view = window.contentView else {
+      throw SettingsRenderError.viewUnavailable
+    }
+    view.appearance = appearance
+    view.layoutSubtreeIfNeeded()
+    let bounds = NSRect(origin: .zero, size: window.contentRect(forFrameRect: window.frame).size)
+    guard bounds.width >= 1, bounds.height >= 1 else { throw SettingsRenderError.viewUnavailable }
+    view.frame = bounds
+    guard let rep = NSBitmapImageRep(
+      bitmapDataPlanes: nil,
+      pixelsWide: Int(bounds.width.rounded(.up)),
+      pixelsHigh: Int(bounds.height.rounded(.up)),
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+      hasAlpha: true,
+      isPlanar: false,
+      colorSpaceName: .deviceRGB,
+      bytesPerRow: 0,
+      bitsPerPixel: 0)
+    else { throw SettingsRenderError.bitmapUnavailable }
+    rep.size = bounds.size
+    guard let context = NSGraphicsContext(bitmapImageRep: rep) else {
+      throw SettingsRenderError.bitmapUnavailable
+    }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    NSColor.windowBackgroundColor.setFill()
+    bounds.fill()
+    view.displayIgnoringOpacity(bounds, in: context)
+    NSGraphicsContext.restoreGraphicsState()
+    guard let data = rep.representation(using: .png, properties: [:]) else {
+      throw SettingsRenderError.pngUnavailable
+    }
+    try data.write(to: url, options: .atomic)
+  }
 
   private func renderPane(_ pane: Pane, to url: URL) throws {
     self.pane = pane
@@ -2485,7 +2934,13 @@ private final class SettingsTextField: NSTextField {
 }
 
 private final class SettingsLabel: NSTextField {
-  init(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor) {
+  init(
+    _ text: String,
+    size: CGFloat,
+    weight: NSFont.Weight = .regular,
+    color: NSColor,
+    wraps: Bool = false
+  ) {
     super.init(frame: .zero)
     self.stringValue = text
     self.isEditable = false
@@ -2494,7 +2949,14 @@ private final class SettingsLabel: NSTextField {
     self.drawsBackground = false
     self.font = .systemFont(ofSize: size, weight: weight)
     self.textColor = color
-    self.lineBreakMode = .byTruncatingTail
+    self.lineBreakMode = wraps ? .byWordWrapping : .byTruncatingTail
+    self.maximumNumberOfLines = wraps ? 0 : 1
+    self.cell?.wraps = wraps
+    self.cell?.isScrollable = false
+    if wraps {
+      self.setAccessibilityLabel(text)
+      self.setContentCompressionResistancePriority(.required, for: .vertical)
+    }
   }
 
   required init?(coder: NSCoder) { nil }

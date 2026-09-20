@@ -96,6 +96,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.showDashboard()
   }
 
+  /// Hot key path. An already visible dashboard stays open and keeps its tile.
+  func openDashboardFromHotKey() {
+    if self.popover.isShown {
+      self.bringDashboardToFront()
+      return
+    }
+    self.showDashboard()
+  }
+
   func closeMenuForStressTest() {
     self.popover.performClose(nil)
   }
@@ -127,11 +136,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     (self.localMouseMonitor == nil ? 0 : 1) + (self.globalMouseMonitor == nil ? 0 : 1)
   }
 
-  /// The same path the disclosure control takes, so lifecycle checks exercise
-  /// the real toggle rather than writing the store directly.
+  /// The same path a provider tile takes, so lifecycle checks exercise the real
+  /// selection rather than writing the store directly.
   func toggleProviderDetailForTesting(_ provider: ProviderID) {
-    self.store.expandedProvider = self.store.expandedProvider == provider ? nil : provider
-    if self.store.expandedProvider == provider { self.store.requestInsights(for: provider) }
+    guard self.store.expandedProvider != provider else { return }
+    self.store.expandedProvider = provider
+    self.store.requestInsights(for: provider)
     self.expandDashboard()
   }
 
@@ -370,6 +380,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let labels = descendants.compactMap { ($0 as? NSTextField)?.stringValue }
     let dashboardTypographyIsReadable = descendants.compactMap { ($0 as? NSTextField)?.font }
       .allSatisfy { $0.pointSize >= 8 }
+    let providerTiles = ProviderID.allCases.filter {
+      identifiers.contains("provider-tile-\($0.rawValue)")
+    }.count
     let providerCards = ProviderID.allCases.filter {
       identifiers.contains("provider-card-\($0.rawValue)")
     }.count
@@ -416,6 +429,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let directCard = descendants.compactMap { $0 as? ProviderDashboardCard }.first {
       $0.identifier?.rawValue == "provider-card-openAI"
     }
+    self.store.menuBarProvider = .cursor
+    dashboardController.update()
+    dashboardController.view.layoutSubtreeIfNeeded()
+    let explicitPinButton = Self.descendants(of: dashboardController.view)
+      .compactMap { $0 as? NSButton }.first {
+        $0.identifier?.rawValue == "pin-menu-bar-openAI"
+    }
+    explicitPinButton?.performClick(nil)
+    let explicitMenuBarSelectionWorks = explicitPinButton != nil
+      && self.store.menuBarProvider == .openAI
     directCard?.selectForMenuBar()
     let directProviderSelectionWorks = self.store.menuBarProvider == .openAI
     let fullCardSelectionHitTargetWorks = directCard.map {
@@ -441,8 +464,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       size.width == DashboardMetrics.width
       && size.height >= DashboardMetrics.minimumHeight
       && size.height <= DashboardMetrics.availableHeight(on: NSScreen.main)
-    // Five cards exceed a small display's viewport. The document may be taller,
-    // but the viewport must fit and scrolling must reveal the whole fifth card.
+    // Four rows of tiles plus the selected detail exceed a small display's
+    // viewport. The viewport must fit and scrolling must reveal the fifth tile.
     let compactCeiling = DashboardMetrics.availableHeight(on: nil, visibleHeight: 700)
     let compactDashboard = UsageDashboardView(
       states: self.store.orderedStates, selectedMenuBarProvider: nil,
@@ -456,7 +479,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let fifthProviderReachable: Bool
     if let scroll = compactViews.compactMap({ $0 as? NSScrollView }).first,
       let document = scroll.documentView,
-      let fifth = compactViews.first(where: { $0.identifier?.rawValue == "provider-card-copilot" })
+      let fifth = compactViews.first(where: { $0.identifier?.rawValue == "provider-tile-copilot" })
     {
       document.layoutSubtreeIfNeeded()
       let fifthRect = fifth.convert(fifth.bounds, to: document)
@@ -474,24 +497,32 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && !labels.contains("TOKENS LAST 30D")
       && !labels.contains("SAVED LAST 30D")
       && !labels.contains("API VALUE")
-    // Every percentage states what it measures.
+    // Every percentage states what it measures, in both tiles and detail.
     let percentagesAreLabelled =
-      labels.filter { $0 == "left" }.count == previewSummaries.filter { $0.paceState != .stale }.count
-      && labels.filter { $0 == "last known" }.count == previewSummaries.filter { $0.paceState == .stale }.count
-      && labels.contains { $0.hasSuffix("% left") }
+      previewSummaries.allSatisfy { summary in
+        guard summary.primary != nil else { return true }
+        let suffix = summary.paceState == .stale ? "% last known" : "% left"
+        return labels.contains { $0.hasSuffix(suffix) }
+      }
       && !labels.contains { $0.hasSuffix("% used") }
       && DashboardFormat.remainingPercent(99.7525) == "99"
     let forecastCount = descendants.filter { $0.identifier?.rawValue == "forecast" }.count
     let allowanceCount = descendants.filter {
       ($0.identifier?.rawValue ?? "").hasPrefix("allowance-")
     }.count
-    let expectedForecastCount = previewSummaries.filter { summary in
-      summary.primary.map { DashboardFormat.showsForecast($0, paceState: summary.paceState,
-        observationTimeKnown: summary.observationTimeKnown) } ?? false
-    }.count
+    let selectedSummary = self.store.expandedProvider.flatMap { selected in
+      previewSummaries.first(where: { $0.provider == selected })
+    } ?? previewSummaries.first
+    let expectedForecastCount = selectedSummary.flatMap { summary in
+      summary.primary.map {
+        DashboardFormat.showsForecast(
+          $0, paceState: summary.paceState,
+          observationTimeKnown: summary.observationTimeKnown) ? 1 : 0
+      }
+    } ?? 0
     let forecastsPresent =
       forecastCount == expectedForecastCount
-      && allowanceCount == ProviderID.allCases.count
+      && allowanceCount >= 1
       && labels.contains {
         $0.hasPrefix("On track") || $0.hasPrefix("On pace")
           || $0.hasPrefix("At this pace") || $0.hasPrefix("Forecast unavailable")
@@ -503,11 +534,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && !identifiers.contains("status-openAI")
       && !identifiers.contains("status-grok")
       && !identifiers.contains("status-cursor")
-    let expectedSecondaryWindows = self.store.orderedStates
-      .filter { self.store.isEnabled($0.provider) }
-      .reduce(0) { count, state in
-        count + AllowanceBuilder.summary(for: state).secondary.filter { !$0.isComponentShare }.count
-      }
+    let expectedSecondaryWindows = selectedSummary?.secondary.count ?? 0
     let secondaryWindowsPresent =
       descendants.filter { ($0.identifier?.rawValue ?? "").hasPrefix("secondary-") }.count
       == expectedSecondaryWindows
@@ -561,14 +588,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         $0.contains("Cached")
       }
 
-    // Keyboard: rows take focus and answer Space and Return.
+    // Keyboard: overview tiles take focus and both Space and Return navigate.
     let keyboardReachable =
-      descendants.compactMap { $0 as? ProviderDashboardCard }.allSatisfy {
+      descendants.compactMap { $0 as? ProviderOverviewTile }.count == ProviderID.allCases.count
+      && descendants.compactMap { $0 as? ProviderOverviewTile }.allSatisfy {
         $0.acceptsFirstResponder && $0.canBecomeKeyView
       }
       && dashboardController.view.acceptsFirstResponder
       && dashboardController.view.responds(to: #selector(NSResponder.cancelOperation(_:)))
-      && dashboardController.firstKeyView() is ProviderDashboardCard
+      && dashboardController.firstKeyView() is ProviderOverviewTile
     func key(_ characters: String) -> NSEvent? {
       NSEvent.keyEvent(
         with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
@@ -577,15 +605,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
     let spaceSelectsProvider: Bool
     let returnOpensDetail: Bool
-    if let card = descendants.compactMap({ $0 as? ProviderDashboardCard }).first(where: {
-      $0.identifier?.rawValue == "provider-card-grok"
+    if let tile = descendants.compactMap({ $0 as? ProviderOverviewTile }).first(where: {
+      $0.identifier?.rawValue == "provider-tile-grok"
     }), let space = key(" "), let enter = key("\r") {
-      let beforeProvider = self.store.menuBarProvider
-      card.keyDown(with: space)
-      spaceSelectsProvider = self.store.menuBarProvider == .grok
-      self.store.menuBarProvider = beforeProvider
       let beforeExpansion = self.store.expandedProvider
-      card.keyDown(with: enter)
+      tile.keyDown(with: space)
+      spaceSelectsProvider = self.store.expandedProvider == .grok
+      tile.keyDown(with: enter)
       returnOpensDetail = self.store.expandedProvider == .grok
       self.store.expandedProvider = beforeExpansion
       dashboardController.update()
@@ -595,13 +621,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       returnOpensDetail = false
     }
 
-    // VoiceOver: rows speak their whole state, and decoration stays silent.
+    // VoiceOver: tiles speak their whole state, and decoration stays silent.
     let liveDescendants = Self.descendants(of: dashboardController.view)
-    let spokenRows = liveDescendants.compactMap { $0 as? ProviderDashboardCard }
+    let spokenRows = liveDescendants.compactMap { $0 as? ProviderOverviewTile }
     let rowsAreSpoken =
       spokenRows.count == ProviderID.allCases.count
       && spokenRows.allSatisfy { row in
-        let summary = previewSummaries.first { row.identifier?.rawValue == "provider-card-\($0.provider.rawValue)" }
+        let summary = previewSummaries.first {
+          row.identifier?.rawValue == "provider-tile-\($0.provider.rawValue)"
+        }
         let expected = summary?.paceState == .stale ? "percent last known" : "percent left"
         return row.accessibilityRole() == .button
           && (row.accessibilityLabel() ?? "").isEmpty == false
@@ -613,16 +641,20 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let decorationIsSilent = liveDescendants.compactMap { $0 as? NSImageView }
       .allSatisfy { ($0.accessibilityLabel() ?? "").isEmpty }
     let renderedMeters = liveDescendants.compactMap { $0 as? ReserveMeter }
-    // The primary limit always has a meter; providers that chart every plan
-    // limit add one per remaining non-share limit, in card order.
-    let meteredAllowances: [(allowance: Allowance, paceState: UsagePaceState)] =
-      previewSummaries.flatMap { summary -> [(allowance: Allowance, paceState: UsagePaceState)] in
-        guard let primary = summary.primary else { return [] }
-        let extra =
-          ProviderDescriptor.forProvider(summary.provider).capabilities.contains(.limitMeters)
-          ? summary.secondary.filter { !$0.isComponentShare }.map { ($0, $0.paceState) } : []
-        return [(primary, summary.paceState)] + extra
+    // Every tile has its primary meter. The selected detail repeats that meter
+    // at full width and may add provider-specific secondary limits.
+    var meteredAllowances: [(allowance: Allowance, paceState: UsagePaceState)] =
+      previewSummaries.compactMap { summary in
+        summary.primary.map { ($0, summary.paceState) }
       }
+    if let selectedSummary, let primary = selectedSummary.primary {
+      meteredAllowances.append((primary, selectedSummary.paceState))
+      if ProviderDescriptor.forProvider(selectedSummary.provider).capabilities.contains(.limitMeters) {
+        meteredAllowances.append(contentsOf: selectedSummary.secondary.filter {
+          !$0.isComponentShare
+        }.map { ($0, $0.paceState) })
+      }
+    }
     let metersAreSpoken = zip(renderedMeters, meteredAllowances).allSatisfy { meter, entry in
         meter.accessibilityRole() == .progressIndicator
           && (meter.accessibilityLabel() ?? "").isEmpty == false
@@ -659,10 +691,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         scanned: self.store.states[.openAI]?.localUsage)
         == self.store.states[.openAI]?.localUsage
 
-    // Progressive disclosure: one provider opens at a time and exposes limits and usage.
-    let disclosuresPresent = ProviderID.allCases.allSatisfy {
-      identifiers.contains("disclose-\($0.rawValue)")
-    }
+    // Overview navigation: every provider gets one tile, one detail panel is
+    // present, and the old per-row accordion controls are gone.
+    let overviewNavigationPresent =
+      identifiers.contains("provider-overview")
+      && providerTiles == ProviderID.allCases.count
+      && providerCards == 1
+      && !identifiers.contains { $0.hasPrefix("disclose-") }
     let originalExpansion = self.store.expandedProvider
     self.store.expandedProvider = .anthropic
     dashboardController.update()
@@ -697,7 +732,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && !expandedLabels.contains("Source")
       // The internal provenance block is intentionally absent from every provider.
       && !expandedIDs.contains { $0.hasPrefix("sources-") }
-      // Only one row opens at a time.
+      // Only the selected provider owns the detail panel.
       && !expandedIDs.contains("usage-detail-openAI")
       && !expandedIDs.contains("usage-detail-grok")
       && !expandedIDs.contains("usage-detail-cursor")
@@ -711,13 +746,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       self.store.menuBarProvider = .anthropic
       dashboardController.update()
       dashboardController.view.layoutSubtreeIfNeeded()
-      let marks = Self.descendants(of: dashboardController.view).filter {
-        ($0.identifier?.rawValue ?? "").hasPrefix("menu-bar-pin-")
-      }
+      let tileMarks = Self.descendants(of: dashboardController.view)
+        .compactMap { $0 as? ProviderOverviewTile }
+        .flatMap { Self.descendants(of: $0) }
+        .filter { ($0.identifier?.rawValue ?? "").hasPrefix("menu-bar-pin-") }
       self.store.menuBarProvider = original
       dashboardController.update()
       dashboardController.view.layoutSubtreeIfNeeded()
-      return marks.count == 1
+      return tileMarks.count == 1
     }()
     let oauthURLParsingIsSafe =
       UsageStore.authorizationURL(
@@ -807,17 +843,33 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && self.shouldDismissDashboard(forClickedWindow: unrelatedWindow)
     let clockAndDisclosureUpdatesWork = Self.dashboardClockAndDisclosureChecks()
     let expandRequestsDetails = self.expandingAProviderRequestsItsDetails()
+    let dashboardSelectionPersists = Self.dashboardSelectionPersistenceWorks()
     let historyPlaceholdersAreHonest = Self.historyPlaceholderChecks()
     let apiDetailsOpen = Self.apiDetailChecks()
-    guard providerCards == ProviderID.allCases.count, actionsPresent, quitRemainsReachable,
+    let hotKeyOpensDashboard = self.hotKeyOpensExistingDashboard()
+    let shareCardStaysPrivate = Self.shareCardOmitsPersonalText()
+    let privacyToggleRestores = self.privacyToggleRestoresOriginals()
+    let menuOffersShareAndPrivacy = descendants.compactMap { $0 as? DashboardMenuButton }.first.map {
+      button in
+      let items = button.makeMenu().items
+      let titles = items.map(\.title)
+      let actionableItemsHaveIcons = items.filter { !$0.isSeparatorItem }.allSatisfy {
+        $0.image != nil
+      }
+      return titles.contains("Share usage…") && titles.contains("Hide personal info")
+        && actionableItemsHaveIcons
+    } ?? false
+    guard providerTiles == ProviderID.allCases.count, providerCards == 1,
+      actionsPresent, quitRemainsReachable,
       logosPresent, bundledProviderArtworkPresent, scrollingMatchesAvailableSpace, contentFits,
       dashboardFits, fifthProviderReachable, headlinePresent,
-      activityMetricsAreGone, percentagesAreLabelled, forecastsPresent, disclosuresPresent,
+      activityMetricsAreGone, percentagesAreLabelled, forecastsPresent, overviewNavigationPresent,
       detailLayersPresent, keyboardReachable, spaceSelectsProvider, returnOpensDetail,
       rowsAreSpoken, decorationIsSilent, metersAreSpoken, meterSemanticsWork, motionIsPurposeful,
       chartScaleWorks,
       serviceStatusIsExceptionOnly, secondaryWindowsPresent, selectionIsQuiet,
       providerStatusWorks, directProviderSelectionWorks, fullCardSelectionHitTargetWorks,
+      explicitMenuBarSelectionWorks,
       firstClickSelectionWorks, footerButtonsArePadded, providerButtonsArePadded,
       refreshButtonIsPadded, dashboardTypographyIsReadable, oauthURLParsingIsSafe,
       outsideClickDismissalWorks, updateMigrationWorks,
@@ -829,16 +881,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       primaryWindowIgnoresComponentShares, urgentWindowBecomesPrimary, compactMoneyKeepsCurrency,
       localizedTimeUsesRegionalClock,
       semanticColorsWork, minuteClockIsCoordinated, resumeRefreshDecisionsWork,
-      expandRequestsDetails, historyPlaceholdersAreHonest, apiDetailsOpen
+      expandRequestsDetails, dashboardSelectionPersists, historyPlaceholdersAreHonest,
+      apiDetailsOpen, hotKeyOpensDashboard, shareCardStaysPrivate,
+      privacyToggleRestores, menuOffersShareAndPrivacy
     else {
       return (
         false,
-        "dashboard fifthProviderReachable=\(fifthProviderReachable), providers=\(providerCards)/\(ProviderID.allCases.count), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), disclosures=\(disclosuresPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(secondaryWindowsPresent), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork), expandRequestsDetails=\(expandRequestsDetails), historyPlaceholders=\(historyPlaceholdersAreHonest), apiDetails=\(apiDetailsOpen)"
+        "dashboard fifthProviderReachable=\(fifthProviderReachable), tiles=\(providerTiles)/\(ProviderID.allCases.count), detailCards=\(providerCards), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), overviewNavigation=\(overviewNavigationPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(descendants.filter { ($0.identifier?.rawValue ?? "").hasPrefix("secondary-") }.count)/\(expectedSecondaryWindows), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), explicitPin=\(explicitMenuBarSelectionWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork), expandRequestsDetails=\(expandRequestsDetails), selectionPersists=\(dashboardSelectionPersists), historyPlaceholders=\(historyPlaceholdersAreHonest), apiDetails=\(apiDetailsOpen), hotKey=\(hotKeyOpensDashboard), sharePrivate=\(shareCardStaysPrivate), privacyToggle=\(privacyToggleRestores), menuShare=\(menuOffersShareAndPrivacy)"
       )
     }
     return (
       true,
-      "dashboard leads with one factual conclusion, gives \(providerCards) providers the same reserve/on-pace/deficit anatomy, uses fixed semantic colors without red quota states, selects the automatic or pinned menu-bar source, opens one provider at a time onto limits and usage, shares one minute clock, refreshes stale data after resume, takes keyboard focus with Space and Return, and fits adaptively on the available screen"
+      "dashboard leads with one factual conclusion, gives \(providerTiles) providers a glanceable tile, restores one selected detail panel, uses fixed semantic colors without red quota states, selects the automatic or pinned menu-bar source, shares one minute clock, refreshes stale data after resume, takes keyboard focus with Space and Return, and fits adaptively on the available screen"
     )
   }
 
@@ -971,6 +1025,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   private func showDashboard() {
     guard let button = self.statusItem.button else { return }
     let dashboardController = self.dashboardControllerForUse()
+    if let selected = self.store.expandedProvider {
+      self.store.requestInsights(for: selected)
+    }
     // A reopened surface has to come back in the current appearance, so this is
     // applied before the content is built rather than after it is on screen.
     self.applyAppearance()
@@ -980,6 +1037,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.lockedStatusItemLength = self.statusItem.length
     self.updateStatusIcon()
     self.popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    self.store.noteDashboardOpened()
     self.applyAppearance()
     self.bringDashboardToFront()
     self.startMouseMonitors()
@@ -1251,13 +1309,38 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         snapshot: self.store.apiConsumption[provider],
         error: self.store.apiConsumptionErrors[provider],
         isRefreshing: self.store.apiConsumptionRefreshing.contains(provider),
-        isExpanded: self.store.expandedAPIProvider == provider)
+        isExpanded: self.store.expandedAPIProvider == provider,
+        hidesPersonalInfo: self.store.hidesPersonalInfo)
     }
   }
 
   private func showInsights() {
     self.openInsights()
     self.bringReserveWindowToFront(forClickedWindow: self.settingsWindow)
+  }
+
+  private var sharePreview: UsageSharePreviewController?
+
+  /// Opens the sanitized card for the selected provider. The model never
+  /// includes account, organization, email, path, or raw error text.
+  private func shareSelectedUsage() {
+    let provider = self.store.expandedProvider ?? ProviderID.allCases.first { self.store.isEnabled($0) }
+    guard let provider, let state = self.store.states[provider] else { return }
+    let usage = state.snapshot?.accountUsage ?? state.localUsage
+    let model = UsageShareCardBuilder.model(
+      provider: provider,
+      planName: state.snapshot?.planName,
+      windows: state.snapshot?.windows ?? [],
+      tokensUsed: usage?.totalTokens,
+      tokenPeriodDays: usage?.periodDays,
+      tokensCheckedAt: usage?.fetchedAt,
+      estimatedAPIEquivalentUSD: usage?.apiEquivalentCostUSD,
+      generatedAt: Date(),
+      hidingPersonal: true,
+      quotaCheckedAt: state.snapshot?.fetchedAt)
+    let preview = UsageSharePreviewController(model: model)
+    self.sharePreview = preview
+    preview.show()
   }
 
   private func connectProvider(_ provider: ProviderID) {
@@ -1280,13 +1363,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         dismiss: { [weak self] in self?.popover.performClose(nil) },
         toggleProviderDetail: { [weak self] provider in
           guard let self else { return }
-          // One row at a time, so cross-provider comparison survives.
-          self.store.expandedProvider = self.store.expandedProvider == provider ? nil : provider
-          // Opening a card is the request for everything Reserve knows about
-          // that provider; it no longer waits for someone to visit Insights.
-          if self.store.expandedProvider == provider {
-            self.store.requestInsights(for: provider)
-          }
+          // The overview is navigation, not an accordion: one provider always
+          // owns the detail panel and clicking it again keeps the page stable.
+          guard self.store.expandedProvider != provider else { return }
+          self.store.expandedProvider = provider
+          self.store.requestInsights(for: provider)
           self.expandDashboard()
         },
         quit: { NSApplication.shared.terminate(nil) },
@@ -1296,15 +1377,191 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
           self.store.expandedAPIProvider =
             self.store.expandedAPIProvider == provider ? nil : provider
           self.expandDashboard()
-        }))
+        },
+        shareUsage: { [weak self] in self?.shareSelectedUsage() },
+        toggleHidePersonalInfo: { [weak self] in
+          guard let self else { return }
+          self.store.hidesPersonalInfo.toggle()
+          self.expandDashboard()
+        },
+        hidesPersonalInfo: { [weak self] in self?.store.hidesPersonalInfo ?? false }))
     self.dashboardController = controller
     self.popover.contentViewController = controller
     return controller
   }
 
-  /// Expanding a provider card must ask the store for that provider's detail
-  /// data. The store records the request; its own guards keep an automated run
-  /// from starting a scan or a provider subprocess.
+  /// The last detail destination survives a new store, falls back while that
+  /// provider is disabled, and returns when it is enabled again.
+  private static func dashboardSelectionPersistenceWorks() -> Bool {
+    let domain = "Reserve.DashboardSelection.SelfTest"
+    guard let defaults = UserDefaults(suiteName: domain) else { return false }
+    defaults.removePersistentDomain(forName: domain)
+    defer { defaults.removePersistentDomain(forName: domain) }
+    defaults.set(true, forKey: "provider.openAI.enabled")
+    defaults.set(true, forKey: "provider.cursor.enabled")
+    let planKeys = PlanKeyStorage(
+      hasKey: { _ in false }, save: { _, _ in }, delete: { _ in })
+    let first = UsageStore(
+      defaults: defaults, startAutomatically: false, notificationsActive: false,
+      planKeys: planKeys)
+    first.expandedProvider = .cursor
+    let restored = UsageStore(
+      defaults: defaults, startAutomatically: false, notificationsActive: false,
+      planKeys: planKeys)
+    guard restored.expandedProvider == .cursor else { return false }
+    defaults.set(false, forKey: "provider.cursor.enabled")
+    guard restored.expandedProvider == .openAI else { return false }
+    defaults.set(true, forKey: "provider.cursor.enabled")
+    return restored.expandedProvider == .cursor
+  }
+
+  /// Hiding personal info changes the visible value and leaves the snapshot
+  /// original in place. Turning it off shows the original again.
+  private func privacyToggleRestoresOriginals() -> Bool {
+    let original = self.store.hidesPersonalInfo
+    let provider = self.store.expandedProvider ?? .openAI
+    let snapshot = UsageSnapshot(
+      provider: provider, planName: "Plus",
+      windows: [UsageWindow(id: "weekly", label: "Weekly", usedPercent: 10, resetsAt: nil)],
+      source: "privacy check",
+      details: [UsageDetail("Account", "ada@example.com", isPersonal: true)])
+    let saved = self.store.replaceSnapshotForSelfTest(provider, snapshot: snapshot)
+    defer {
+      _ = self.store.replaceSnapshotForSelfTest(provider, snapshot: saved)
+      self.store.hidesPersonalInfo = original
+    }
+    self.store.hidesPersonalInfo = true
+    let hidden = self.store.orderedStates.first { $0.provider == provider }?.snapshot?.details.first?.value
+    let presented = AllowanceBuilder.summary(
+      for: self.store.orderedStates.first { $0.provider == provider }!).details.first?.value
+    self.store.hidesPersonalInfo = false
+    let restored = AllowanceBuilder.summary(
+      for: self.store.orderedStates.first { $0.provider == provider }!).details.first?.value
+    return hidden == "ada@example.com" && presented == "Hidden" && restored == "ada@example.com"
+  }
+
+  /// The hot key handler uses the same open path as the status item, and does
+  /// not close a dashboard that is already visible.
+  private func hotKeyOpensExistingDashboard() -> Bool {
+    let selected = self.store.expandedProvider
+    let wasShown = self.isDashboardShownForTesting
+    let buttonReady = self.waitUntilStatusButtonHasWindow()
+    guard buttonReady else { return false }
+    self.openDashboardFromHotKey()
+    let opened = self.waitUntilDashboardShownForTesting()
+    let keptSelection = self.store.expandedProvider == selected
+    let stayedOpen = self.isDashboardShownForTesting
+    if opened {
+      self.openDashboardFromHotKey()
+      let stillOpen = self.waitUntilDashboardShownForTesting()
+      if !wasShown {
+        self.popover.performClose(nil)
+      }
+      return stillOpen && keptSelection && stayedOpen
+    }
+    return false
+  }
+
+  /// AppKit may show the popover on the next turn. A synchronous read of
+  /// `isShown` right after `show()` is not a truthful open check.
+  private func waitUntilDashboardShownForTesting() -> Bool {
+    if self.isDashboardShownForTesting { return true }
+    let until = Date().addingTimeInterval(1.5)
+    while Date() < until {
+      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+      if self.isDashboardShownForTesting { return true }
+    }
+    return self.isDashboardShownForTesting
+  }
+
+  /// The status item has no window until AppKit has turned the run loop.
+  /// Showing a popover before that returns without opening anything.
+  private func waitUntilStatusButtonHasWindow() -> Bool {
+    if self.statusItem.button?.window != nil { return true }
+    let until = Date().addingTimeInterval(2)
+    while Date() < until {
+      RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+      if self.statusItem.button?.window != nil { return true }
+    }
+    return self.statusItem.button?.window != nil
+  }
+
+  /// The share model drops freeform plan and window text. Rendering the card
+  /// does not touch the system pasteboard or a save panel.
+  private static func shareCardOmitsPersonalText() -> Bool {
+    let poison = "ada@example.com Acme /Users/ada/secret.jsonl"
+    let model = UsageShareCardBuilder.model(
+      provider: .anthropic,
+      planName: poison,
+      windows: [UsageWindow(id: poison, label: poison, usedPercent: 10, resetsAt: nil)],
+      tokensUsed: 10,
+      tokenPeriodDays: 30,
+      tokensCheckedAt: nil,
+      estimatedAPIEquivalentUSD: 1,
+      generatedAt: Date(),
+      hidingPersonal: false)
+    let text = model.plainText()
+    guard !text.contains("ada@"), !text.contains("/Users"), !text.contains("Acme") else { return false }
+    let card = UsageShareCardView(model: model)
+    card.layoutSubtreeIfNeeded()
+    let height = card.bounds.height
+    let worst = Self.worstCaseShareModel()
+    let worstHeight = UsageShareCardView.measuredHeight(for: worst)
+    let worstCard = UsageShareCardView(model: worst)
+    let disclaimerFits = worstCard.bounds.height + 1 >= worstHeight
+      && worst.plainText().contains("Not an actual charge")
+      && worst.plainText().contains("Quota as of")
+    let board = NSPasteboard(name: NSPasteboard.Name("Reserve.ShareCard.SelfTest"))
+    board.clearContents()
+    let preview = UsageSharePreviewController(model: worst, pasteboard: board)
+    let copied = preview.copyForTesting()
+    let copiedText = board.string(forType: .string) ?? ""
+    let decoded: Bool
+    if let data = try? preview.pngDataForTesting(),
+      let rep = NSBitmapImageRep(data: data)
+    {
+      decoded = rep.pixelsHigh >= Int(worstHeight) && rep.pixelsWide > 100
+    } else {
+      decoded = false
+    }
+    let windowFits = (preview.window?.contentRect(forFrameRect: preview.window?.frame ?? .zero).height ?? 0)
+      >= worstHeight + 40
+    return card.accessibilityLabel()?.contains("Estimated API equivalent") == true
+      && !((card.accessibilityLabel() ?? "").contains("ada@"))
+      && height > 40
+      && disclaimerFits
+      && copied
+      && copiedText.contains("Not an actual charge")
+      && !copiedText.contains("ada@")
+      && decoded
+      && windowFits
+  }
+
+  /// Six windows, the largest token count, and long reset dates. Used to prove
+  /// the PNG height follows the text instead of a fixed 220pt crop.
+  static func worstCaseShareModel() -> UsageShareModel {
+    let resets = Date(timeIntervalSince1970: 1_900_000_000)
+    let windows = (0..<6).map { index in
+      UsageWindow(
+        id: "weekly-\(index)", label: index == 0 ? "Weekly" : "5 hours",
+        usedPercent: Double(index * 10), windowMinutes: 10_080, resetsAt: resets)
+    }
+    return UsageShareCardBuilder.model(
+      provider: .anthropic,
+      planName: "Max 20x",
+      windows: windows,
+      tokensUsed: Int64.max,
+      tokenPeriodDays: 90,
+      tokensCheckedAt: resets,
+      estimatedAPIEquivalentUSD: 999_999.99,
+      generatedAt: resets,
+      hidingPersonal: true,
+      quotaCheckedAt: resets)
+  }
+
+  /// Selecting a provider tile must ask the store for that provider's detail
+  /// data once. Selecting the current tile again keeps the panel stable and
+  /// does not start redundant work.
   private func expandingAProviderRequestsItsDetails() -> Bool {
     #if RESERVE_DEV_AUTOMATION
     let original = self.store.expandedProvider
@@ -1312,9 +1569,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       self.store.expandedProvider = original
       self.dashboardControllerForUse().update()
     }
-    self.store.expandedProvider = nil
-    let provider = ProviderID.openAI
-    let other = ProviderID.cursor
+    let provider: ProviderID = original == .openAI ? .cursor : .openAI
+    let other: ProviderID = provider == .cursor ? .openAI : .cursor
     let before = self.store.insightsRequestCount(for: provider)
     let otherBefore = self.store.insightsRequestCount(for: other)
     self.toggleProviderDetailForTesting(provider)
@@ -1322,9 +1578,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let afterExpand = self.store.insightsRequestCount(for: provider)
     self.toggleProviderDetailForTesting(provider)
     return expandedProvider == provider
-      && self.store.expandedProvider == nil
+      && self.store.expandedProvider == provider
       && afterExpand == before + 1
-      // Closing a card asks for nothing.
+      // Re-selecting the current tile asks for nothing.
       && self.store.insightsRequestCount(for: provider) == afterExpand
       && self.store.insightsRequestCount(for: other) == otherBefore
       // Activity from this Mac is not scanned during an automated run.
