@@ -534,9 +534,13 @@ enum ConnectionFlowSelfTest {
     } catch { failures.append("could not launch the cancellation fixture") }
 
     failures += await self.checkRefreshScheduling(in: directory)
+    failures += await self.checkManualRefreshScansLocalHistory(in: directory)
+    failures += await self.checkCachedHistoryPublication(in: directory)
     failures += await self.checkLoginHandoff(in: directory)
     failures += await self.checkEarlyCompletions(in: directory)
     failures += self.checkPhaseTable()
+    failures += self.checkDashboardHotKeyRegistration()
+    failures += self.checkAdaptiveRefresh(in: directory)
 
     // Render actual native controls for each step, with no real credentials.
     let preview = ProviderConnectionPanel(provider: .anthropic)
@@ -603,6 +607,306 @@ enum ConnectionFlowSelfTest {
       do { try manualPreview.render(to: evidence.appendingPathComponent("\(name).png")) }
       catch { failures.append("\(name) screenshot could not be saved") }
     }
+    return failures
+  }
+
+  /// Explicit Refresh scans enabled local history even when Insights is closed.
+  /// A failed scan keeps the previous totals and does not start the quiet period.
+  /// The scanner is a closure over synthetic totals, never this Mac's logs.
+  private static func checkManualRefreshScansLocalHistory(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) {
+      if !value { failures.append(message) }
+    }
+    let previous = LocalUsageSummary(
+      provider: .openAI, periodDays: 30, inputTokens: 40, outputTokens: 10,
+      apiEquivalentCostUSD: 1.25, todayTokens: 7, fetchedAt: Date(timeIntervalSince1970: 1_700_000_000),
+      source: "synthetic previous scan")
+    let replacement = LocalUsageSummary(
+      provider: .openAI, periodDays: 30, inputTokens: 80, outputTokens: 20,
+      apiEquivalentCostUSD: 2.5, todayTokens: 9, fetchedAt: Date(timeIntervalSince1970: 1_700_000_100),
+      source: "synthetic fresh scan")
+    let planKeys = PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in })
+
+    let manual = Self.historyRefreshStore(
+      directory: directory, name: "manual", planKeys: planKeys,
+      scan: { providers, _ in
+        guard providers == [.openAI] else {
+          throw UsageProviderError.invalidResponse("scanned \(providers.map(\.rawValue).sorted())")
+        }
+        return [.openAI: replacement]
+      })
+    manual.insightsVisible = false
+    manual.seedLocalUsageForSelfTest(previous)
+    manual.refreshAll(manual: true)
+    await self.settle {
+      manual.states[.openAI]?.localUsage?.inputTokens == 80 && !manual.isRefreshingAll
+    }
+    let manualSummary = AllowanceBuilder.summary(for: manual.orderedStates.first { $0.provider == .openAI }!)
+    expect(manual.states[.openAI]?.localUsage?.inputTokens == 80,
+      "manual refresh did not scan local history while Insights was closed")
+    expect(manualSummary.localHistoryCheckedAt != nil && manualSummary.localHistoryError == nil,
+      "a successful manual scan did not record its own freshness")
+    let quotaChecked = manual.states[.openAI]?.snapshot?.fetchedAt
+    expect(quotaChecked != nil && quotaChecked != manualSummary.localHistoryCheckedAt,
+      "local history freshness collapsed into the quota timestamp")
+    let shown = manualSummary
+    // The scan clock is only meaningful beside retained token totals.
+    let retained = ProviderSummary(
+      provider: shown.provider, planName: shown.planName, allowances: shown.allowances,
+      paceState: shown.paceState, serviceStatus: shown.serviceStatus,
+      isConnecting: shown.isConnecting, isRefreshing: shown.isRefreshing,
+      needsConnection: shown.needsConnection, connectionToolAvailable: shown.connectionToolAvailable,
+      requiresKeychainAccess: shown.requiresKeychainAccess, setupAction: shown.setupAction,
+      error: shown.error, lastUpdated: shown.lastUpdated, localUsage: previous,
+      subscriptionCostUSD: shown.subscriptionCostUSD, quotaSource: shown.quotaSource,
+      includedSpend: shown.includedSpend, detailedUsageUnavailable: shown.detailedUsageUnavailable,
+      checkedAt: shown.checkedAt, localHistoryEnabled: shown.localHistoryEnabled,
+      historyPossible: shown.historyPossible, localHistorySupported: shown.localHistorySupported,
+      localHistoryCheckedAt: shown.localHistoryCheckedAt, localHistoryError: shown.localHistoryError)
+    let manualCard = ProviderDashboardCard(
+      summary: retained, now: Date(), isSelectedForMenuBar: false, isExpanded: true,
+      connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+    manualCard.layoutSubtreeIfNeeded()
+    let manualText = LifecycleSelfTest.descendants(of: manualCard).compactMap { ($0 as? NSTextField)?.stringValue }
+    let manualIDs = Set(LifecycleSelfTest.descendants(of: manualCard).compactMap { $0.identifier?.rawValue })
+    expect(manualIDs.contains("usage-local-history-openAI") && manualIDs.contains("usage-checked-openAI"),
+      "expanded detail did not show quota and local history times separately")
+    expect(manualText.contains("Last checked") && manualText.contains("Local history"),
+      "quota last checked and local history were not labeled separately")
+    expect(!manualText.contains { $0.contains("synthetic") || $0.contains("/Users") || $0.contains(".jsonl") },
+      "local history detail exposed a scanner source or path")
+
+    let automatic = Self.historyRefreshStore(
+      directory: directory, name: "automatic", planKeys: planKeys,
+      scan: { _, _ in throw UsageProviderError.unavailable("automatic scan should not run") })
+    automatic.insightsVisible = false
+    automatic.seedLocalUsageForSelfTest(previous)
+    automatic.refreshAll(manual: false)
+    await self.settle { !automatic.isRefreshingAll }
+    try? await Task.sleep(for: .milliseconds(40))
+    expect(automatic.states[.openAI]?.localUsage?.inputTokens == 40,
+      "an automatic refresh scanned local history while Insights was closed")
+    expect(automatic.orderedStates.first { $0.provider == .openAI }?.localHistoryCheckedAt == nil,
+      "an automatic refresh recorded a local history scan that did not run")
+
+    let disabled = Self.historyRefreshStore(
+      directory: directory, name: "disabled", planKeys: planKeys,
+      scan: { _, _ in throw UsageProviderError.unavailable("disabled scan should not run") })
+    disabled.localHistoryEnabled = false
+    disabled.insightsVisible = false
+    disabled.refreshAll(manual: true)
+    await self.settle { !disabled.isRefreshingAll }
+    try? await Task.sleep(for: .milliseconds(40))
+    expect(disabled.states[.openAI]?.localUsage == nil
+      && disabled.orderedStates.first { $0.provider == .openAI }?.localHistoryCheckedAt == nil,
+      "manual refresh scanned local history after it was turned off")
+
+    let gate = HistoryScanGate()
+    let deduped = Self.historyRefreshStore(
+      directory: directory, name: "deduped", planKeys: planKeys,
+      scan: { providers, _ in
+        await gate.enter()
+        return [.openAI: replacement]
+      })
+    deduped.insightsVisible = false
+    deduped.refreshAll(manual: true)
+    for _ in 0..<150 {
+      if await gate.started { break }
+      try? await Task.sleep(for: .milliseconds(20))
+    }
+    deduped.refreshAll(manual: true)
+    await gate.release()
+    await self.settle { !deduped.isRefreshingAll && !deduped.isScanningLocalUsage }
+    try? await Task.sleep(for: .milliseconds(40))
+    expect(await gate.entries == 1, "an in-flight local scan was started twice")
+
+    let failed = Self.historyRefreshStore(
+      directory: directory, name: "failed", planKeys: planKeys,
+      scan: { _, _ in
+        throw UsageProviderError.timedOut("/Users/example/.codex/sessions/private.jsonl")
+      })
+    failed.insightsVisible = false
+    failed.seedLocalUsageForSelfTest(previous)
+    failed.refreshAll(manual: true)
+    await self.settle { !failed.isRefreshingAll && !failed.isScanningLocalUsage }
+    let failedState = failed.orderedStates.first { $0.provider == .openAI }
+    expect(failedState?.localUsage?.inputTokens == 40,
+      "a failed scan replaced the last successful local totals")
+    expect(failedState?.localHistoryCheckedAt == nil,
+      "a failed scan advanced the successful local history time")
+    let safeError = failedState?.localHistoryError ?? ""
+    expect(safeError.contains("timed out") && !safeError.contains("/") && !safeError.contains("private"),
+      "scan failure was missing or included a path: \(safeError)")
+    let failedSummary = AllowanceBuilder.summary(for: failedState!)
+    let failedCard = ProviderDashboardCard(
+      summary: failedSummary, now: Date(), isSelectedForMenuBar: false, isExpanded: true,
+      connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+    failedCard.layoutSubtreeIfNeeded()
+    let failedText = LifecycleSelfTest.descendants(of: failedCard).compactMap { ($0 as? NSTextField)?.stringValue }
+    expect(failedText.contains(safeError), "expanded detail hid the local history scan failure")
+    expect(!failedText.contains { $0.contains("/Users") || $0.contains(".jsonl") || $0.contains("private") },
+      "expanded detail showed a path from the failed scan")
+
+    let retryFlag = HistoryScanFailure()
+    let retry = Self.historyRefreshStore(
+      directory: directory, name: "retry", planKeys: planKeys,
+      scan: { _, _ in
+        if await retryFlag.consume() {
+          throw UsageProviderError.timedOut("local usage scan")
+        }
+        return [.openAI: replacement]
+      })
+    retry.insightsVisible = false
+    retry.seedLocalUsageForSelfTest(previous)
+    retry.refreshAll(manual: true)
+    await self.settle { !retry.isRefreshingAll }
+    expect(retry.orderedStates.first { $0.provider == .openAI }?.localHistoryCheckedAt == nil,
+      "the failing scan was treated as successful")
+    // The follow-up is an automatic sweep. Manual refresh always forces a scan,
+    // so only this path can show that the failure did not start the quiet period.
+    retry.insightsVisible = true
+    retry.refreshAll(manual: false)
+    await self.settle {
+      retry.states[.openAI]?.localUsage?.inputTokens == 80 && !retry.isRefreshingAll
+    }
+    expect(retry.states[.openAI]?.localUsage?.inputTokens == 80
+      && retry.orderedStates.first { $0.provider == .openAI }?.localHistoryError == nil,
+      "a failed scan suppressed the next manual scan for 30 minutes")
+
+    // Success, then failure, then a non-forced retry. The successful time stays,
+    // but the failure must still be eligible without clearing that freshness.
+    let sequence = HistoryScanSequence()
+    let sequenced = Self.historyRefreshStore(
+      directory: directory, name: "sequence", planKeys: planKeys,
+      scan: { _, _ in
+        let step = await sequence.next()
+        if step == 1 { return [.openAI: replacement] }
+        throw UsageProviderError.timedOut("local usage scan")
+      })
+    sequenced.insightsVisible = false
+    sequenced.refreshAll(manual: true)
+    await self.settle { sequenced.states[.openAI]?.localUsage?.inputTokens == 80 && !sequenced.isRefreshingAll }
+    let successAt = sequenced.orderedStates.first { $0.provider == .openAI }?.localHistoryCheckedAt
+    sequenced.refreshAll(manual: true)
+    await self.settle { !sequenced.isRefreshingAll && !sequenced.isScanningLocalUsage }
+    expect(sequenced.orderedStates.first { $0.provider == .openAI }?.localHistoryCheckedAt == successAt
+      && sequenced.orderedStates.first { $0.provider == .openAI }?.localHistoryError != nil,
+      "a failure after success cleared freshness or hid the error")
+    sequenced.insightsVisible = true
+    sequenced.refreshAll(manual: false)
+    await self.settle { !sequenced.isRefreshingAll && !sequenced.isScanningLocalUsage }
+    expect(await sequence.count >= 3,
+      "a recent success blocked retry after the following scan failed")
+    return failures
+  }
+
+  private static func historyRefreshStore(
+    directory: URL,
+    name: String,
+    planKeys: PlanKeyStorage,
+    scan: @escaping @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
+    ,
+    dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil
+  ) -> UsageStore {
+    let suite = "Reserve.LocalHistoryRefresh.\(name).\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    for provider in ProviderID.allCases {
+      defaults.set(provider == .openAI, forKey: "provider.\(provider.rawValue).enabled")
+    }
+    for provider in APIConsumptionProvider.allCases {
+      defaults.set(false, forKey: "apiConsumption.\(provider.rawValue).enabled")
+    }
+    let store = UsageStore(
+      defaults: defaults,
+      startAutomatically: false,
+      notificationsActive: false,
+      cache: SnapshotCache(fileURL: directory.appendingPathComponent("history-\(name)-\(UUID().uuidString).json")),
+      fetchOverride: { provider, _ in
+        UsageSnapshot(
+          provider: provider, planName: "Synthetic plan",
+          windows: [
+            UsageWindow(
+              id: "weekly", label: "Weekly", usedPercent: 20, windowMinutes: 10080,
+              resetsAt: Date().addingTimeInterval(86400))
+          ],
+          fetchedAt: Date().addingTimeInterval(-120),
+          source: "isolated history refresh")
+      },
+      localUsageScan: scan,
+      dailyHistoryLoad: dailyHistoryLoad,
+      planKeys: planKeys)
+    return store
+  }
+
+  /// Production publication goes through the injected cache loader, not the
+  /// test-only publish helper. Selecting 7/30/90 must not scan or reload.
+  private static func checkCachedHistoryPublication(in directory: URL) async -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) {
+      if !value { failures.append(message) }
+    }
+    let scans = HistoryScanSequence()
+    let loadCounter = HistoryLoadCounter()
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+    let formatter = DateFormatter()
+    formatter.calendar = calendar
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = calendar.timeZone
+    formatter.dateFormat = "yyyy-MM-dd"
+    let today = formatter.string(from: calendar.startOfDay(for: now))
+    let yesterday = formatter.string(
+      from: calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: now)) ?? now)
+    let day = CachedUsageDay(day: today, tokens: 40, costUSD: 1.5, fetchedAt: now)
+    let older = CachedUsageDay(day: yesterday, tokens: 10, costUSD: nil, fetchedAt: now)
+    let history = CachedUsageHistory(provider: .openAI, days: [day, older])
+    let planKeys = PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in })
+    let store = self.historyRefreshStore(
+      directory: directory,
+      name: "cache-publication",
+      planKeys: planKeys,
+      scan: { _, _ in
+        _ = await scans.next()
+        return [
+          .openAI: LocalUsageSummary(
+            provider: .openAI, periodDays: 30, inputTokens: 40, outputTokens: 0,
+            apiEquivalentCostUSD: 1.5, todayTokens: 40, fetchedAt: now,
+            source: "synthetic cache publication", origin: .localDevice)
+        ]
+      },
+      dailyHistoryLoad: { providers, _ in
+        loadCounter.increment()
+        return providers.contains(.openAI) ? [.openAI: history] : [:]
+      })
+    let loadsBefore = store.dailyHistoryLoadCountForTesting
+    let scansBefore = await scans.count
+    store.insightHistoryDays = 7
+    store.insightHistoryDays = 90
+    store.insightHistoryDays = 30
+    _ = store.insightSeries(for: .openAI, now: now)
+    expect(store.dailyHistoryLoadCountForTesting == loadsBefore,
+      "selecting a history range reloaded the cache")
+    expect(await scans.count == scansBefore, "selecting a history range started a scan")
+    store.localHistoryEnabled = true
+    store.refreshAll(manual: true)
+    await self.settle { !store.isRefreshingAll && !store.isScanningLocalUsage }
+    expect(await scans.count == scansBefore + 1, "a successful scan did not run once")
+    expect(loadCounter.count >= 1, "a successful scan did not publish through the loader")
+    let series = store.insightSeries(for: .openAI, now: now)
+    expect(series.coveredDays >= 1, "published cache days did not reach Insights")
+    expect(series.days.contains { $0.day == today && $0.tokens == 40 && $0.costUSD == 1.5 },
+      "today's published cost was dropped")
+    let loadsAfterScan = loadCounter.count
+    store.insightHistoryDays = 90
+    expect(loadCounter.count == loadsAfterScan, "range change after publication reloaded the cache")
+    expect(await scans.count == scansBefore + 1, "range change after publication scanned again")
+    store.localHistoryEnabled = false
+    expect(store.publishedDailyHistory.isEmpty, "disabling history left published days visible")
+    expect(store.orderedStates.first { $0.provider == .openAI }?.localHistoryError == nil,
+      "disabling history left a scan error visible")
     return failures
   }
 
@@ -876,6 +1180,97 @@ enum ConnectionFlowSelfTest {
     return failures
   }
 
+  /// Registers one Carbon shortcut, then releases it. Press uses the open hook, not a keystroke.
+  private static func checkDashboardHotKeyRegistration() -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) {
+      if !value { failures.append(message) }
+    }
+    var opened = false
+    let owner = DashboardHotKeyController { opened = true }
+    let other = DashboardHotKeyController { }
+    defer {
+      owner.unregister()
+      other.unregister()
+    }
+    let choice = DashboardHotKeyChoice.allCases.first { candidate in
+      guard candidate != .off else { return false }
+      owner.apply(candidate)
+      return owner.registration == .registered
+    }
+    guard let choice else { return ["hotkey: no supported shortcut could be registered"] }
+    let attempts = owner.registrationAttempts
+    owner.apply(choice)
+    expect(owner.registration == .registered && owner.registrationAttempts == attempts,
+      "hotkey: repeating the same choice registered again")
+    owner.simulatePressForTesting()
+    expect(opened, "hotkey: handler did not open the dashboard path")
+    other.apply(choice)
+    expect(other.registration == .conflict,
+      "hotkey: a second controller on the same shortcut did not report a conflict")
+    other.unregister()
+    expect(other.registration == .inactive, "hotkey: unregister did not become inactive")
+    owner.apply(.off)
+    expect(owner.registration == .inactive && owner.registrationAttempts == attempts,
+      "hotkey: Off did not clear the shortcut without registering again")
+    let probe = DashboardHotKeyController { }
+    defer { probe.unregister() }
+    probe.apply(choice)
+    expect(probe.registration == .registered, "hotkey: bindings were still held after Off")
+    probe.unregister()
+    expect(probe.registration == .inactive, "hotkey: the last binding was not released")
+    return failures
+  }
+
+  /// Isolated preferences only. Fixed 30 stays fixed; adaptive follows open age unless constrained.
+  private static func checkAdaptiveRefresh(in directory: URL) -> [String] {
+    var failures: [String] = []
+    func expect(_ value: Bool, _ message: String) {
+      if !value { failures.append(message) }
+    }
+    let suite = "Reserve.AdaptiveRefreshSelfTest.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else {
+      return ["adaptive: isolated preferences unavailable"]
+    }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let keys = PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in })
+    func makeStore(_ name: String) -> UsageStore {
+      UsageStore(
+        defaults: defaults, startAutomatically: false, notificationsActive: false,
+        cache: SnapshotCache(fileURL: directory.appendingPathComponent("adaptive-\(name).json")),
+        fetchOverride: { _, _ in throw UsageProviderError.unavailable("unused") },
+        openLoginURL: { _ in false },
+        planKeys: keys)
+    }
+    let store = makeStore("fixed")
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    expect(store.refreshIntervalMinutes == 30, "adaptive: existing fixed 30 was not retained")
+    store.refreshIntervalMinutes = UsageStore.adaptiveRefreshSentinel
+    store.noteDashboardOpened(at: now)
+    expect(store.refreshIntervalMinutes == 0
+      && store.effectiveRefreshIntervalMinutes(now: now, constrained: false) == 2,
+      "adaptive: opening the dashboard did not compute 2 minutes")
+    expect(store.effectiveRefreshIntervalMinutes(now: now.addingTimeInterval(6 * 60), constrained: false) == 5,
+      "adaptive: an open past five minutes did not compute 5")
+    expect(store.effectiveRefreshIntervalMinutes(now: now.addingTimeInterval(2 * 60 * 60), constrained: false) == 15,
+      "adaptive: an open past one hour did not compute 15")
+    expect(store.effectiveRefreshIntervalMinutes(now: now.addingTimeInterval(4 * 60 * 60), constrained: false) == 30,
+      "adaptive: a dormant dashboard did not compute 30")
+    expect(store.effectiveRefreshIntervalMinutes(now: now, constrained: true) == 30,
+      "adaptive: a constrained machine did not stay at 30")
+    let reloaded = makeStore("reloaded")
+    expect(reloaded.refreshIntervalMinutes == 0 && defaults.bool(forKey: "refresh.adaptive"),
+      "adaptive: the adaptive preference did not persist")
+    reloaded.refreshIntervalMinutes = 30
+    reloaded.noteDashboardOpened(at: now)
+    expect(reloaded.refreshIntervalMinutes == 30
+      && !defaults.bool(forKey: "refresh.adaptive")
+      && reloaded.effectiveRefreshIntervalMinutes(now: now, constrained: false) == 30
+      && reloaded.effectiveRefreshIntervalMinutes(now: now, constrained: true) == 30,
+      "adaptive: a fixed choice followed the dashboard or power state")
+    return failures
+  }
+
   private static func field(_ identifier: String, in panel: ProviderConnectionPanel?) -> NSTextField? {
     guard let root = panel?.contentView else { return nil }
     return LifecycleSelfTest.descendants(of: root).compactMap { $0 as? NSTextField }
@@ -988,6 +1383,63 @@ private final class FailingInstallerProtocol: URLProtocol, @unchecked Sendable {
   }
 
   override func stopLoading() {}
+}
+
+/// Holds one in-flight synthetic scan until the test asks for a second refresh.
+private actor HistoryScanGate {
+  private var waiting: CheckedContinuation<Void, Never>?
+  private(set) var started = false
+  private(set) var entries = 0
+
+  func enter() async {
+    self.entries += 1
+    self.started = true
+    await withCheckedContinuation { continuation in
+      self.waiting = continuation
+    }
+  }
+
+  func release() {
+    self.waiting?.resume()
+    self.waiting = nil
+  }
+}
+
+/// The first scan fails. Later scans succeed, so a quiet period would be visible.
+private actor HistoryScanFailure {
+  private var pending = true
+
+  func consume() -> Bool {
+    let failed = self.pending
+    self.pending = false
+    return failed
+  }
+}
+
+/// Counts synthetic scans so a success, a failure, and a retry are distinguishable.
+private actor HistoryScanSequence {
+  private var value = 0
+  func next() -> Int {
+    self.value += 1
+    return self.value
+  }
+  var count: Int { self.value }
+}
+
+/// Synchronous so the cache loader can count without becoming async.
+private final class HistoryLoadCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = 0
+  func increment() {
+    self.lock.lock()
+    self.value += 1
+    self.lock.unlock()
+  }
+  var count: Int {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    return self.value
+  }
 }
 
 private actor ConnectionSchedulingProbe {

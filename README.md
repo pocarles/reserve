@@ -207,11 +207,19 @@ until at least 10% of a known window has elapsed, and stop when observations
 are stale. Grok’s Build and Chat contributions appear only in details as
 percentages of its shared pool used.
 
-Expanding a card shows everything Reserve knows about that provider without
-leaving the dashboard: every allowance window and its reset, activity from this
-Mac when that is turned on, provider-reported account activity where it exists,
-the plan's cost and renewal, where the numbers came from, and when they were
-last checked.
+The dashboard shows every enabled provider in a compact overview. Select a tile
+to show that provider's details below it: every allowance window and its reset,
+activity from this Mac when that is turned on, provider-reported account
+activity where it exists, the plan's cost and renewal, where the numbers came
+from, and when they were last checked. Reserve restores the last selected
+provider when the dashboard reopens, and the detail panel can pin that provider
+to the menu bar.
+
+Settings > General can register one of five fixed global shortcuts to open the
+dashboard. It is off until you choose one. The adaptive refresh option checks
+every 2 to 30 minutes based on how recently the dashboard was opened and uses
+the longest interval in Low Power Mode or under high thermal pressure. Existing
+fixed refresh choices remain available.
 
 Cursor shows its reported Cursor Models and Other Models percentages as whole
 numbers. It also shows provider-reported tokens for today, the current billing
@@ -265,6 +273,11 @@ OpenAI and Anthropic use the observed input/cache/output mix when available;
 Grok exposes an aggregate token count, so its comparison is approximate.
 Subscription prices remain user-editable. Details distinguish reported, typical,
 and manually entered prices. Empty detail rows are omitted.
+
+Insights can compare 7, 30, or 90 days from the existing local history cache
+without rescanning session files. Daily heatmaps distinguish a known quiet day
+from a day Reserve has not observed and report how much of the selected period
+is covered.
 
 Cursor's account insights come from provider-reported aggregate usage. Reserve
 labels their dollar total **Provider-reported usage value** rather than estimated
@@ -327,8 +340,12 @@ honoured, in that order). To name the signed-in Claude account in a card's
 expanded details, Reserve also reads the account email, organization and
 subscription dates from Claude Code's `~/.claude.json` (or
 `$CLAUDE_CONFIG_DIR/.claude.json`); nothing else in that file is used. Account
-emails and organization names are shown but never written to Reserve's cache. Claude Code can instead keep its sign-in in
-Keychain; Reserve reads it only after the user chooses **Allow access**, through
+emails and organization names are shown but never written to Reserve's cache.
+Turn on **Hide personal info** in the menu or Settings > General to mask them on
+screen. Share cards exclude those details regardless of that setting, along
+with paths, raw errors, and provider-controlled free-form labels. Claude Code
+can instead keep its sign-in in Keychain; Reserve reads it only after the user
+chooses **Allow access**, through
 the signed macOS `security` tool, and retains it in memory only. Reserve starts
 that tool directly, captures bounded output through a private pipe, and never
 prints or saves the credential. This addresses the repeated approval prompts caused by Claude Code restoring

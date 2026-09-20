@@ -198,6 +198,9 @@ public actor LocalUsageScanner {
     let cutoffKey = Self.dayKey(cutoff)
     var index = self.loadIndex()
     try Self.checkDeadline(deadline)
+    // Claude drops day keys older than its file cutoff while updating a record.
+    // Capture those aggregates first so a 30-day scan cannot erase them.
+    let legacyObserved = Self.observedDays(index: index, providers: dirty, now: index.updatedAt)
     var retainedKeys: Set<String> = []
     var indexChanged = false
 
@@ -218,43 +221,95 @@ public actor LocalUsageScanner {
     }
 
     try Self.checkDeadline(deadline)
+    // Fresh keys replace the pre-scan snapshot. Days Claude pruned are kept
+    // from the snapshot. Record-level pruning has not run yet.
+    var observed = legacyObserved
+    let fresh = Self.observedDays(index: index, providers: dirty, now: now)
+    for (provider, days) in fresh {
+      var stored = observed[provider] ?? [:]
+      for (key, day) in days { stored[key] = day }
+      observed[provider] = stored
+    }
+    try Self.checkDeadline(deadline)
     let previousRecordCount = index.records.count
     index.records = index.records.filter {
       !dirty.contains($0.value.provider) || retainedKeys.contains($0.key)
     }
     try Self.checkDeadline(deadline)
     if index.records.count != previousRecordCount { indexChanged = true }
-    if indexChanged {
-      index.updatedAt = now
-      try self.saveIndex(index, deadline: deadline)
+    if Self.mergeDailyHistory(&index, observed: observed, now: now) {
+      indexChanged = true
     }
 
-    for provider in dirty { self.lastScanDates[provider] = now }
     let todayKey = Self.dayKey(now)
     var selectedIndex = index
     selectedIndex.records = index.records.filter { selected.contains($0.value.provider) }
     let series = try Self.dailySeries(
       index: selectedIndex, days: days, now: now, deadline: deadline)
-    func summary(_ provider: ProviderID, fallback: UsageTotals) throws -> LocalUsageSummary {
+    var summaries: [ProviderID: LocalUsageSummary] = [:]
+    for provider in selected {
       try Self.checkDeadline(deadline)
+      let totals = try Self.aggregate(
+        provider: provider, since: cutoffKey, index: selectedIndex, deadline: deadline)
       let cycleStart = cycleStarts[provider] ?? cutoff
       let today = try Self.aggregate(
         provider: provider, since: todayKey, index: index, deadline: deadline)
       let cycle = try Self.aggregate(
         provider: provider, since: Self.dayKey(cycleStart), index: index, deadline: deadline)
-      return fallback.summary(
+      let fetchedAt = indexChanged ? now : (self.lastScanDates[provider] ?? index.updatedAt)
+      summaries[provider] = totals.summary(
         provider: provider,
         periodDays: days,
         today: today,
         cycle: cycle,
         cycleStartedAt: cycleStart,
-        now: self.lastScanDates[provider] ?? index.updatedAt,
+        now: fetchedAt,
         dailyTokens: series[provider] ?? [])
     }
-    return try selected.reduce(into: [:]) { result, provider in
-      let totals = try Self.aggregate(
-        provider: provider, since: cutoffKey, index: selectedIndex, deadline: deadline)
-      result[provider] = try summary(provider, fallback: totals)
+    // Nothing is written until every throwing step above has succeeded.
+    // A timeout or cancellation leaves the previously saved archive untouched.
+    try Task.checkCancellation()
+    try Self.checkDeadline(deadline)
+    if indexChanged {
+      index.updatedAt = now
+      try self.saveIndex(index, deadline: deadline)
+    }
+    for provider in dirty { self.lastScanDates[provider] = now }
+    return summaries
+  }
+
+  /// Reads the on-disk index only. Does not open session roots, enumerate files,
+  /// scan, or write. Archived days win; legacy `record.days` fill days the
+  /// archive does not already name. Missing days stay missing — a cached file
+  /// does not prove the other days in a 30-day window were zero.
+  public func cachedHistory(
+    periodDays: Int = 90,
+    now: Date = Date(),
+    providers: Set<ProviderID> = [.openAI, .anthropic, .grok]
+  ) -> [ProviderID: CachedUsageHistory] {
+    let selected = providers.intersection([.openAI, .anthropic, .grok])
+    guard !selected.isEmpty else { return [:] }
+    let index = self.loadIndex()
+    let count = min(CachedUsageHistory.retentionDays, max(1, periodDays))
+    // Sum every file's totals for a day. Dictionary order must not drop a file.
+    var merged = Self.observedDays(index: index, providers: selected, now: index.updatedAt)
+    for (provider, days) in index.dailyHistory where selected.contains(provider) {
+      var byDay = merged[provider] ?? [:]
+      for (key, day) in days where Self.isArchiveDayKey(key) {
+        byDay[key] = day
+      }
+      merged[provider] = byDay
+    }
+    let calendar = CachedUsageHistory.civilCalendar(.current)
+    let today = CachedUsageHistory.dayKey(for: now, calendar: calendar)
+    let oldest = CachedUsageHistory.dayKey(daysBefore: count - 1, from: now, calendar: calendar)
+    return selected.reduce(into: [:]) { result, provider in
+      let rows = (merged[provider] ?? [:]).compactMap { key, day -> CachedUsageDay? in
+        guard let oldest, key >= oldest, key <= today else { return nil }
+        return CachedUsageDay(
+          day: key, tokens: day.tokens, costUSD: day.costUSD, fetchedAt: day.fetchedAt)
+      }
+      result[provider] = CachedUsageHistory(provider: provider, days: rows)
     }
   }
 
@@ -855,6 +910,93 @@ public actor LocalUsageScanner {
     if let string = value as? String { return Int64(string) ?? 0 }
     return 0
   }
+
+  static func isArchiveDayKey(_ key: String) -> Bool {
+    CachedUsageHistory.isValidDayKey(key)
+  }
+
+  /// Sum of observed day keys across still-loaded records. Zero totals are kept
+  /// only when the key was recorded. Days with no key stay absent.
+  private static func observedDays(
+    index: UsageIndex, providers: Set<ProviderID>, now: Date
+  ) -> [ProviderID: [String: ArchivedUsageDay]] {
+    // A parsed unknown price is stored as cost 0 with estimated true. Decide
+    // that before summing, or a priced sibling file hides the missing price.
+    var unpriced: [ProviderID: Set<String>] = [:]
+    for record in index.records.values where providers.contains(record.provider) {
+      for (key, value) in record.days where isArchiveDayKey(key) {
+        guard value.estimated, value.totalTokens(provider: record.provider) > 0 else { continue }
+        if value.costUSD == 0 || record.provider == .anthropic {
+          unpriced[record.provider, default: []].insert(key)
+        }
+      }
+    }
+    var totals: [ProviderID: [String: UsageTotals]] = [:]
+    for record in index.records.values where providers.contains(record.provider) {
+      for (key, value) in record.days where isArchiveDayKey(key) {
+        totals[record.provider, default: [:]][key, default: UsageTotals()].add(value)
+      }
+    }
+    var archived: [ProviderID: [String: ArchivedUsageDay]] = [:]
+    for (provider, days) in totals {
+      let missingPrice = unpriced[provider] ?? []
+      var rows: [String: ArchivedUsageDay] = [:]
+      rows.reserveCapacity(days.count)
+      for (key, value) in days {
+        rows[key] = ArchivedUsageDay(
+          tokens: value.totalTokens(provider: provider),
+          costUSD: missingPrice.contains(key) ? nil : recordedCost(value.costUSD),
+          fetchedAt: now)
+      }
+      archived[provider] = rows
+    }
+    return archived
+  }
+
+  private static func recordedCost(_ cost: Double) -> Double? {
+    guard cost.isFinite, cost > 0 else { return cost == 0 ? 0 : nil }
+    return cost
+  }
+
+  /// Replaces overlapping archive keys with this scan's observed totals.
+  /// Older archive days outside the new observation stay, then retention drops
+  /// anything older than 90 civil days or dated after `now`.
+  @discardableResult
+  private static func mergeDailyHistory(
+    _ index: inout UsageIndex,
+    observed: [ProviderID: [String: ArchivedUsageDay]],
+    now: Date
+  ) -> Bool {
+    guard !observed.isEmpty else { return false }
+    let calendar = CachedUsageHistory.civilCalendar(.current)
+    let today = CachedUsageHistory.dayKey(for: now, calendar: calendar)
+    let oldest = CachedUsageHistory.dayKey(
+      daysBefore: CachedUsageHistory.retentionDays - 1, from: now, calendar: calendar)
+    var changed = false
+    for (provider, days) in observed {
+      var stored = index.dailyHistory[provider] ?? [:]
+      let before = stored
+      for (key, day) in days where isArchiveDayKey(key) {
+        stored[key] = day
+      }
+      if let oldest {
+        stored = stored.filter { $0.key >= oldest && $0.key <= today && isArchiveDayKey($0.key) }
+      }
+      if stored.count > CachedUsageHistory.retentionDays {
+        let keep = Set(stored.keys.sorted().suffix(CachedUsageHistory.retentionDays))
+        stored = stored.filter { keep.contains($0.key) }
+      }
+      if stored != before {
+        changed = true
+        if stored.isEmpty {
+          index.dailyHistory.removeValue(forKey: provider)
+        } else {
+          index.dailyHistory[provider] = stored
+        }
+      }
+    }
+    return changed
+  }
 }
 
 /// Static parse helpers are also used by tests outside the scanner actor.
@@ -886,10 +1028,59 @@ private final class ScannerDateParsers: @unchecked Sendable {
   }
 }
 
+private struct ArchivedUsageDay: Codable, Equatable {
+  var tokens: Int64
+  var costUSD: Double?
+  var fetchedAt: Date
+
+  init(tokens: Int64, costUSD: Double?, fetchedAt: Date) {
+    self.tokens = tokens < 0 ? 0 : tokens
+    self.costUSD = costUSD.flatMap { $0.isFinite ? max(0, $0) : nil }
+    self.fetchedAt = fetchedAt
+  }
+}
+
 private struct UsageIndex: Codable {
   var version = 1
   var updatedAt = Date.distantPast
   var records: [String: CachedFile] = [:]
+  /// Provider raw value to civil day. Optional so indexes written before this
+  /// field still decode. Holds only day totals, never paths or account ids.
+  var dailyHistory: [ProviderID: [String: ArchivedUsageDay]] = [:]
+
+  private enum CodingKeys: String, CodingKey {
+    case version, updatedAt, records, dailyHistory
+  }
+
+  init() {}
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+    self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? .distantPast
+    self.records = try container.decodeIfPresent([String: CachedFile].self, forKey: .records) ?? [:]
+    let history = try container.decodeIfPresent(
+      [ProviderID: [String: ArchivedUsageDay]].self, forKey: .dailyHistory) ?? [:]
+    self.dailyHistory = Self.bounded(history)
+  }
+
+  private static let maximumProviders = 8
+  private static let maximumDaysPerProvider = CachedUsageHistory.retentionDays
+
+  private static func bounded(
+    _ history: [ProviderID: [String: ArchivedUsageDay]]
+  ) -> [ProviderID: [String: ArchivedUsageDay]] {
+    var kept: [ProviderID: [String: ArchivedUsageDay]] = [:]
+    for provider in history.keys.sorted(by: { $0.rawValue < $1.rawValue }).prefix(maximumProviders) {
+      guard let days = history[provider] else { continue }
+      var rows: [String: ArchivedUsageDay] = [:]
+      for key in days.keys.filter(LocalUsageScanner.isArchiveDayKey).sorted().suffix(maximumDaysPerProvider) {
+        if let day = days[key] { rows[key] = day }
+      }
+      if !rows.isEmpty { kept[provider] = rows }
+    }
+    return kept
+  }
 }
 
 private struct CachedFile: Codable {

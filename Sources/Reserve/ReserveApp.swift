@@ -58,6 +58,7 @@ enum ReserveApp {
         "--render-dashboard", "--render-settings", "--render-appearance",
         "--render-about", "--render-alerts", "--render-insights",
         "--render-providers", "--render-api", "--render-menu-bar", "--render-provider-setup",
+        "--render-share-card", "--render-insights-opaque",
         "--capture-lifecycle",
         "--verify-notifications", "--show-claude-prompt", "--show-cursor-prompt",
       ]
@@ -118,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var settingsController: SettingsWindowController?
   private var providerSetupCoordinator: ProviderSetupCoordinator?
   private var updater: ReserveUpdater?
+  private var hotKeyController: DashboardHotKeyController?
 
   private static let uiSelfTestDefaultsSuite = "Reserve.UISelfTest"
 
@@ -161,6 +163,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let menuBarRenderIndex = CommandLine.arguments.firstIndex(of: "--render-menu-bar")
     let providerSetupRenderIndex = CommandLine.arguments.firstIndex(
       of: "--render-provider-setup")
+    let shareRenderIndex = CommandLine.arguments.firstIndex(of: "--render-share-card")
+    let insightsOpaqueIndex = CommandLine.arguments.firstIndex(of: "--render-insights-opaque")
     let isUIStressTest = CommandLine.arguments.contains("--stress-ui")
     let isLifecycleSelfTest = CommandLine.arguments.contains("--self-test-lifecycle")
     let isClaudePromptPreview = CommandLine.arguments.contains("--show-claude-prompt")
@@ -172,6 +176,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       || insightsRenderIndex != nil || providersRenderIndex != nil || apiRenderIndex != nil
       || menuBarRenderIndex != nil
       || providerSetupRenderIndex != nil
+      || shareRenderIndex != nil
+      || insightsOpaqueIndex != nil
       || isUIStressTest || isLifecycleSelfTest || lifecycleCaptureIndex != nil
       || isNotificationVerification || isClaudePromptPreview || isCursorPromptPreview
     let store: UsageStore
@@ -242,6 +248,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let window else { return false }
         return self?.settingsController?.window === window
       })
+    let hotKeys = DashboardHotKeyController { [weak self] in
+      self?.statusController?.openDashboardFromHotKey()
+    }
+    hotKeys.onRegistration = { [weak store] status in
+      store?.setDashboardHotKeyStatus(status)
+    }
+    hotKeys.apply(store.dashboardHotKey)
+    self.hotKeyController = hotKeys
+    store.observe { [weak store, weak hotKeys] in
+      guard let store, let hotKeys else { return }
+      hotKeys.apply(store.dashboardHotKey)
+    }
 #if RESERVE_DEV_AUTOMATION
     if let renderIndex,
       CommandLine.arguments.indices.contains(renderIndex + 1)
@@ -283,6 +301,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       CommandLine.arguments.indices.contains(providerSetupRenderIndex + 1)
     {
       self.renderProviderSetup(path: CommandLine.arguments[providerSetupRenderIndex + 1])
+    } else if let shareRenderIndex,
+      CommandLine.arguments.indices.contains(shareRenderIndex + 1)
+    {
+      self.renderShareCard(path: CommandLine.arguments[shareRenderIndex + 1])
+    } else if let insightsOpaqueIndex,
+      CommandLine.arguments.indices.contains(insightsOpaqueIndex + 1)
+    {
+      self.renderInsightsOpaque(path: CommandLine.arguments[insightsOpaqueIndex + 1])
     } else if isNotificationVerification {
       self.verifyNotifications()
     } else if isUIStressTest {
@@ -554,6 +580,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
+  /// Worst-case share card. Does not open a save panel or the system pasteboard.
+  private func renderShareCard(path: String) {
+    let model = StatusItemController.worstCaseShareModel()
+    let board = NSPasteboard(name: NSPasteboard.Name("Reserve.ShareCard.Render"))
+    let preview = UsageSharePreviewController(model: model, pasteboard: board)
+    let appearanceName = CommandLine.arguments.contains("--appearance")
+      && CommandLine.arguments.contains("dark") ? NSAppearance.Name.darkAqua : NSAppearance.Name.aqua
+    let appearance = NSAppearance(named: appearanceName) ?? NSAppearance(named: .aqua)!
+    do {
+      try preview.renderOpaque(to: URL(fileURLWithPath: path), appearance: appearance)
+      let data = try Data(contentsOf: URL(fileURLWithPath: path))
+      guard let rep = NSBitmapImageRep(data: data), rep.pixelsHigh > 120, rep.pixelsWide > 100 else {
+        Self.finishUISelfTest(success: false, details: "share card PNG did not decode")
+        return
+      }
+      Self.finishUISelfTest(
+        success: true,
+        details: "share card rendered \(rep.pixelsWide)x\(rep.pixelsHigh) to \(path)")
+    } catch {
+      Self.finishUISelfTest(success: false, details: "share card render failed: \(error)")
+    }
+  }
+
+  /// Insights with synthetic published days and an opaque window background.
+  private func renderInsightsOpaque(path: String) {
+    guard let settings = self.settingsControllerForUse(), let store = self.store else {
+      Self.finishUISelfTest(success: false, details: "settings controller was not created")
+      return
+    }
+    let now = Date()
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+    let formatter = DateFormatter()
+    formatter.calendar = calendar
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = calendar.timeZone
+    formatter.dateFormat = "yyyy-MM-dd"
+    let start = calendar.startOfDay(for: now)
+    var days: [InsightHistoryDay] = []
+    for offset in 0..<12 {
+      guard let date = calendar.date(byAdding: .day, value: -offset, to: start) else { continue }
+      days.append(InsightHistoryDay(
+        day: formatter.string(from: date),
+        tokens: Int64(1_000 * (offset + 1)),
+        costUSD: offset == 3 ? nil : Double(offset + 1)))
+    }
+    store.publishDailyHistoryForTesting(days, provider: .openAI)
+    store.insightHistoryDays = 90
+    let appearanceName = CommandLine.arguments.contains("dark")
+      ? NSAppearance.Name.darkAqua : NSAppearance.Name.aqua
+    do {
+      try settings.renderInsightsOpaque(
+        to: URL(fileURLWithPath: path),
+        appearance: NSAppearance(named: appearanceName) ?? NSAppearance(named: .aqua)!)
+      Self.finishUISelfTest(success: true, details: "opaque insights rendered to \(path)")
+    } catch {
+      Self.finishUISelfTest(success: false, details: "opaque insights render failed: \(error)")
+    }
+  }
+
   private func renderAlerts(path: String) {
     guard let settingsController = self.settingsControllerForUse() else {
       Self.finishUISelfTest(success: false, details: "settings controller was not created")
@@ -797,8 +883,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         details: failures.isEmpty
           ? "appearance reaches every open surface across \(AppearanceMode.allCases.count) modes "
             + "and \(AppearanceTheme.allCases.count) themes, provider selection keeps the popover "
-            + "anchored, opening keeps the status item fixed, provider disclosure stays anchored "
-            + "and never costs a card, enabling a provider moves only that provider, and the "
+            + "anchored, opening keeps the status item fixed, provider navigation stays anchored "
+            + "and never loses a tile, enabling a provider moves only that provider, and the "
             + "store notifies every observer; local activity stays distinct from plan limits"
           : "\(failures.count) lifecycle failures: " + failures.prefix(12).joined(separator: " | "))
     }
@@ -878,29 +964,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       Self.finishUISelfTest(success: false, details: "controllers were not created")
       return
     }
-
-    let statusResult = statusController.validateForSelfTest(settingsWindow: settingsController.window)
-    let settingsResult = settingsController.validateForSelfTest()
-    let claudePromptIsCalmAndWide = ProviderLimitAccessPrompt(provider: .anthropic)
-      .validateForSelfTest()
-    let cursorPromptIsCalmAndWide = ProviderLimitAccessPrompt(provider: .cursor)
-      .validateForSelfTest()
-    let brokenPipeIsSafe = ReserveApp.brokenPipeWriteFailsSafely()
-    let loginCompletionQueuesRefresh = store.exerciseLoginCompletionDuringRefreshForSelfTest()
-    let claudeAccessRevealsOnce = store.exerciseClaudeAccessCompletionForSelfTest()
-    let success = statusResult.success && settingsResult.success && claudePromptIsCalmAndWide
-      && cursorPromptIsCalmAndWide
-      && brokenPipeIsSafe
-      && loginCompletionQueuesRefresh && claudeAccessRevealsOnce
-    let details = [
-      statusResult.details,
-      settingsResult.details,
-      "provider access prompts=\(claudePromptIsCalmAndWide && cursorPromptIsCalmAndWide)",
-      "broken pipe handling=\(brokenPipeIsSafe)",
-      "post-login refresh queue=\(loginCompletionQueuesRefresh)",
-      "post-Keychain reveal=\(claudeAccessRevealsOnce)",
-    ].joined(separator: "; ")
-    Self.finishUISelfTest(success: success, details: details)
+    Task { @MainActor in
+      // The status item has no screen window until launch has returned to the
+      // run loop. The hot key check opens the real popover, so it waits the
+      // same way the lifecycle harness does.
+      statusController.setStressTestAnimationsEnabled(false)
+      try? await Task.sleep(for: .milliseconds(600))
+      let statusResult = statusController.validateForSelfTest(settingsWindow: settingsController.window)
+      let settingsResult = settingsController.validateForSelfTest()
+      let claudePromptIsCalmAndWide = ProviderLimitAccessPrompt(provider: .anthropic)
+        .validateForSelfTest()
+      let cursorPromptIsCalmAndWide = ProviderLimitAccessPrompt(provider: .cursor)
+        .validateForSelfTest()
+      let brokenPipeIsSafe = ReserveApp.brokenPipeWriteFailsSafely()
+      let loginCompletionQueuesRefresh = store.exerciseLoginCompletionDuringRefreshForSelfTest()
+      let claudeAccessRevealsOnce = store.exerciseClaudeAccessCompletionForSelfTest()
+      let success = statusResult.success && settingsResult.success && claudePromptIsCalmAndWide
+        && cursorPromptIsCalmAndWide
+        && brokenPipeIsSafe
+        && loginCompletionQueuesRefresh && claudeAccessRevealsOnce
+      let details = [
+        statusResult.details,
+        settingsResult.details,
+        "provider access prompts=\(claudePromptIsCalmAndWide && cursorPromptIsCalmAndWide)",
+        "broken pipe handling=\(brokenPipeIsSafe)",
+        "post-login refresh queue=\(loginCompletionQueuesRefresh)",
+        "post-Keychain reveal=\(claudeAccessRevealsOnce)",
+      ].joined(separator: "; ")
+      Self.finishUISelfTest(success: success, details: details)
+    }
   }
 
   /// Repeatedly realizes and dismisses both native UI surfaces. This is a

@@ -5,7 +5,7 @@ import ReserveCore
 ///
 /// The static self-test proves the dashboard is *built* correctly. These checks
 /// prove it stays correct while someone uses it: appearance changes reach every
-/// open surface, and opening or closing a provider never costs a card.
+/// open surface, and provider navigation never loses a tile or detail panel.
 ///
 /// Everything here is inspected through the popover's own window, because the
 /// controller's view can be right while the window shows something else.
@@ -39,6 +39,11 @@ enum LifecycleSelfTest {
     return self.descendants(of: root).compactMap { $0 as? ProviderDashboardCard }
   }
 
+  static func visibleTiles(in window: NSWindow?) -> [ProviderOverviewTile] {
+    guard let root = window?.contentView else { return [] }
+    return self.descendants(of: root).compactMap { $0 as? ProviderOverviewTile }
+  }
+
   /// Why a card is reachable, or why it is not.
   ///
   /// The first version of this returned true for anything inside a scroll view,
@@ -47,7 +52,7 @@ enum LifecycleSelfTest {
   /// was invisible. Being in a scroll view is not reachability — the card has to
   /// lie within the document's scrollable range, and the scroll view has to
   /// advertise that there is more to see.
-  static func unreachableReason(_ card: ProviderDashboardCard, in window: NSWindow) -> String? {
+  static func unreachableReason(_ card: NSView, in window: NSWindow) -> String? {
     guard let root = window.contentView else { return "no content view" }
     let frame = card.convert(card.bounds, to: root)
     if root.bounds.insetBy(dx: -1, dy: -1).contains(frame) { return nil }
@@ -74,7 +79,7 @@ enum LifecycleSelfTest {
     self.unreachableReason(card, in: window) == nil
   }
 
-  static func providerIdentifier(_ card: ProviderDashboardCard) -> String {
+  static func providerIdentifier(_ card: NSView) -> String {
     card.identifier?.rawValue ?? "unknown"
   }
 
@@ -127,8 +132,8 @@ enum LifecycleSelfTest {
 
   // MARK: - Provider disclosure
 
-  /// Opens and closes every provider, moves directly between two open providers,
-  /// and confirms no card is ever lost from the visible dashboard.
+  /// Selects every provider, repeats a selection, and confirms the complete tile
+  /// overview and exactly one matching detail panel remain reachable.
   static func checkDisclosure(
     store: UsageStore,
     controller: StatusItemController,
@@ -140,19 +145,28 @@ enum LifecycleSelfTest {
       return result
     }
     let enabled = ProviderID.allCases.filter { store.isEnabled($0) }
+    let originalSelection = store.expandedProvider
+    defer { store.expandedProvider = originalSelection }
 
     func audit(_ step: String) {
       self.settle()
+      let tiles = self.visibleTiles(in: window)
+      let tileIDs = Set(tiles.map(self.providerIdentifier))
+      let expectedTiles = Set(enabled.map { "provider-tile-\($0.rawValue)" })
+      result.expect(
+        tileIDs == expectedTiles,
+        "\(step): visible tiles \(tileIDs.sorted()) but expected \(expectedTiles.sorted())")
       let cards = self.visibleCards(in: window)
       let present = Set(cards.map(self.providerIdentifier))
-      let expected = Set(enabled.map { "provider-card-\($0.rawValue)" })
+      let expected = Set(store.expandedProvider.map { ["provider-card-\($0.rawValue)"] } ?? [])
       result.expect(
         present == expected,
-        "\(step): visible cards \(present.sorted()) but expected \(expected.sorted())")
-      for card in cards {
-        if let reason = self.unreachableReason(card, in: window) {
+        "\(step): detail panels \(present.sorted()) but expected \(expected.sorted())")
+      let navigableViews: [NSView] = tiles.map { $0 as NSView } + cards.map { $0 as NSView }
+      for view in navigableViews {
+        if let reason = self.unreachableReason(view, in: window) {
           result.failures.append(
-            "\(step): \(self.providerIdentifier(card)) is \(reason)")
+            "\(step): \(self.providerIdentifier(view)) is \(reason)")
         }
       }
       // The window must be able to show the content it was sized for.
@@ -182,48 +196,30 @@ enum LifecycleSelfTest {
       }
     }
 
-    audit("collapsed")
+    audit("initial selection")
     for provider in enabled {
       let xBeforeExpansion = window.frame.minX
       toggle(provider)
       self.settle()
       result.expect(
         abs(window.frame.minX - xBeforeExpansion) < 0.5,
-        "expanding \(provider.rawValue) moved the popover horizontally by "
+        "selecting \(provider.rawValue) moved the popover horizontally by "
           + "\(abs(window.frame.minX - xBeforeExpansion))pt")
       result.expect(
         store.expandedProvider == provider,
-        "expanding \(provider.rawValue) did not record the expansion")
-      audit("expanded \(provider.rawValue)")
-      let xBeforeCollapse = window.frame.minX
+        "selecting \(provider.rawValue) did not record the selection")
+      audit("selected \(provider.rawValue)")
+      let xBeforeRepeat = window.frame.minX
       toggle(provider)
       self.settle()
       result.expect(
-        abs(window.frame.minX - xBeforeCollapse) < 0.5,
-        "collapsing \(provider.rawValue) moved the popover horizontally by "
-          + "\(abs(window.frame.minX - xBeforeCollapse))pt")
+        abs(window.frame.minX - xBeforeRepeat) < 0.5,
+        "re-selecting \(provider.rawValue) moved the popover horizontally by "
+          + "\(abs(window.frame.minX - xBeforeRepeat))pt")
       result.expect(
-        store.expandedProvider == nil,
-        "collapsing \(provider.rawValue) did not clear the expansion")
-      audit("collapsed after \(provider.rawValue)")
-    }
-    // Straight from one open provider to another, without collapsing first.
-    if enabled.count >= 2 {
-      toggle(enabled[0])
-      audit("open \(enabled[0].rawValue)")
-      let xBeforeSwitch = window.frame.minX
-      toggle(enabled[1])
-      self.settle()
-      result.expect(
-        abs(window.frame.minX - xBeforeSwitch) < 0.5,
-        "switching expanded providers moved the popover horizontally by "
-          + "\(abs(window.frame.minX - xBeforeSwitch))pt")
-      audit("switched to \(enabled[1].rawValue)")
-      result.expect(
-        store.expandedProvider == enabled[1],
-        "switching between providers did not move the expansion")
-      toggle(enabled[1])
-      audit("collapsed after switch")
+        store.expandedProvider == provider,
+        "re-selecting \(provider.rawValue) cleared the persistent selection")
+      audit("re-selected \(provider.rawValue)")
     }
     return result
   }
@@ -242,19 +238,26 @@ enum LifecycleSelfTest {
     }
     let originalProvider = store.menuBarProvider
     let originalRemaining = store.menuBarShowsRemaining
+    let originalSelection = store.expandedProvider
     defer {
       store.menuBarProvider = originalProvider
       store.menuBarShowsRemaining = originalRemaining
+      store.expandedProvider = originalSelection
     }
+    guard let target = ProviderID.allCases.first(where: {
+      store.isEnabled($0) && $0 != originalProvider
+    }) else {
+      result.failures.append("no alternate provider was available for the anchor check")
+      return result
+    }
+    store.expandedProvider = target
+    self.settle()
     guard
-      let target = ProviderID.allCases.first(where: {
-        store.isEnabled($0) && $0 != originalProvider
-      }),
       let card = self.visibleCards(in: window).first(where: {
         self.providerIdentifier($0) == "provider-card-\(target.rawValue)"
       })
     else {
-      result.failures.append("no alternate provider card was available for the anchor check")
+      result.failures.append("the selected provider detail was unavailable for the anchor check")
       return result
     }
 
@@ -285,8 +288,10 @@ enum LifecycleSelfTest {
     toggle: (ProviderID) -> Void
   ) -> Result {
     var result = Result()
+    let enabled = ProviderID.allCases.filter { store.isEnabled($0) }
     guard let window = controller.dashboardWindowForTesting,
-      let provider = ProviderID.allCases.first(where: { store.isEnabled($0) })
+      let first = enabled.first,
+      let second = enabled.first(where: { $0 != first })
     else {
       result.failures.append("no provider was available for the animated disclosure anchor check")
       return result
@@ -301,19 +306,19 @@ enum LifecycleSelfTest {
       return maximum
     }
 
-    let expansionOrigin = window.frame.minX
-    toggle(provider)
-    let expansionMovement = maximumHorizontalMovement(from: expansionOrigin)
+    let firstOrigin = window.frame.minX
+    toggle(first)
+    let firstMovement = maximumHorizontalMovement(from: firstOrigin)
     result.expect(
-      expansionMovement < 0.5,
-      "animated expansion moved the popover horizontally by \(expansionMovement)pt")
+      firstMovement < 0.5,
+      "animated provider selection moved the popover horizontally by \(firstMovement)pt")
 
-    let collapseOrigin = window.frame.minX
-    toggle(provider)
-    let collapseMovement = maximumHorizontalMovement(from: collapseOrigin)
+    let secondOrigin = window.frame.minX
+    toggle(second)
+    let secondMovement = maximumHorizontalMovement(from: secondOrigin)
     result.expect(
-      collapseMovement < 0.5,
-      "animated collapse moved the popover horizontally by \(collapseMovement)pt")
+      secondMovement < 0.5,
+      "animated provider switch moved the popover horizontally by \(secondMovement)pt")
     return result
   }
 
@@ -329,25 +334,35 @@ enum LifecycleSelfTest {
     }
     let original = Dictionary(
       uniqueKeysWithValues: ProviderID.allCases.map { ($0, store.isEnabled($0)) })
-    defer { for (provider, value) in original { store.setEnabled(provider, enabled: value, refreshImmediately: false) } }
+    let originalSelection = store.expandedProvider
+    defer {
+      for (provider, value) in original {
+        store.setEnabled(provider, enabled: value, refreshImmediately: false)
+      }
+      store.expandedProvider = originalSelection
+    }
 
     for target in ProviderID.allCases {
       store.setEnabled(target, enabled: false)
       self.settle()
-      let present = Set(self.visibleCards(in: window).map(self.providerIdentifier))
+      let present = Set(self.visibleTiles(in: window).map(self.providerIdentifier))
       let expected = Set(
         ProviderID.allCases.filter { store.isEnabled($0) }.map {
-          "provider-card-\($0.rawValue)"
+          "provider-tile-\($0.rawValue)"
         })
       result.expect(
         present == expected,
         "disabling \(target.rawValue): visible \(present.sorted()) expected \(expected.sorted())")
+      let detailCards = self.visibleCards(in: window)
+      result.expect(
+        detailCards.count == (expected.isEmpty ? 0 : 1),
+        "disabling \(target.rawValue) left \(detailCards.count) detail panels")
       store.setEnabled(target, enabled: true, refreshImmediately: false)
       self.settle()
-      let restored = Set(self.visibleCards(in: window).map(self.providerIdentifier))
+      let restored = Set(self.visibleTiles(in: window).map(self.providerIdentifier))
       result.expect(
-        restored.contains("provider-card-\(target.rawValue)"),
-        "re-enabling \(target.rawValue) did not bring its card back")
+        restored.contains("provider-tile-\(target.rawValue)"),
+        "re-enabling \(target.rawValue) did not bring its tile back")
     }
     return result
   }

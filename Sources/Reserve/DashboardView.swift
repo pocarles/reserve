@@ -16,6 +16,11 @@ struct DashboardActions {
   let apiConsumptionReadings: () -> [APIConsumptionReading]
   /// Opens or closes one API row's details.
   var toggleAPIDetail: (APIConsumptionProvider) -> Void = { _ in }
+  /// Opens the sanitized share preview for the selected provider.
+  var shareUsage: () -> Void = {}
+  /// Toggles presentation masking. Originals stay in the store.
+  var toggleHidePersonalInfo: () -> Void = {}
+  var hidesPersonalInfo: () -> Bool = { false }
 }
 
 @MainActor
@@ -35,6 +40,7 @@ struct APIConsumptionReading {
   let error: String?
   let isRefreshing: Bool
   var isExpanded = false
+  var hidesPersonalInfo = false
 }
 
 @MainActor
@@ -66,6 +72,7 @@ final class DashboardViewController: NSViewController {
     selectedMenuBarProvider: ProviderID?,
     expandedProvider: ProviderID?,
     isRefreshing: Bool,
+    hidesPersonal: Bool = false,
     apiReadings: [APIConsumptionReading] = [],
     now: Date
   ) -> String {
@@ -77,6 +84,7 @@ final class DashboardViewController: NSViewController {
       selectedMenuBarProvider?.rawValue ?? "-",
       expandedProvider?.rawValue ?? "-",
       isRefreshing ? "busy" : "idle",
+      hidesPersonal ? "hide-personal" : "show-personal",
       AllowanceBuilder.headline(for: summaries, now: now).primary,
 
     ]
@@ -93,6 +101,8 @@ final class DashboardViewController: NSViewController {
       parts.append(String(reflecting: summary.nextRenewal))
       parts.append(summary.localHistoryEnabled ? "local-history" : "-")
       parts.append(summary.historyPossible ? "history-possible" : "-")
+      parts.append(String(reflecting: summary.localHistoryCheckedAt))
+      parts.append(summary.localHistoryError ?? "-")
       parts.append(summary.error ?? "-")
       parts.append(summary.needsConnection ? "connect" : "-")
       parts.append(summary.requiresKeychainAccess ? "keychain" : "-")
@@ -142,6 +152,7 @@ final class DashboardViewController: NSViewController {
       selectedMenuBarProvider: self.store.menuBarProvider,
       expandedProvider: self.store.expandedProvider,
       isRefreshing: self.store.isRefreshingAll || self.store.isScanningLocalUsage,
+      hidesPersonal: self.store.hidesPersonalInfo,
       apiReadings: self.actions.apiConsumptionReadings(),
       now: now)
     if self.isViewLoaded, signature == self.lastSignature {
@@ -169,12 +180,12 @@ final class DashboardViewController: NSViewController {
     self.preferredContentSize = intrinsicSize
   }
 
-  /// The first provider row, so opening the popover puts the keyboard on the
-  /// content rather than nowhere.
+  /// The first provider tile, so opening the popover puts the keyboard on the
+  /// dashboard's primary navigation rather than nowhere.
   func firstKeyView() -> NSView? {
     self.view.window?.contentView.flatMap { _ in
-      Self.descendants(of: self.view).compactMap { $0 as? ProviderDashboardCard }.first
-    } ?? Self.descendants(of: self.view).compactMap { $0 as? ProviderDashboardCard }.first
+      Self.descendants(of: self.view).compactMap { $0 as? ProviderOverviewTile }.first
+    } ?? Self.descendants(of: self.view).compactMap { $0 as? ProviderOverviewTile }.first
   }
 
   private static func descendants(of view: NSView) -> [NSView] {
@@ -234,18 +245,30 @@ final class UsageDashboardView: NSView {
     stack.setCustomSpacing(DashboardMetrics.headerGap, after: header)
 
     var last: NSView = header
-    for summary in summaries {
-      let row = ProviderDashboardCard(
-        summary: summary, now: now,
-        isSelectedForMenuBar: selectedMenuBarProvider == summary.provider,
-        isExpanded: expandedProvider == summary.provider,
-        connectProvider: actions.connectProvider,
-        selectMenuBarProvider: actions.selectMenuBarProvider,
-        toggleDetail: actions.toggleProviderDetail)
-      row.identifier = NSUserInterfaceItemIdentifier(
-        "provider-card-\(summary.provider.rawValue)")
-      stack.addArrangedSubview(row)
-      last = row
+    let selectedSummary = expandedProvider.flatMap { selected in
+      summaries.first(where: { $0.provider == selected })
+    } ?? summaries.first
+    if !summaries.isEmpty {
+      let overview = ProviderOverviewGrid(
+        summaries: summaries, selectedProvider: selectedSummary?.provider,
+        menuBarProvider: selectedMenuBarProvider, now: now,
+        selectProvider: actions.toggleProviderDetail)
+      stack.addArrangedSubview(overview)
+      last = overview
+
+      if let summary = selectedSummary {
+        let detail = ProviderDashboardCard(
+          summary: summary, now: now,
+          isSelectedForMenuBar: selectedMenuBarProvider == summary.provider,
+          isExpanded: true, showsDisclosure: false,
+          connectProvider: actions.connectProvider,
+          selectMenuBarProvider: actions.selectMenuBarProvider,
+          toggleDetail: actions.toggleProviderDetail)
+        detail.identifier = NSUserInterfaceItemIdentifier(
+          "provider-card-\(summary.provider.rawValue)")
+        stack.addArrangedSubview(detail)
+        last = detail
+      }
     }
     if summaries.isEmpty {
       let empty = EmptyProvidersView(openSettings: actions.openSettings)
@@ -424,19 +447,40 @@ final class DashboardMenuButton: NSButton {
   /// Exposed so the self-test can confirm Quit remains reachable.
   func makeMenu() -> NSMenu {
     let menu = NSMenu()
-    let insights = NSMenuItem(
-      title: "Insights…", action: #selector(self.openInsights), keyEquivalent: "")
-    insights.target = self
-    let settings = NSMenuItem(
-      title: "Settings…", action: #selector(self.openSettings), keyEquivalent: ",")
-    settings.target = self
-    let quit = NSMenuItem(title: "Quit Reserve", action: #selector(self.quit), keyEquivalent: "q")
-    quit.target = self
+    let insights = self.menuItem(
+      title: "Insights…", action: #selector(self.openInsights), symbol: "chart.bar")
+    let settings = self.menuItem(
+      title: "Settings…", action: #selector(self.openSettings), keyEquivalent: ",",
+      symbol: "gearshape")
+    let quit = self.menuItem(
+      title: "Quit Reserve", action: #selector(self.quit), keyEquivalent: "q", symbol: "power")
     menu.addItem(insights)
     menu.addItem(settings)
+    let share = self.menuItem(
+      title: "Share usage…", action: #selector(self.shareUsage), symbol: "square.and.arrow.up")
+    let hidesPersonalInfo = self.actions.hidesPersonalInfo()
+    let privacy = self.menuItem(
+      title: hidesPersonalInfo ? "Show personal info" : "Hide personal info",
+      action: #selector(self.togglePrivacy),
+      symbol: hidesPersonalInfo ? "eye" : "eye.slash")
+    menu.addItem(share)
+    menu.addItem(privacy)
     menu.addItem(.separator())
     menu.addItem(quit)
     return menu
+  }
+
+  private func menuItem(
+    title: String,
+    action: Selector,
+    keyEquivalent: String = "",
+    symbol: String
+  ) -> NSMenuItem {
+    let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+    item.target = self
+    item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+    item.image?.isTemplate = true
+    return item
   }
 
   @objc private func showMenu() {
@@ -446,6 +490,8 @@ final class DashboardMenuButton: NSButton {
 
   @objc private func openInsights() { self.actions.openInsights() }
   @objc private func openSettings() { self.actions.openSettings() }
+  @objc private func shareUsage() { self.actions.shareUsage() }
+  @objc private func togglePrivacy() { self.actions.toggleHidePersonalInfo() }
   @objc private func quit() { self.actions.quit() }
 }
 
@@ -496,8 +542,10 @@ private final class APIConsumptionSection: NSView {
     // Indented to the provider name, so the details read as belonging to it.
     let indent: CGFloat = 32
     let width = DashboardMetrics.contentWidth - 24 - indent
-    var facts = reading.snapshot?.details.map {
-      DashboardFact.row($0.label, $0.value, width: width)
+    var facts: [NSView] = reading.snapshot?.details.map {
+      let shown = PrivacyPresentation.details(
+        [$0], hidingPersonal: reading.hidesPersonalInfo)
+      return DashboardFact.row(shown[0].label, shown[0].value, width: width)
     } ?? []
     // The row already shows a short error in full; only a long one is repeated.
     if let error = reading.error, error.count > 44 {
@@ -586,8 +634,278 @@ private final class APIConsumptionSection: NSView {
 
 }
 
-/// One provider, rendered with the same anatomy regardless of how many limit
-/// windows it exposes.
+/// Provider navigation stays compact and comparable. More enabled providers
+/// add rows rather than turning the dashboard into a long accordion.
+@MainActor
+final class ProviderOverviewGrid: ReserveSurface {
+  init(
+    summaries: [ProviderSummary], selectedProvider: ProviderID?, menuBarProvider: ProviderID?,
+    now: Date,
+    selectProvider: @escaping (ProviderID) -> Void
+  ) {
+    super.init(fill: ReserveColor.section, radius: ReserveRadius.section)
+    self.identifier = NSUserInterfaceItemIdentifier("provider-overview")
+
+    let title = ReserveLabel(
+      "Providers at a glance",
+      font: ReserveFont.sans(ReserveType.body, .semibold), color: ReserveColor.text
+    ).flexible()
+    let count = ReserveLabel(
+      "\(summaries.count) \(summaries.count == 1 ? "provider" : "providers")",
+      font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+    ).fitted()
+    let heading = NSStackView.row([title, NSStackView.spacer(), count], spacing: 8)
+    heading.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewInnerWidth).isActive = true
+
+    var rows: [NSView] = [heading]
+    var index = 0
+    while index < summaries.count {
+      let first = summaries[index]
+      var columns: [NSView] = [
+        ProviderOverviewTile(
+          summary: first, now: now, isSelected: selectedProvider == first.provider,
+          isPinnedForMenuBar: menuBarProvider == first.provider,
+          selectProvider: selectProvider)
+      ]
+      if summaries.indices.contains(index + 1) {
+        let second = summaries[index + 1]
+        columns.append(
+          ProviderOverviewTile(
+            summary: second, now: now, isSelected: selectedProvider == second.provider,
+            isPinnedForMenuBar: menuBarProvider == second.provider,
+            selectProvider: selectProvider))
+      } else {
+        let placeholder = NSView()
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        placeholder.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewTileWidth)
+          .isActive = true
+        columns.append(placeholder)
+      }
+      let row = NSStackView.row(columns, spacing: DashboardMetrics.overviewGap)
+      row.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewInnerWidth).isActive = true
+      rows.append(row)
+      index += 2
+    }
+
+    let stack = NSStackView.column(rows, spacing: DashboardMetrics.overviewGap)
+    stack.setCustomSpacing(10, after: heading)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(stack)
+    NSLayoutConstraint.activate([
+      stack.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: DashboardMetrics.overviewPadding),
+      stack.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -DashboardMetrics.overviewPadding),
+      stack.topAnchor.constraint(equalTo: self.topAnchor, constant: 12),
+      stack.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -12),
+      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
+    ])
+  }
+
+  required init?(coder: NSCoder) { nil }
+}
+
+/// One glanceable provider tile. It navigates the detail panel; menu-bar pinning
+/// remains a separate choice inside the detail panel.
+@MainActor
+final class ProviderOverviewTile: NSView, ReserveClockUpdating {
+  private let provider: ProviderID
+  private let isSelected: Bool
+  private let selectProvider: (ProviderID) -> Void
+  private var isHovered = false
+  private var hoverTrackingArea: NSTrackingArea?
+  private var spokenClock: ((Date) -> String)?
+
+  init(
+    summary: ProviderSummary, now: Date, isSelected: Bool, isPinnedForMenuBar: Bool,
+    selectProvider: @escaping (ProviderID) -> Void
+  ) {
+    self.provider = summary.provider
+    self.isSelected = isSelected
+    self.selectProvider = selectProvider
+    super.init(frame: .zero)
+    self.wantsLayer = true
+    self.identifier = NSUserInterfaceItemIdentifier("provider-tile-\(summary.provider.rawValue)")
+    self.toolTip = "Show \(summary.provider.displayName) details"
+    self.setAccessibilityRole(.button)
+    self.setAccessibilityLabel(
+      "\(summary.provider.displayName) provider"
+        + (isPinnedForMenuBar ? ", shown in the menu bar" : ""))
+    self.setAccessibilityValue(ProviderDashboardCard.spokenState(summary: summary, now: now))
+    self.setAccessibilityHelp("Shows \(summary.provider.displayName) details below")
+    self.spokenClock = { date in
+      ProviderDashboardCard.spokenState(summary: summary.at(date), now: date)
+    }
+
+    let logo = ProviderLogo(provider: summary.provider, size: 24, markSize: 14)
+    let name = ReserveLabel(
+      summary.provider.displayName,
+      font: ReserveFont.sans(ReserveType.providerName, .semibold), color: ReserveColor.text
+    ).flexible()
+    let selectedMark = NSImageView(
+      image: NSImage(
+        systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil) ?? NSImage())
+    selectedMark.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+    selectedMark.contentTintColor = ReserveColor.accent
+    selectedMark.setAccessibilityElement(false)
+    selectedMark.setAccessibilityLabel("")
+    selectedMark.isHidden = !isSelected
+    selectedMark.translatesAutoresizingMaskIntoConstraints = false
+    selectedMark.widthAnchor.constraint(equalToConstant: 14).isActive = true
+    var identityViews: [NSView] = [logo, name, NSStackView.spacer()]
+    if isPinnedForMenuBar {
+      let pin = NSImageView(
+        image: NSImage(systemSymbolName: "pin.fill", accessibilityDescription: nil) ?? NSImage())
+      pin.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+      pin.contentTintColor = ReserveColor.muted
+      pin.setAccessibilityElement(false)
+      pin.setAccessibilityLabel("")
+      pin.translatesAutoresizingMaskIntoConstraints = false
+      pin.widthAnchor.constraint(equalToConstant: 11).isActive = true
+      pin.identifier = NSUserInterfaceItemIdentifier("menu-bar-pin-\(summary.provider.rawValue)")
+      identityViews.append(pin)
+    }
+    identityViews.append(selectedMark)
+    let identity = NSStackView.row(identityViews, spacing: 6)
+    identity.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewTileContentWidth)
+      .isActive = true
+
+    let valueText: String
+    let valueColor: NSColor
+    if let primary = summary.primary {
+      valueText =
+        "\(DashboardFormat.remainingPercent(primary.remainingPercent))% "
+        + (summary.paceState == .stale ? "last known" : "left")
+      valueColor = summary.paceState == .stale ? ReserveColor.muted : ReserveColor.text
+    } else if let usage = summary.localUsage, usage.origin == .providerAccount {
+      valueText = "\(DashboardFormat.tokens(usage.todayTokens)) today"
+      valueColor = ReserveColor.text
+    } else {
+      valueText = "Plan unavailable"
+      valueColor = ReserveColor.muted
+    }
+    let value = ReserveLabel(
+      valueText, font: ReserveFont.digits(ReserveType.summaryValue, .semibold), color: valueColor
+    ).flexible()
+
+    var content: [NSView] = [identity, value]
+    if let primary = summary.primary {
+      let meter = ReserveMeter(
+        remainingPercent: primary.remainingPercent,
+        paceRemainingPercent: summary.paceState == .stale
+          ? nil : primary.expectedPercent.map { 100 - $0 },
+        label: "\(summary.provider.displayName) allowance remaining",
+        color: summary.paceState.color, isStale: summary.paceState == .stale)
+      meter.heightAnchor.constraint(equalToConstant: 5).isActive = true
+      meter.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewTileContentWidth)
+        .isActive = true
+      content.append(meter)
+    }
+
+    let stateColor: NSColor = summary.setupAction == nil ? summary.paceState.color : ReserveColor.muted
+    let stateText = summary.setupAction == nil ? summary.paceState.label : "Setup needed"
+    let stateIcon = NSImageView(
+      image: NSImage(
+        systemSymbolName: summary.setupAction == nil ? summary.paceState.symbol : "person.crop.circle.badge.plus",
+        accessibilityDescription: nil) ?? NSImage())
+    stateIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+    stateIcon.contentTintColor = stateColor
+    stateIcon.setAccessibilityElement(false)
+    stateIcon.setAccessibilityLabel("")
+    stateIcon.translatesAutoresizingMaskIntoConstraints = false
+    stateIcon.widthAnchor.constraint(equalToConstant: 11).isActive = true
+    let state = ReserveLabel(
+      stateText, font: ReserveFont.sans(ReserveType.support, .medium), color: stateColor
+    ).flexible()
+    let stateRow = NSStackView.row([stateIcon, state], spacing: 4)
+    stateRow.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewTileContentWidth)
+      .isActive = true
+    content.append(stateRow)
+
+    let stack = NSStackView.column(content, spacing: 7)
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(stack)
+    NSLayoutConstraint.activate([
+      stack.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 10),
+      stack.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -10),
+      stack.topAnchor.constraint(equalTo: self.topAnchor, constant: 10),
+      stack.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -10),
+      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewTileWidth),
+      self.heightAnchor.constraint(equalToConstant: 112),
+    ])
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  func updateClock(_ now: Date) {
+    if let spoken = self.spokenClock?(now) { self.setAccessibilityValue(spoken) }
+  }
+
+  override var acceptsFirstResponder: Bool { true }
+  override var canBecomeKeyView: Bool { true }
+  override var focusRingMaskBounds: NSRect { self.bounds }
+
+  override func draw(_ dirtyRect: NSRect) {
+    super.draw(dirtyRect)
+    let path = NSBezierPath(
+      roundedRect: self.bounds, xRadius: ReserveRadius.control, yRadius: ReserveRadius.control)
+    (self.isSelected ? ReserveColor.selected : self.isHovered ? ReserveColor.hover : ReserveColor.elevated)
+      .setFill()
+    path.fill()
+    if self.isSelected {
+      ReserveColor.accent.withAlphaComponent(0.72).setStroke()
+      path.lineWidth = 1.5
+      path.stroke()
+    }
+  }
+
+  override func drawFocusRingMask() {
+    NSBezierPath(
+      roundedRect: self.bounds, xRadius: ReserveRadius.control, yRadius: ReserveRadius.control
+    ).fill()
+  }
+
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    super.hitTest(point) == nil ? nil : self
+  }
+
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+  override func mouseDown(with event: NSEvent) {
+    guard self.bounds.contains(self.convert(event.locationInWindow, from: nil)) else { return }
+    self.selectProvider(self.provider)
+  }
+
+  override func keyDown(with event: NSEvent) {
+    switch event.charactersIgnoringModifiers {
+    case " ", "\r", "\u{3}": self.selectProvider(self.provider)
+    default: super.keyDown(with: event)
+    }
+  }
+
+  override func updateTrackingAreas() {
+    if let hoverTrackingArea { self.removeTrackingArea(hoverTrackingArea) }
+    let area = NSTrackingArea(
+      rect: self.bounds,
+      options: [.mouseEnteredAndExited, .activeInKeyWindow], owner: self, userInfo: nil)
+    self.addTrackingArea(area)
+    self.hoverTrackingArea = area
+    super.updateTrackingAreas()
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    self.isHovered = true
+    self.needsDisplay = true
+  }
+
+  override func mouseExited(with event: NSEvent) {
+    self.isHovered = false
+    self.needsDisplay = true
+  }
+
+  override func resetCursorRects() { self.addCursorRect(self.bounds, cursor: .pointingHand) }
+}
+
+/// The selected provider, rendered with the same anatomy regardless of how many
+/// limit windows it exposes.
 @MainActor
 final class ProviderDashboardCard: NSView, ReserveClockUpdating {
   private let provider: ProviderID
@@ -604,6 +922,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     now: Date,
     isSelectedForMenuBar: Bool,
     isExpanded: Bool = false,
+    showsDisclosure: Bool = true,
     connectProvider: @escaping (ProviderID) -> Void,
     selectMenuBarProvider: @escaping (ProviderID) -> Void,
     toggleDetail: @escaping (ProviderID) -> Void = { _ in }
@@ -632,8 +951,15 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     var rows: [NSView] = [
       Self.identityRow(
         summary: summary, isSelectedForMenuBar: isSelectedForMenuBar,
-        isExpanded: isExpanded, connectProvider: connectProvider, toggleDetail: toggleDetail)
+        isExpanded: isExpanded, showsDisclosure: showsDisclosure,
+        connectProvider: connectProvider, toggleDetail: toggleDetail)
     ]
+    if isExpanded {
+      rows.append(
+        Self.menuBarProviderRow(
+          summary: summary, isSelected: isSelectedForMenuBar,
+          selectMenuBarProvider: selectMenuBarProvider))
+    }
     if self.hasUnavailableLiveData {
       rows.append(ProviderFreshnessBanner(summary: summary, now: now))
     }
@@ -827,6 +1153,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     summary: ProviderSummary,
     isSelectedForMenuBar: Bool,
     isExpanded: Bool,
+    showsDisclosure: Bool,
     connectProvider: @escaping (ProviderID) -> Void,
     toggleDetail: @escaping (ProviderID) -> Void
   ) -> NSView {
@@ -891,10 +1218,13 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     trailing.setContentHuggingPriority(.required, for: .horizontal)
     trailing.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-    let disclose = DetailDisclosureButton(
-      provider: summary.provider, isExpanded: isExpanded, action: toggleDetail)
-    let row = NSStackView.row(
-      identity + [NSStackView.spacer(), trailing, disclose], spacing: 9)
+    var rowViews = identity + [NSStackView.spacer(), trailing]
+    if showsDisclosure {
+      rowViews.append(
+        DetailDisclosureButton(
+          provider: summary.provider, isExpanded: isExpanded, action: toggleDetail))
+    }
+    let row = NSStackView.row(rowViews, spacing: 9)
     row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
     return row
   }
@@ -926,6 +1256,36 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     ).flexible()
     label.toolTip = summary.error ?? message
     let row = NSStackView.row([label], spacing: 0)
+    row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+    return row
+  }
+
+  private static func menuBarProviderRow(
+    summary: ProviderSummary,
+    isSelected: Bool,
+    selectMenuBarProvider: @escaping (ProviderID) -> Void
+  ) -> NSView {
+    let label = ReserveLabel(
+      "Menu bar provider",
+      font: ReserveFont.sans(ReserveType.metadata, .medium), color: ReserveColor.muted
+    ).flexible()
+    let button = ReserveTextButton(
+      title: isSelected ? "Pinned" : "Pin \(summary.provider.displayName)",
+      symbol: isSelected ? "pin.fill" : "pin",
+      size: ReserveType.metadata,
+      color: isSelected ? ReserveColor.muted : ReserveColor.accent,
+      filled: !isSelected,
+      minimumWidth: 82,
+      height: 24,
+      action: { selectMenuBarProvider(summary.provider) })
+    button.identifier = NSUserInterfaceItemIdentifier(
+      "pin-menu-bar-\(summary.provider.rawValue)")
+    button.toolTip = isSelected
+      ? "\(summary.provider.displayName) is shown in the menu bar"
+      : "Show \(summary.provider.displayName) in the menu bar"
+    button.setAccessibilityLabel(button.toolTip)
+    button.isEnabled = !isSelected
+    let row = NSStackView.row([label, NSStackView.spacer(), button], spacing: 8)
     row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
     return row
   }
@@ -1479,6 +1839,27 @@ private final class UsageDetailGrid: NSView {
           alternateValues: ["just now", "59 min ago", "999h ago"],
           clockText: { date in Self.age(checked, now: date) }))
     }
+    // Token totals from this Mac have their own clock. A fresh quota check
+    // must not make an older scan look current.
+    if summary.localHistorySupported, summary.localHistoryEnabled {
+      if let scanned = summary.localHistoryCheckedAt {
+        rows.append(
+          Self.cell(
+            "Local history", Self.age(scanned, now: now),
+            identifier: "usage-local-history-\(summary.provider.rawValue)",
+            alternateValues: ["just now", "59 min ago", "999h ago"],
+            clockText: { date in Self.age(scanned, now: date) }))
+      }
+      if let failure = summary.localHistoryError {
+        let note = ReserveLabel(
+          failure, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+        ).flexible()
+        note.identifier = NSUserInterfaceItemIdentifier(
+          "usage-local-history-error-\(summary.provider.rawValue)")
+        note.toolTip = failure
+        rows.append(note)
+      }
+    }
     // The detail view says what it is waiting for rather than showing nothing.
     // Copilot has neither local logs nor account history, so it says nothing.
     if usage == nil, summary.historyPossible {
@@ -1599,12 +1980,16 @@ private final class ProviderLogo: ReserveSurface {
   }
 
   convenience init(provider: ProviderID) {
+    self.init(provider: provider, size: 26, markSize: 15)
+  }
+
+  convenience init(provider: ProviderID, size: CGFloat, markSize: CGFloat) {
     self.init(
       image: ProviderArtwork.image(for: provider),
       identifier: "provider-logo-\(provider.rawValue)",
       tinted: provider != .anthropic,
-      size: 26,
-      markSize: 15)
+      size: size,
+      markSize: markSize)
   }
 
   private init(
@@ -1707,6 +2092,11 @@ enum DashboardMetrics {
   static var contentWidth: CGFloat { self.width - 2 * self.inset }
   static let cardPadding: CGFloat = 14
   static var cardContentWidth: CGFloat { self.contentWidth - 2 * self.cardPadding }
+  static let overviewPadding: CGFloat = 12
+  static let overviewGap: CGFloat = 8
+  static var overviewInnerWidth: CGFloat { self.contentWidth - 2 * self.overviewPadding }
+  static var overviewTileWidth: CGFloat { (self.overviewInnerWidth - self.overviewGap) / 2 }
+  static var overviewTileContentWidth: CGFloat { self.overviewTileWidth - 20 }
   static var size: NSSize { NSSize(width: self.width, height: self.minimumHeight) }
 
   /// The popover's own frame and arrow, on top of the content.

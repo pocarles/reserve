@@ -108,11 +108,17 @@ struct ProviderSummary {
   /// when the provider does not report one.
   var nextRenewal: Date? = nil
   var localHistoryEnabled = false
+  var hidesPersonalInfo = false
   /// Whether this provider can ever have activity history at all: local logs,
   /// account history, or both.
   var historyPossible = false
   /// Whether this provider's history comes from logs on this Mac.
   var localHistorySupported = false
+  /// When this Mac's logs were last scanned successfully. Independent of the
+  /// quota check above it.
+  var localHistoryCheckedAt: Date? = nil
+  /// Safe wording when the latest scan failed. The previous totals stay.
+  var localHistoryError: String? = nil
   /// Provider facts for the expanded details only (account, credits, counts).
   var details: [UsageDetail] = []
   /// The last sign-in could not even be launched; the card says so instead of
@@ -290,7 +296,10 @@ enum AllowanceBuilder {
       historyPossible: capabilities.contains(.localHistory)
         || capabilities.contains(.accountHistory),
       localHistorySupported: capabilities.contains(.localHistory),
-      details: state.snapshot?.details ?? [],
+      localHistoryCheckedAt: state.localHistoryCheckedAt,
+      localHistoryError: state.localHistoryError,
+      details: PrivacyPresentation.details(
+        state.snapshot?.details ?? [], hidingPersonal: state.hidesPersonalInfo),
       signInCouldNotStart: state.signInCouldNotStart)
   }
 
