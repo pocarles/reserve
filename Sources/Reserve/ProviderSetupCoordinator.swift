@@ -43,6 +43,7 @@ final class ProviderSetupCoordinator {
   private var failureMessage: String?
   /// A key pasted in this window that has not yet been confirmed by a check.
   private var savedKeyInFlow = false
+  private var keySaveInFlight = false
 
   init(store: UsageStore, installer: ProviderHelperInstaller = ProviderHelperInstaller()) {
     self.store = store
@@ -246,17 +247,28 @@ final class ProviderSetupCoordinator {
       guard let key = self.panel?.enteredKey,
         !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       else { return }
-      self.panel?.clearKey()
-      do {
-        try self.store.savePlanKey(key, for: provider) { [weak self] in
-          guard let self, self.generation == generation else { return }
-          self.didCheck()
+      guard !self.keySaveInFlight else { return }
+      self.keySaveInFlight = true
+      self.present(.savingKey)
+      Task { @MainActor in
+        defer { self.keySaveInFlight = false }
+        do {
+          try await self.store.savePlanKey(key, for: provider) { [weak owner = self] in
+            guard let owner, owner.generation == generation else { return }
+            owner.didCheck()
+          }
+          guard self.generation == generation else { return }
+          self.panel?.clearKey()
+          self.savedKeyInFlow = true
+        } catch is CancellationError { } catch {
+          guard self.generation == generation else { return }
+          self.present(.needsKey)
+          var message = error.localizedDescription
+          if key.count >= 4 {
+            message = message.replacingOccurrences(of: key, with: "that key")
+          }
+          self.panel?.showKeyError(message)
         }
-        self.savedKeyInFlow = true
-        self.present(.savingKey)
-      } catch {
-        self.present(.needsKey)
-        self.panel?.showKeyError(error.localizedDescription)
       }
     case .connected:
       self.close()
@@ -295,7 +307,20 @@ final class ProviderSetupCoordinator {
     self.panel = nil
     if let provider {
       self.store.cancelConnection(provider)
-      if discardsKey { self.store.discardRejectedPlanKey(provider) }
+      if discardsKey {
+        Task { @MainActor in
+          do {
+            try await self.store.discardRejectedPlanKeyAsync(provider)
+          } catch is CancellationError { } catch {
+            let alert = NSAlert()
+            alert.messageText = "The key could not be removed"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "OK")
+            if let window = NSApp.keyWindow { alert.beginSheetModal(for: window, completionHandler: nil) }
+            else { alert.runModal() }
+          }
+        }
+      }
       if cancelledSetup { self.store.setEnabled(provider, enabled: false) }
     }
   }

@@ -8,7 +8,7 @@ import ReserveCore
 /// names that day, its tokens, and its cost, or says they are unknown.
 @MainActor
 final class UsageHeatmapView: NSView {
-  private let series: InsightHistorySeries
+  private var series: InsightHistorySeries
   private var trackedCell: Int?
 
   init(series: InsightHistorySeries) {
@@ -26,6 +26,15 @@ final class UsageHeatmapView: NSView {
       options: [.activeAlways, .mouseMoved, .inVisibleRect],
       owner: self,
       userInfo: nil))
+  }
+
+  func apply(_ series: InsightHistorySeries) {
+    guard self.series != series else { return }
+    self.series = series
+    self.trackedCell = nil
+    self.setAccessibilityLabel(Self.spoken(series))
+    self.toolTip = Self.rangeCaption(series)
+    self.needsDisplay = true
   }
 
   required init?(coder: NSCoder) { nil }

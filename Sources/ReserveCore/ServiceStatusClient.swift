@@ -58,7 +58,12 @@ public actor ServiceStatusClient {
 
   /// Nil when the provider has no official status page. Nothing is fetched
   /// and no status is invented for it.
+  public func invalidate(_ provider: ProviderID) {
+    self.cache.removeValue(forKey: provider)
+  }
+
   public func fetch(_ provider: ProviderID, now: Date = Date()) async -> ProviderServiceStatus? {
+    if Task.isCancelled { return nil }
     guard let pageURL = Self.pageURL(provider) else { return nil }
     if let cached = self.cache[provider],
       now.timeIntervalSince(cached.fetchedAt) < self.cacheLifetime
@@ -68,7 +73,12 @@ public actor ServiceStatusClient {
     let result: ProviderServiceStatus
     do {
       result = try await self.fetchFresh(provider, now: now)
+    } catch is CancellationError {
+      return nil
+    } catch let error as URLError where error.code == .cancelled {
+      return nil
     } catch {
+      if Task.isCancelled { return nil }
       result =
         self.cache[provider]
         ?? ProviderServiceStatus(
@@ -78,11 +88,13 @@ public actor ServiceStatusClient {
           pageURL: pageURL,
           fetchedAt: now)
     }
+    if Task.isCancelled { return nil }
     self.cache[provider] = result
     return result
   }
 
   private func fetchFresh(_ provider: ProviderID, now: Date) async throws -> ProviderServiceStatus {
+    try Task.checkCancellation()
     guard let endpoint = ProviderDescriptor.forProvider(provider).statusFeedURL else {
       throw StatusError.invalidResponse
     }

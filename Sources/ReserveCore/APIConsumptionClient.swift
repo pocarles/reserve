@@ -1,6 +1,7 @@
 import Foundation
 
 #if canImport(Security)
+  import LocalAuthentication
   import Security
 #endif
 
@@ -312,6 +313,18 @@ public enum APIConsumptionKeychain {
       Self.store(for: provider).hasKey()
     }
 
+    public static func availability(
+      for provider: APIConsumptionProvider
+    ) -> KeychainItemAvailability {
+      Self.store(for: provider).availability()
+    }
+
+    public static func availability(
+      for provider: APIConsumptionProvider
+    ) async -> KeychainItemAvailability {
+      await Self.store(for: provider).availability()
+    }
+
     /// Replaces any key already stored for this provider. The value never
     /// leaves this process except as an `Authorization` header on the fixed
     /// provider host.
@@ -319,27 +332,51 @@ public enum APIConsumptionKeychain {
       try Self.store(for: provider).save(key)
     }
 
+    public static func save(_ key: String, for provider: APIConsumptionProvider) async throws {
+      try await Self.store(for: provider).save(key)
+    }
+
     public static func load(for provider: APIConsumptionProvider) throws -> String {
       try Self.store(for: provider).load()
     }
 
-    public static func delete(for provider: APIConsumptionProvider) {
-      Self.store(for: provider).delete()
+    public static func load(for provider: APIConsumptionProvider) async throws -> String {
+      try await Self.store(for: provider).load()
+    }
+
+    public static func delete(for provider: APIConsumptionProvider) throws {
+      try Self.store(for: provider).delete()
+    }
+
+    public static func delete(for provider: APIConsumptionProvider) async throws {
+      try await Self.store(for: provider).delete()
     }
 
     /// Removes the Typeface item from an earlier mistaken provider name.
+    /// Silent: a locked Keychain must not prompt or hang this cleanup.
     public static func deleteLegacyTypefaceAccount() {
+      KeychainAccessExecutor.sync { Self.deleteLegacyTypefaceOnExecutor() }
+    }
+
+    public static func deleteLegacyTypefaceAccount() async {
+      _ = try? await KeychainAccessExecutor.run { Self.deleteLegacyTypefaceOnExecutor() }
+    }
+
+    private static func deleteLegacyTypefaceOnExecutor() {
+      let context = LAContext()
+      context.interactionNotAllowed = true
       SecItemDelete(
         [
           kSecClass as String: kSecClassGenericPassword,
           kSecAttrService as String: Self.service,
           kSecAttrAccount as String: "api-consumption.typeface",
+          kSecUseAuthenticationContext as String: context,
         ] as CFDictionary)
     }
   #endif
 
   /// Paste often includes wrapping newlines. Those are stripped.
-  static func normalized(
+  public static func normalized(
     _ key: String,
     for provider: APIConsumptionProvider
   ) throws -> String {
@@ -906,7 +943,9 @@ public struct APIConsumptionClient: Sendable {
       throw UsageProviderError.unauthorized(
         "\(provider.displayName) refused this \(provider.keyKind.lowercased()).")
     case 429:
-      throw UsageProviderError.rateLimited(retryAt: nil)
+      throw UsageProviderError.rateLimited(
+        retryAt: HTTPRetryAfter.deadline(
+          from: http.value(forHTTPHeaderField: "Retry-After"), now: self.now()))
     case 400, 404, 422:
       throw UsageProviderError.invalidResponse(
         "\(provider.displayName) rejected this consumption request (HTTP \(http.statusCode)).")

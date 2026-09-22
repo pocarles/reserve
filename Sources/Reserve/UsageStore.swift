@@ -46,18 +46,50 @@ enum PreviewScenario: String, CaseIterable {
   case keychainAccess = "keychain-access"
 }
 
-/// Where plan keys (Z.ai, Kimi) are kept. The app always uses the Keychain;
-/// self-tests substitute memory so they never touch a real Keychain item.
+/// Where plan keys (Z.ai, Kimi) are kept. The app's production store talks to
+/// the Keychain on a background executor. Self-tests substitute these
+/// main-actor closures so they never touch a real Keychain item.
 @MainActor
 struct PlanKeyStorage {
   var hasKey: (ProviderID) -> Bool
   var save: (String, ProviderID) throws -> Void
   var delete: (ProviderID) -> Void
+  var availabilityAsync: ((ProviderID) async -> KeychainItemAvailability)?
+  var saveAsync: ((String, ProviderID) async throws -> Void)?
+  var deleteAsync: ((ProviderID) async throws -> Void)?
+  /// When set, distinguishes a locked Keychain from a missing key. Fixtures
+  /// that only know presence leave this nil.
+  var availability: ((ProviderID) -> KeychainItemAvailability)?
 
-  static let keychain = PlanKeyStorage(
-    hasKey: { PlanKeyKeychain.hasKey(for: $0) },
-    save: { try PlanKeyKeychain.save($0, for: $1) },
-    delete: { PlanKeyKeychain.delete(for: $0) })
+  init(
+    hasKey: @escaping (ProviderID) -> Bool,
+    save: @escaping (String, ProviderID) throws -> Void,
+    delete: @escaping (ProviderID) -> Void,
+    availability: ((ProviderID) -> KeychainItemAvailability)? = nil,
+    availabilityAsync: ((ProviderID) async -> KeychainItemAvailability)? = nil,
+    saveAsync: ((String, ProviderID) async throws -> Void)? = nil,
+    deleteAsync: ((ProviderID) async throws -> Void)? = nil
+  ) {
+    self.hasKey = hasKey
+    self.save = save
+    self.delete = delete
+    self.availability = availability
+    self.availabilityAsync = availabilityAsync
+    self.saveAsync = saveAsync
+    self.deleteAsync = deleteAsync
+  }
+}
+
+/// Injected API-account keys. Production leaves this nil and uses the Keychain
+/// executor. Tests pass closures and never touch the login Keychain or network.
+@MainActor
+struct APIConsumptionKeyAccess {
+  var availability: (APIConsumptionProvider) -> KeychainItemAvailability
+  var load: (APIConsumptionProvider) throws -> String
+  var save: (String, APIConsumptionProvider) throws -> Void
+  var delete: (APIConsumptionProvider) -> Void
+  var saveAsync: ((String, APIConsumptionProvider) async throws -> Void)? = nil
+  var deleteAsync: ((APIConsumptionProvider) async throws -> Void)? = nil
 }
 
 @MainActor
@@ -101,9 +133,9 @@ final class UsageStore {
   private let cache: SnapshotCache
   private let fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)?
   /// Production uses one scanner so its in-memory index survives between
-  /// scans. Tests pass a closure so a scan can succeed or fail without
-  /// reading this Mac's session logs.
-  private let localUsageScanner = LocalUsageScanner()
+  /// scans. Test and preview stores leave this nil so they never watch this
+  /// Mac's session roots.
+  private let localUsageScanner: LocalUsageScanner?
   private let localUsageScan: @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
   /// Cache-only daily history. Production reads the one scanner's archive.
   /// Test and preview stores get an empty loader so they never open the
@@ -174,11 +206,17 @@ final class UsageStore {
         for provider in ProviderID.allCases where self.states[provider]?.localUsage?.origin != .providerAccount {
           self.states[provider]?.localUsage = nil
         }
-        // A disabled history pane must not keep showing a failed or fresh scan.
+        // A disabled history pane must not keep showing a failed or fresh scan,
+        // and an in-flight scan must not publish after the switch.
+        self.localScanGeneration += 1
+        self.localScanTask?.cancel()
+        self.localScanTask = nil
+        self.isScanningLocalUsage = false
         self.localHistoryScanError = nil
         self.lastLocalUsageScanAt = nil
         self.publishedDailyHistory = [:]
       }
+      self.updateLocalUsageWatches()
       self.changed()
       if newValue {
         self.insightsRequestedAt.removeAll()
@@ -239,12 +277,42 @@ final class UsageStore {
   private var keychainAccessCompletions: [ProviderID: [() -> Void]] = [:]
   private var lastRefreshCompletedAt: Date?
   private var apiConsumptionTokens: [APIConsumptionProvider: Int] = [:]
-  /// Whether a key exists, remembered. The dashboard asks on every rebuild and
-  /// every minute tick, and each miss is a synchronous Keychain lookup on the
-  /// main actor for something that only changes when a key is saved or removed.
-  private var apiConsumptionKeyPresence: [APIConsumptionProvider: Bool] = [:]
-  private var planKeyPresence: [ProviderID: Bool] = [:]
-  private let planKeys: PlanKeyStorage
+  private var apiGenerations: [APIConsumptionProvider: Int] = [:]
+  private var apiMutationGenerations: [APIConsumptionProvider: Int] = [:]
+  private var planMutationGenerations: [ProviderID: Int] = [:]
+  /// A setup window can close after its Keychain save has begun. Only that
+  /// canceled generation may remove its just-written, unconfirmed key; a
+  /// replacement save advances the generation again and is never deleted by
+  /// the older completion.
+  private var planMutationsNeedingCleanup: [ProviderID: Set<Int>] = [:]
+  private var planSaveCleanupEligible: [ProviderID: Set<Int>] = [:]
+  private var apiTasks: [APIConsumptionProvider: Task<Void, Never>] = [:]
+  /// Presence only. The secret itself is never cached.
+  private var apiKeyCache: [APIConsumptionProvider: SavedKeyAvailability] = [:]
+  private var planKeyCache: [ProviderID: SavedKeyAvailability] = [:]
+  private let injectedPlanKeys: PlanKeyStorage?
+  private let injectedAPIKeys: APIConsumptionKeyAccess?
+  private let apiConsumptionFetch:
+    (@Sendable (APIConsumptionProvider, String) async throws -> APIConsumptionSnapshot)?
+  private let serviceStatusFetch: (@Sendable (ProviderID) async -> ProviderServiceStatus?)?
+  private let now: @Sendable () -> Date
+  private let usesProductionKeychain: Bool
+  private let honorsHostRefreshEnvironment: Bool
+  private var lowPowerOverride: Bool?
+  private var offlineOverride: Bool?
+  private var subscriptionSchedules: [ProviderID: ProviderRefreshSchedule] = [:]
+  private var apiSchedules: [APIConsumptionProvider: ProviderRefreshSchedule] = [:]
+  private var statusGenerations: [ProviderID: Int] = [:]
+  private var statusTasks: [ProviderID: Task<Void, Never>] = [:]
+  private var localScanGeneration = 0
+  private var localScanTask: Task<Void, Never>?
+  private var localWatchTask: Task<Void, Never>?
+  private var keychainProbeFailures: [String: Int] = [:]
+  private var lastKeychainProbeAt: [String: Date] = [:]
+  private var apiProbeTasks: [APIConsumptionProvider: Task<Void, Never>] = [:]
+  private var planProbeTasks: [ProviderID: Task<Void, Never>] = [:]
+  private let subscriptionLimiter = OperationLimiter(limit: 2)
+  private let apiLimiter = OperationLimiter(limit: 2)
   // Standing conditions notify on the way in and clear on the way out, so a
   // provider that stays stale or degraded does not notify on every refresh.
   /// The provider whose detail panel is shown below the overview grid.
@@ -287,34 +355,45 @@ final class UsageStore {
     dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
     openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) },
-    planKeys: PlanKeyStorage = .keychain,
-    loginHandoffDeadline: Duration = .seconds(15)
+    planKeys: PlanKeyStorage? = nil,
+    loginHandoffDeadline: Duration = .seconds(15),
+    apiKeys: APIConsumptionKeyAccess? = nil,
+    apiConsumptionFetch: (@Sendable (APIConsumptionProvider, String) async throws -> APIConsumptionSnapshot)? = nil,
+    serviceStatusFetch: (@Sendable (ProviderID) async -> ProviderServiceStatus?)? = nil,
+    now: @escaping @Sendable () -> Date = Date.init
   ) {
-    self.planKeys = planKeys
+    self.injectedPlanKeys = planKeys
+    self.injectedAPIKeys = apiKeys
+    self.apiConsumptionFetch = apiConsumptionFetch
+    self.serviceStatusFetch = serviceStatusFetch
+    self.now = now
+    let productionStore = planKeys == nil && apiKeys == nil && fetchOverride == nil
+      && localUsageScan == nil && startAutomatically
+    self.usesProductionKeychain = productionStore
+    self.honorsHostRefreshEnvironment = productionStore
     self.loginHandoffDeadline = loginHandoffDeadline
     self.cache = cache
     self.fetchOverride = fetchOverride
+    self.localUsageScanner = productionStore ? Self.makeProductionLocalUsageScanner() : nil
     if let localUsageScan {
       self.localUsageScan = localUsageScan
-    } else if fetchOverride != nil || startAutomatically == false {
-      // A store built for tests or previews must not read this Mac's logs
-      // or the production usage index, even when a refresh asks for history.
-      self.localUsageScan = { _, _ in [:] }
-    } else {
-      let scanner = self.localUsageScanner
+    } else if let scanner = self.localUsageScanner {
       self.localUsageScan = { providers, now in
         try await scanner.scan(periodDays: 30, now: now, providers: providers)
       }
+    } else {
+      // A store built for tests or previews must not read this Mac's logs
+      // or the production usage index, even when a refresh asks for history.
+      self.localUsageScan = { _, _ in [:] }
     }
     if let dailyHistoryLoad {
       self.dailyHistoryLoad = dailyHistoryLoad
-    } else if fetchOverride != nil || startAutomatically == false {
-      self.dailyHistoryLoad = { _, _ in [:] }
-    } else {
-      let scanner = self.localUsageScanner
+    } else if let scanner = self.localUsageScanner {
       self.dailyHistoryLoad = { providers, now in
         await scanner.cachedHistory(periodDays: 90, now: now, providers: providers)
       }
+    } else {
+      self.dailyHistoryLoad = { _, _ in [:] }
     }
     self.loginCommandOverride = loginCommandOverride
     self.openLoginURL = openLoginURL
@@ -338,12 +417,28 @@ final class UsageStore {
         await self?.loadCacheAndStart()
       }
     }
+    if productionStore {
+      Task { await APIConsumptionKeychain.deleteLegacyTypefaceAccount() }
+    }
+  }
+
+  /// Production watches session roots. The history scanner's `watchChanges`
+  /// parameter defaults to false; this is the only call site that opts in
+  /// once that parameter exists. Every other store leaves the scanner nil.
+  private static func makeProductionLocalUsageScanner() -> LocalUsageScanner {
+    LocalUsageScanner(watchChanges: true)
   }
 
   deinit {
     self.schedulerTask?.cancel()
     self.startupTask?.cancel()
+    self.localScanTask?.cancel()
+    self.localWatchTask?.cancel()
     for task in self.refreshTasks.values { task.cancel() }
+    for task in self.apiTasks.values { task.cancel() }
+    for task in self.statusTasks.values { task.cancel() }
+    for task in self.apiProbeTasks.values { task.cancel() }
+    for task in self.planProbeTasks.values { task.cancel() }
     for task in self.loginTimeoutTasks.values { task.cancel() }
     for task in self.loginHandoffTasks.values { task.cancel() }
     for process in self.loginProcesses.values where process.isRunning { process.terminate() }
@@ -475,7 +570,7 @@ final class UsageStore {
         self.defaults.set(max(1, newValue), forKey: "refresh.intervalMinutes")
         self.defaults.set(false, forKey: "refresh.adaptive")
       }
-      self.startScheduler()
+      if self.automaticRefreshEnabled { self.startScheduler() }
     }
   }
 
@@ -804,35 +899,44 @@ final class UsageStore {
   }
 
   func refreshAll(manual: Bool = true) {
+    self.beginRefreshWave(trigger: manual ? .manual : .automatic)
+  }
+
+  /// Manual refresh still reads every eligible provider. Automatic and
+  /// activation waves only include providers whose own schedule is due, so
+  /// one failure does not pull fresh providers along. History starts here
+  /// and is not awaited by the quota wave.
+  private func beginRefreshWave(trigger: RefreshTrigger) {
     guard !self.isRefreshingAll else { return }
-    // A refresh means every reading on screen, so the API measurements go with
-    // the subscription round. Each provider dedupes its own in-flight read.
-    self.refreshEnabledAPIConsumption()
+    let now = self.now()
+    if trigger != .manual, self.discretionaryRefreshIsSuppressed(now: now) { return }
+    let manual = trigger == .manual
+    if (manual || self.insightsVisible) && self.beginLocalUsageRefresh(force: manual) {
+      self.startDetachedLocalUsageScan()
+    }
+    self.retryLockedKeychainReads(trigger: trigger, now: now)
+    self.refreshDueAPIConsumption(trigger: trigger, now: now)
+    let providers = self.dueSubscriptionProviders(trigger: trigger, now: now)
+    guard !providers.isEmpty else { return }
     self.isRefreshingAll = true
-    self.refreshStartedAt = Date()
-    for provider in ProviderID.allCases where self.isEnabled(provider) {
+    self.refreshStartedAt = now
+    for provider in providers {
       self.states[provider]?.isRefreshing = true
     }
-    // An explicit Refresh checks this Mac even while Settings Insights is
-    // closed. Automatic sweeps still scan only while that pane is open.
-    let scanLocalUsage = (manual || self.insightsVisible) && self.beginLocalUsageRefresh(force: manual)
     self.changed()
-    Task {
-      if manual, self.fetchOverride == nil { await AnthropicProvider.clearPersistedRateLimitBlock() }
-      await self.performRefreshAll(scanLocalUsage: scanLocalUsage)
-    }
+    Task { await self.performRefreshAll(providers: providers) }
   }
 
   /// Activation and wake are refresh triggers only when the cached provider
   /// data has actually aged past the configured interval.
   func shouldRefreshAfterResume(now: Date = Date()) -> Bool {
-    guard self.automaticRefreshEnabled, !self.isRefreshingAll else { return false }
-    return Self.resumeRefreshNeeded(
-      states: self.orderedStates.filter { self.isEnabled($0.provider) },
-      intervalMinutes: self.effectiveRefreshIntervalMinutes(now: now),
-      isRefreshingAll: self.isRefreshingAll,
-      lastCompletedAt: self.lastRefreshCompletedAt,
-      now: now)
+    guard !self.isRefreshingAll else { return false }
+    guard !self.discretionaryRefreshIsSuppressed(now: now) else { return false }
+    if self.hasDueKeychainProbe(trigger: .activation, now: now) { return true }
+    guard self.automaticRefreshEnabled else { return false }
+    if !self.dueSubscriptionProviders(trigger: .activation, now: now).isEmpty { return true }
+    if !self.dueAPIProviders(trigger: .activation, now: now).isEmpty { return true }
+    return false
   }
 
   static func resumeRefreshNeeded(
@@ -860,19 +964,43 @@ final class UsageStore {
   /// The scheduled sweep. A recent manual refresh can skip the round only while
   /// every enabled provider remains healthy.
   private func refreshAllIfWorthwhile(now: Date = Date()) {
-    guard
-      Self.scheduledRefreshIsWorthwhile(
-        states: ProviderID.allCases.compactMap { self.states[$0] }
-          .filter { self.isEnabled($0.provider) },
-        lastCompletedAt: self.lastRefreshCompletedAt,
-        intervalMinutes: self.effectiveRefreshIntervalMinutes(now: now),
-        now: now)
-    else { return }
-    self.refreshAll(manual: false)
+    let now = now
+    guard !self.discretionaryRefreshIsSuppressed(now: now) else { return }
+    let due = !self.dueSubscriptionProviders(trigger: .automatic, now: now).isEmpty
+      || !self.dueAPIProviders(trigger: .automatic, now: now).isEmpty
+      || self.hasDueKeychainProbe(trigger: .automatic, now: now)
+    guard due else { return }
+    self.beginRefreshWave(trigger: .automatic)
   }
 
   func refreshAfterResumeIfNeeded(now: Date = Date()) {
-    if self.shouldRefreshAfterResume(now: now) { self.refreshAll(manual: false) }
+    guard !self.discretionaryRefreshIsSuppressed(now: now) else { return }
+    if self.automaticRefreshEnabled {
+      self.refreshDueProvidersAfterActivation(now: now)
+    } else {
+      self.retryLockedKeychainReads(trigger: .activation, now: now)
+    }
+  }
+
+  /// Activation/wake entry. Discretionary suppression and per-provider
+  /// backoff still apply. A locked keychain is probed again without a fetch
+  /// of providers that are still fresh.
+  func refreshDueProvidersAfterActivation(now: Date = Date()) {
+    guard !self.discretionaryRefreshIsSuppressed(now: now) else { return }
+    self.beginRefreshWave(trigger: .activation)
+  }
+
+  /// Low Power Mode and offline are discretionary. The app reports them here;
+  /// until it does, offline stays false and Low Power Mode is read only for
+  /// the production store. Clearing a suppression resumes due work once.
+  func noteRefreshEnvironment(lowPowerMode: Bool? = nil, offline: Bool? = nil) {
+    let wasSuppressed = self.discretionaryRefreshIsSuppressed()
+    if let lowPowerMode { self.lowPowerOverride = lowPowerMode }
+    if let offline { self.offlineOverride = offline }
+    if wasSuppressed, !self.discretionaryRefreshIsSuppressed() {
+      self.refreshDueProvidersAfterActivation()
+    }
+    if self.automaticRefreshEnabled { self.startScheduler() }
   }
 
   @discardableResult
@@ -880,10 +1008,15 @@ final class UsageStore {
     _ provider: ProviderID,
     queueIfBusy: Bool = false,
     allowKeychainInteraction: Bool = false,
+    trigger: RefreshTrigger = .manual,
     onFinished: (() -> Void)? = nil
   ) -> Bool {
     // A disabled provider has nothing to check; the caller still hears back.
     guard self.isEnabled(provider) else { onFinished?(); return false }
+    let effective: RefreshTrigger = allowKeychainInteraction && trigger == .manual
+      ? .connectionRecovery : trigger
+    let decision = self.admission(for: provider, trigger: effective, now: self.now())
+    guard decision.allowed else { onFinished?(); return false }
     if let onFinished { self.refreshCompletions[provider, default: []].append(onFinished) }
     guard self.beginRefresh(provider) else {
       if queueIfBusy { self.pendingRefreshes.insert(provider) }
@@ -896,7 +1029,6 @@ final class UsageStore {
     }
     let cancellationGeneration = self.cancellationGenerations[provider] ?? 0
     self.refreshTasks[provider] = Task {
-      if provider == .anthropic, self.fetchOverride == nil { await AnthropicProvider.clearPersistedRateLimitBlock() }
       guard (self.cancellationGenerations[provider] ?? 0) == cancellationGeneration else { return }
       await self.performRefresh(
         provider, allowKeychainInteraction: allowKeychainInteraction)
@@ -917,7 +1049,7 @@ final class UsageStore {
     // Callers route those to the key field; this only re-reads usage.
     if ProviderDescriptor.forProvider(provider).usesAPIKey {
       if !self.isEnabled(provider) { onFinished?(); return }
-      self.refresh(provider, queueIfBusy: true) { onFinished?() }
+      self.refresh(provider, queueIfBusy: true, trigger: .connectionRecovery) { onFinished?() }
       return
     }
     // A helper that signs in only inside its own terminal session (the
@@ -926,7 +1058,7 @@ final class UsageStore {
     // checks whether that has happened.
     if ProviderDescriptor.forProvider(provider).signsInFromTerminal {
       if !self.isEnabled(provider) { onFinished?(); return }
-      self.refresh(provider, queueIfBusy: true) { onFinished?() }
+      self.refresh(provider, queueIfBusy: true, trigger: .connectionRecovery) { onFinished?() }
       return
     }
     guard let configuration = Self.loginConfiguration(for: provider) else {
@@ -1174,11 +1306,23 @@ final class UsageStore {
   }
 
   func cancelConnection(_ provider: ProviderID) {
+    if let mutation = self.planMutationGenerations[provider],
+      self.planSaveCleanupEligible[provider]?.contains(mutation) == true
+    {
+      self.planMutationsNeedingCleanup[provider, default: []].insert(mutation)
+    }
+    self.planMutationGenerations[provider] = (self.planMutationGenerations[provider] ?? 0) + 1
     self.cancellationGenerations[provider] = (self.cancellationGenerations[provider] ?? 0) + 1
     self.loginGenerations[provider] = (self.loginGenerations[provider] ?? 0) + 1
     self.loginCompletions.removeValue(forKey: provider)
     self.refreshCompletions.removeValue(forKey: provider)
     self.refreshTasks.removeValue(forKey: provider)?.cancel()
+    self.planProbeTasks.removeValue(forKey: provider)?.cancel()
+    self.statusGenerations[provider] = (self.statusGenerations[provider] ?? 0) + 1
+    self.statusTasks.removeValue(forKey: provider)?.cancel()
+    if self.usesProductionKeychain {
+      Task { await self.serviceStatusClient.invalidate(provider) }
+    }
     self.keychainAccessCompletions.removeValue(forKey: provider)
     self.pendingRefreshes.remove(provider)
     self.pendingInsightProviders.remove(provider)
@@ -1210,6 +1354,7 @@ final class UsageStore {
     self.notifications.clearStale(provider)
     self.notifications.clearIncident(provider)
     self.rebuildNotificationSchedules()
+    self.updateLocalUsageWatches()
     Task {
       if provider == .cursor { await CursorProvider.clearCachedCredential() }
       await self.persistSnapshots()
@@ -1222,8 +1367,9 @@ final class UsageStore {
     if !enabled {
       self.cancelConnection(provider)
     }
+    self.updateLocalUsageWatches()
     self.changed()
-    if enabled && refreshImmediately { self.refresh(provider) }
+    if enabled && refreshImmediately { self.refresh(provider, trigger: .connectionRecovery) }
   }
 
   func isEnabled(_ provider: ProviderID) -> Bool {
@@ -1236,60 +1382,161 @@ final class UsageStore {
 
   func setAPIConsumptionEnabled(_ provider: APIConsumptionProvider, enabled: Bool) {
     self.defaults.set(enabled, forKey: "apiConsumption.\(provider.rawValue).enabled")
+    if !enabled {
+      self.apiMutationGenerations[provider] = (self.apiMutationGenerations[provider] ?? 0) + 1
+      self.invalidateAPIWork(provider)
+    }
     self.changed()
     if enabled { self.refreshAPIConsumption(provider) }
   }
 
+  func apiConsumptionKeyAvailability(
+    _ provider: APIConsumptionProvider
+  ) -> SavedKeyAvailability {
+    if let known = self.apiKeyCache[provider] { return known }
+    if let injected = self.injectedAPIKeys {
+      return SavedKeyAvailability(injected.availability(provider))
+    }
+    if self.usesProductionKeychain { self.scheduleProductionAPIProbe(provider) }
+    return self.usesProductionKeychain ? .unknown : .missing
+  }
+
   func hasAPIConsumptionKey(_ provider: APIConsumptionProvider) -> Bool {
-    if let known = self.apiConsumptionKeyPresence[provider] { return known }
-    let present = APIConsumptionKeychain.hasKey(for: provider)
-    self.apiConsumptionKeyPresence[provider] = present
-    return present
+    self.apiConsumptionKeyAvailability(provider) == .present
   }
 
   /// Stores a pasted key and turns measurement on. The key is written to
   /// Keychain only; preferences record that the option is enabled.
+  /// Validation errors throw before any in-flight read is cancelled.
   func saveAPIConsumptionKey(_ key: String, for provider: APIConsumptionProvider) throws {
-    try APIConsumptionKeychain.save(key, for: provider)
-    self.apiConsumptionKeyPresence[provider] = true
-    self.defaults.set(true, forKey: "apiConsumption.\(provider.rawValue).enabled")
-    self.apiConsumptionErrors[provider] = nil
-    self.changed()
-    self.refreshAPIConsumption(provider)
+    guard let injected = self.injectedAPIKeys else {
+      throw UsageProviderError.unavailable("API key storage requires the async save path.")
+    }
+    try injected.save(key, provider)
+    self.adoptSavedAPIKey(provider)
+  }
+
+  func saveAPIConsumptionKey(_ key: String, for provider: APIConsumptionProvider) async throws {
+    if self.injectedAPIKeys == nil, !self.usesProductionKeychain {
+      throw UsageProviderError.unavailable("API key storage is not configured.")
+    }
+    if self.usesProductionKeychain {
+      _ = try APIConsumptionKeychain.normalized(key, for: provider)
+    }
+    let mutation = self.beginAPIKeyMutation(provider)
+    do {
+      if let injected = self.injectedAPIKeys {
+        if let saveAsync = injected.saveAsync { try await saveAsync(key, provider) }
+        else { try injected.save(key, provider) }
+      } else {
+        try await APIConsumptionKeychain.save(key, for: provider)
+      }
+    } catch {
+      guard self.apiMutationGenerations[provider] == mutation else { throw CancellationError() }
+      self.reportAPIKeyMutationFailure(error, provider: provider)
+      throw error
+    }
+    guard self.apiMutationGenerations[provider] == mutation else { throw CancellationError() }
+    self.adoptSavedAPIKey(provider)
   }
 
   func removeAPIConsumptionKey(_ provider: APIConsumptionProvider) {
-    APIConsumptionKeychain.delete(for: provider)
-    self.apiConsumptionKeyPresence[provider] = false
-    self.defaults.set(false, forKey: "apiConsumption.\(provider.rawValue).enabled")
-    self.apiConsumption[provider] = nil
-    self.apiConsumptionErrors[provider] = nil
-    self.changed()
+    guard let injected = self.injectedAPIKeys else {
+      self.apiConsumptionErrors[provider] = "Removing this key requires the async Keychain path."
+      self.changed()
+      return
+    }
+    _ = self.beginAPIKeyMutation(provider)
+    injected.delete(provider)
+    self.finishAPIKeyRemoval(provider)
+  }
+
+  func removeAPIConsumptionKeyAsync(_ provider: APIConsumptionProvider) async throws {
+    let mutation = self.beginAPIKeyMutation(provider)
+    do {
+      if let injected = self.injectedAPIKeys {
+        if let deleteAsync = injected.deleteAsync { try await deleteAsync(provider) }
+        else { injected.delete(provider) }
+      } else if self.usesProductionKeychain {
+        try await APIConsumptionKeychain.delete(for: provider)
+      } else {
+        throw UsageProviderError.unavailable("API key storage is not configured.")
+      }
+    } catch {
+      guard self.apiMutationGenerations[provider] == mutation else { throw CancellationError() }
+      self.reportAPIKeyMutationFailure(error, provider: provider)
+      throw error
+    }
+    guard self.apiMutationGenerations[provider] == mutation else { throw CancellationError() }
+    self.finishAPIKeyRemoval(provider)
   }
 
   // MARK: Plan keys
 
-  /// Whether an API-key plan (Z.ai, Kimi) has a key in the Keychain. Cached,
-  /// since Settings asks on every rebuild and each miss is a Keychain lookup.
-  func hasPlanKey(_ provider: ProviderID) -> Bool {
-    guard ProviderDescriptor.forProvider(provider).usesAPIKey else { return false }
-    if let known = self.planKeyPresence[provider] { return known }
-    let present = self.planKeys.hasKey(provider)
-    self.planKeyPresence[provider] = present
-    return present
+  func planKeyAvailability(for provider: ProviderID) -> SavedKeyAvailability {
+    guard ProviderDescriptor.forProvider(provider).usesAPIKey else { return .missing }
+    if let known = self.planKeyCache[provider] { return known }
+    if let injected = self.injectedPlanKeys {
+      if let availability = injected.availability {
+        return SavedKeyAvailability(availability(provider))
+      }
+      return injected.hasKey(provider) ? .present : .missing
+    }
+    if self.usesProductionKeychain { self.scheduleProductionPlanProbe(provider) }
+    return self.usesProductionKeychain ? .unknown : .missing
   }
 
-  /// Stores a pasted plan key in the Keychain and connects the provider. The
-  /// key itself never reaches preferences, logs or the snapshot cache.
+  /// Whether an API-key plan (Z.ai, Kimi) has a key. Reads the cached
+  /// tri-state; a locked Keychain is not reported as present or as a saved miss.
+  func hasPlanKey(_ provider: ProviderID) -> Bool {
+    self.planKeyAvailability(for: provider) == .present
+  }
+
+  /// Stores a pasted plan key and connects the provider. The key itself never
+  /// reaches preferences, logs or the snapshot cache. An in-flight read is
+  /// invalidated only after the new key is accepted, then a new read starts.
   func savePlanKey(
     _ key: String, for provider: ProviderID, onFinished: (() -> Void)? = nil
   ) throws {
-    try self.planKeys.save(key, provider)
-    self.planKeyPresence[provider] = true
-    self.states[provider]?.error = nil
-    self.states[provider]?.requiresConnection = false
-    self.setEnabled(provider, enabled: true, refreshImmediately: false)
-    self.refresh(provider, queueIfBusy: true) { onFinished?() }
+    guard let injected = self.injectedPlanKeys else {
+      throw UsageProviderError.unavailable("Plan key storage requires the async save path.")
+    }
+    try injected.save(key, provider)
+    self.adoptSavedPlanKey(provider, onFinished: onFinished)
+  }
+
+  func savePlanKey(
+    _ key: String, for provider: ProviderID, onFinished: (() -> Void)? = nil
+  ) async throws {
+    if self.injectedPlanKeys == nil, !self.usesProductionKeychain {
+      throw UsageProviderError.unavailable("Plan key storage is not configured.")
+    }
+    if self.usesProductionKeychain { _ = try PlanKeyKeychain.normalized(key, for: provider) }
+    let cleanupIfCanceled = self.planKeyAvailability(for: provider) == .missing
+    let mutation = self.beginPlanKeyMutation(provider)
+    if cleanupIfCanceled {
+      self.planSaveCleanupEligible[provider, default: []].insert(mutation)
+    }
+    defer { self.finishPlanSaveMutation(provider, generation: mutation) }
+    do {
+      if let injected = self.injectedPlanKeys {
+        if let saveAsync = injected.saveAsync { try await saveAsync(key, provider) }
+        else { try injected.save(key, provider) }
+      } else {
+        try await PlanKeyKeychain.save(key, for: provider)
+      }
+    } catch {
+      guard self.planMutationGenerations[provider] == mutation else {
+        throw CancellationError()
+      }
+      self.reportPlanKeyMutationFailure(error, provider: provider)
+      throw error
+    }
+    guard self.planMutationGenerations[provider] == mutation else {
+      await self.cleanUpCanceledPlanSave(provider, generation: mutation)
+      throw CancellationError()
+    }
+    self.adoptSavedPlanKey(provider, onFinished: onFinished)
   }
 
   /// Removes a key that was just saved, rejected, and then abandoned, so a key
@@ -1297,8 +1544,25 @@ final class UsageStore {
   /// state the rejection left it in; closing the window decides the rest.
   func discardRejectedPlanKey(_ provider: ProviderID) {
     guard ProviderDescriptor.forProvider(provider).usesAPIKey else { return }
-    self.planKeys.delete(provider)
-    self.planKeyPresence[provider] = false
+    self.deletePlanKeyValue(provider)
+    self.planKeyCache[provider] = .missing
+    self.invalidateSubscriptionRead(provider)
+    self.states[provider]?.requiresConnection = true
+    self.changed()
+  }
+
+  func discardRejectedPlanKeyAsync(_ provider: ProviderID) async throws {
+    guard ProviderDescriptor.forProvider(provider).usesAPIKey else { return }
+    let mutation = self.beginPlanKeyMutation(provider)
+    do { try await self.deletePlanKeyValue(provider) }
+    catch {
+      guard self.planMutationGenerations[provider] == mutation else { throw CancellationError() }
+      self.reportPlanKeyMutationFailure(error, provider: provider)
+      throw error
+    }
+    guard self.planMutationGenerations[provider] == mutation else { throw CancellationError() }
+    self.planKeyCache[provider] = .missing
+    self.invalidateSubscriptionRead(provider)
     self.states[provider]?.requiresConnection = true
     self.changed()
   }
@@ -1306,29 +1570,37 @@ final class UsageStore {
   /// Deletes the key, stops checks and clears the cached snapshot.
   func removePlanKey(_ provider: ProviderID) {
     guard ProviderDescriptor.forProvider(provider).usesAPIKey else { return }
-    self.planKeys.delete(provider)
-    self.planKeyPresence[provider] = false
+    self.deletePlanKeyValue(provider)
+    self.planKeyCache[provider] = .missing
+    self.subscriptionSchedules[provider] = nil
+    self.disconnect(provider)
+  }
+
+  func removePlanKeyAsync(_ provider: ProviderID) async throws {
+    guard ProviderDescriptor.forProvider(provider).usesAPIKey else { return }
+    let mutation = self.beginPlanKeyMutation(provider)
+    do { try await self.deletePlanKeyValue(provider) }
+    catch {
+      guard self.planMutationGenerations[provider] == mutation else { throw CancellationError() }
+      self.reportPlanKeyMutationFailure(error, provider: provider)
+      throw error
+    }
+    guard self.planMutationGenerations[provider] == mutation else { throw CancellationError() }
+    self.planKeyCache[provider] = .missing
+    self.subscriptionSchedules[provider] = nil
     self.disconnect(provider)
   }
 
   @discardableResult
-  func refreshAPIConsumption(_ provider: APIConsumptionProvider) -> Bool {
-    guard self.isAPIConsumptionEnabled(provider), self.hasAPIConsumptionKey(provider) else {
-      return false
-    }
-    guard !self.apiConsumptionRefreshing.contains(provider) else { return false }
-    self.apiConsumptionRefreshing.insert(provider)
-    self.changed()
-    Task { [weak self] in
-      await self?.performAPIConsumptionRefresh(provider)
-    }
-    return true
+  func refreshAPIConsumption(
+    _ provider: APIConsumptionProvider,
+    trigger: RefreshTrigger = .manual
+  ) -> Bool {
+    self.startAPIRefresh(provider, trigger: trigger, respectingSchedule: true)
   }
 
-  func refreshEnabledAPIConsumption() {
-    for provider in APIConsumptionProvider.allCases where self.isAPIConsumptionEnabled(provider) {
-      self.refreshAPIConsumption(provider)
-    }
+  func refreshEnabledAPIConsumption(trigger: RefreshTrigger = .manual) {
+    self.refreshDueAPIConsumption(trigger: trigger, now: self.now())
   }
 
   func monthlySubscriptionCost(for provider: ProviderID) -> Double? {
@@ -1705,7 +1977,6 @@ final class UsageStore {
       "menuBar.showsRemaining": true,
       "menuBar.showsReset": true,
     ])
-    APIConsumptionKeychain.deleteLegacyTypefaceAccount()
     self.defaults.removeObject(forKey: "apiConsumption.typeface.enabled")
   }
 
@@ -1919,7 +2190,7 @@ final class UsageStore {
   private func refreshLocalUsage(force: Bool = true) {
     guard self.beginLocalUsageRefresh(force: force) else { return }
     self.changed()
-    Task { await self.performLocalUsageScan() }
+    self.startDetachedLocalUsageScan()
   }
 
   /// Whether a scheduled sweep should start provider subprocesses.
@@ -1954,20 +2225,21 @@ final class UsageStore {
 
   private func startScheduler(now: Date = Date()) {
     self.schedulerTask?.cancel()
-    let minutes = max(1, self.effectiveRefreshIntervalMinutes(now: now))
-    let fireAt = now.addingTimeInterval(TimeInterval(minutes * 60))
+    guard self.automaticRefreshEnabled else {
+      self.schedulerFireAt = nil
+      return
+    }
+    let delay = self.automaticWakeDelay(now: now)
+    let fireAt = now.addingTimeInterval(delay)
     self.schedulerFireAt = fireAt
     self.schedulerTask = Task { [weak self] in
-      let delay = fireAt.timeIntervalSince(now)
       if delay > 0 {
         try? await Task.sleep(for: .seconds(delay))
       }
       guard !Task.isCancelled else { return }
       await MainActor.run {
-        guard let self else { return }
+        guard let self, !Task.isCancelled else { return }
         self.refreshAllIfWorthwhile()
-        self.refreshEnabledAPIConsumption()
-        guard !Task.isCancelled else { return }
         self.startScheduler()
       }
     }
@@ -1994,10 +2266,10 @@ final class UsageStore {
     await task.value
   }
 
-  private func performRefreshAll(scanLocalUsage: Bool) async {
-    let providers = ProviderID.allCases.filter { self.isEnabled($0) }
+  private func performRefreshAll(providers: [ProviderID]) async {
     // Two checks at a time bounds process pressure while one slow provider
-    // cannot hold every other row behind it.
+    // cannot hold every other row behind it. Service status and local history
+    // are not part of this group.
     await withTaskGroup(of: Void.self) { group in
       var iterator = providers.makeIterator()
       for _ in 0..<2 {
@@ -2012,29 +2284,42 @@ final class UsageStore {
       }
     }
     await self.persistSnapshots()
-    if scanLocalUsage {
-      await self.performLocalUsageScan(notify: false)
-    }
     self.isRefreshingAll = false
-    self.lastRefreshCompletedAt = Date()
+    self.lastRefreshCompletedAt = self.now()
     self.changed()
   }
 
-  private func performLocalUsageScan(notify: Bool = true) async {
-    guard self.localHistoryEnabled else {
-      self.isScanningLocalUsage = false
-      if notify { self.changed() }
-      return
+  private func startDetachedLocalUsageScan() {
+    let generation = self.localScanGeneration
+    self.localScanTask = Task { await self.performLocalUsageScan(generation: generation) }
+  }
+
+  private func updateLocalUsageWatches() {
+    guard let scanner = self.localUsageScanner else { return }
+    let enabled: Set<ProviderID> = self.localHistoryEnabled
+      ? Set(ProviderID.allCases.filter { self.isEnabled($0) })
+      : []
+    self.localWatchTask?.cancel()
+    self.localWatchTask = Task {
+      guard !Task.isCancelled else { return }
+      if enabled.isEmpty { await scanner.stopWatching() }
+      else { await scanner.updateWatchedProviders(enabled) }
     }
-    let now = Date()
+  }
+
+  private func performLocalUsageScan(generation: Int, notify: Bool = true) async {
+    defer {
+      if self.localScanGeneration == generation {
+        self.isScanningLocalUsage = false
+        if notify { self.changed() }
+      }
+    }
+    guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
+    let now = self.now()
     let enabled = Set(ProviderID.allCases.filter { self.isEnabled($0) })
     do {
       let result = try await self.localUsageScan(enabled, now)
-      guard self.localHistoryEnabled else {
-        self.isScanningLocalUsage = false
-        if notify { self.changed() }
-        return
-      }
+      guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
       for provider in ProviderID.allCases {
         guard self.isEnabled(provider) else { continue }
         let snapshot = self.states[provider]?.snapshot
@@ -2043,16 +2328,16 @@ final class UsageStore {
           snapshot: snapshot,
           scanned: result[provider])
       }
+      guard self.localScanGeneration == generation else { return }
       self.lastLocalUsageScanAt = now
       self.localHistoryScanError = nil
       await self.loadPublishedDailyHistory(now: now)
     } catch {
+      guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
       // Keep the last successful totals. A failure must not look like a fresh
       // scan, and must not start the 30-minute quiet period.
       self.localHistoryScanError = Self.localHistoryFailureMessage(error)
     }
-    self.isScanningLocalUsage = false
-    if notify { self.changed() }
   }
 
   /// What the dashboard may say about a failed local scan. Paths, file names
@@ -2093,7 +2378,10 @@ final class UsageStore {
     notify: Bool = true,
     allowKeychainInteraction: Bool = false
   ) async {
-    guard self.isEnabled(provider), !Task.isCancelled else { return }
+    guard self.isEnabled(provider), !Task.isCancelled else {
+      self.states[provider]?.isRefreshing = false
+      return
+    }
     // A manual refresh and the scheduled sweep can be in flight for the same
     // provider at once. Without a token the slower request wins simply by
     // finishing last, overwriting newer numbers with older ones.
@@ -2127,6 +2415,29 @@ final class UsageStore {
       }
     }
 
+    guard isCurrent() else { return }
+    // Status has its own task. A slow or failed status page must not hold a
+    // quota slot or the connection completion below.
+    self.refreshServiceStatus(provider)
+    if ProviderDescriptor.forProvider(provider).usesAPIKey {
+      let availability = await self.resolvePlanKeyAvailability(provider)
+      guard isCurrent() else { return }
+      self.planKeyCache[provider] = SavedKeyAvailability(availability)
+      if availability == .unavailable {
+        let probeID = self.planProbeID(provider)
+        self.lastKeychainProbeAt[probeID] = self.now()
+        self.keychainProbeFailures[probeID, default: 0] += 1
+        self.states[provider]?.error = KeychainAccessClassification.temporaryMessage(
+          displayName: provider.displayName)
+        self.states[provider]?.requiresConnection = false
+        return
+      }
+    }
+
+    guard await self.subscriptionLimiter.acquire() else { return }
+    defer { self.subscriptionLimiter.release() }
+    guard isCurrent() else { return }
+
     let includeInsights = self.pendingInsightProviders.remove(provider) != nil || self.insightsVisible
     let fetcher: any UsageProvider =
       switch provider {
@@ -2147,10 +2458,6 @@ final class UsageStore {
       case .kimi: KimiProvider()
       case .gemini: GeminiProvider()
       }
-    let previousHealth = self.states[provider]?.serviceStatus?.health
-    let statusTask: Task<ProviderServiceStatus?, Never>? = self.fetchOverride == nil
-      ? Task { await self.serviceStatusClient.fetch(provider) } : nil
-    defer { statusTask?.cancel() }
     var providerFetchSucceeded = false
     do {
       let previous = self.states[provider]?.snapshot
@@ -2181,8 +2488,11 @@ final class UsageStore {
         current: snapshot,
         nextPlanRenewal: self.nextRenewal(for: provider))
       if persist { await self.persistSnapshots() }
+      guard isCurrent() else { return }
+      self.recordSubscriptionSuccess(provider)
     } catch {
       guard isCurrent() else { return }
+      self.recordSubscriptionFailure(provider, error)
       // The cached snapshot is deliberately kept: a failed refresh should leave
       // the last known numbers on screen with an error beside them.
       if var state = self.states[provider] {
@@ -2192,12 +2502,6 @@ final class UsageStore {
       // A temporary macOS access failure does not revoke the user's consent.
     }
     if providerFetchSucceeded { self.changed() }
-    if let statusTask {
-      let status = await statusTask.value
-      guard isCurrent() else { return }
-      self.states[provider]?.serviceStatus = status
-      self.reportServiceHealth(provider, previous: previousHealth)
-    }
     guard isCurrent() else { return }
     self.reportStaleness(provider)
   }
@@ -2306,37 +2610,649 @@ final class UsageStore {
     }
   }
 
-  private func performAPIConsumptionRefresh(_ provider: APIConsumptionProvider) async {
-    let token = (self.apiConsumptionTokens[provider] ?? 0) + 1
-    self.apiConsumptionTokens[provider] = token
-    func isCurrent() -> Bool { self.apiConsumptionTokens[provider] == token }
+  private func performAPIConsumptionRefresh(
+    _ provider: APIConsumptionProvider,
+    generation: Int
+  ) async {
     defer {
-      if isCurrent() {
+      if self.apiGenerations[provider] == generation {
+        self.apiTasks[provider] = nil
         self.apiConsumptionRefreshing.remove(provider)
         self.changed()
       }
     }
+    guard self.apiGenerations[provider] == generation, self.isAPIConsumptionEnabled(provider)
+    else { return }
+    let availability = await self.resolveAPIKeyAvailability(provider)
+    guard self.apiGenerations[provider] == generation else { return }
+    self.apiKeyCache[provider] = SavedKeyAvailability(availability)
+    let probeID = self.apiProbeID(provider)
+    switch availability {
+    case .missing:
+      self.keychainProbeFailures[probeID] = 0
+      self.apiConsumptionErrors[provider] = KeychainAccessClassification.missingMessage(
+        displayName: provider.displayName, keyKind: provider.keyKind)
+      return
+    case .unavailable:
+      self.lastKeychainProbeAt[probeID] = self.now()
+      self.keychainProbeFailures[probeID, default: 0] += 1
+      self.apiConsumptionErrors[provider] = KeychainAccessClassification.temporaryMessage(
+        displayName: provider.displayName)
+      return
+    case .present:
+      self.keychainProbeFailures[probeID] = 0
+    }
     let key: String
     do {
-      key = try APIConsumptionKeychain.load(for: provider)
-      self.apiConsumptionKeyPresence[provider] = true
+      key = try await self.loadAPIKey(provider)
     } catch {
-      // The key went away behind Reserve's back, so the remembered answer is
-      // wrong and the row has to stop claiming a key is saved.
-      self.apiConsumptionKeyPresence[provider] = false
-      guard isCurrent() else { return }
-      self.apiConsumptionErrors[provider] = String(error.localizedDescription.prefix(240))
+      guard self.apiGenerations[provider] == generation else { return }
+      if self.isTemporaryKeychainFailure(error) {
+        self.apiKeyCache[provider] = .unavailable
+        self.lastKeychainProbeAt[probeID] = self.now()
+        self.keychainProbeFailures[probeID, default: 0] += 1
+        self.apiConsumptionErrors[provider] = KeychainAccessClassification.temporaryMessage(
+          displayName: provider.displayName)
+      } else {
+        self.apiKeyCache[provider] = .missing
+        self.apiConsumptionErrors[provider] = String(error.localizedDescription.prefix(240))
+      }
       return
     }
+    guard self.apiGenerations[provider] == generation else { return }
+    guard await self.apiLimiter.acquire() else { return }
+    defer { self.apiLimiter.release() }
+    guard self.apiGenerations[provider] == generation, self.isAPIConsumptionEnabled(provider)
+    else { return }
     do {
-      let snapshot = try await APIConsumptionClient().fetch(provider, apiKey: key)
-      guard isCurrent() else { return }
+      let snapshot = try await self.fetchAPIConsumption(provider, apiKey: key)
+      guard self.apiGenerations[provider] == generation, self.isAPIConsumptionEnabled(provider)
+      else { return }
       self.apiConsumption[provider] = snapshot
       self.apiConsumptionErrors[provider] = nil
+      self.recordAPISuccess(provider)
     } catch {
-      guard isCurrent() else { return }
+      guard self.apiGenerations[provider] == generation, self.isAPIConsumptionEnabled(provider)
+      else { return }
+      self.recordAPIFailure(provider, error)
       self.apiConsumptionErrors[provider] = String(error.localizedDescription.prefix(240))
     }
+  }
+
+  private func discretionaryRefreshIsSuppressed(now: Date = Date()) -> Bool {
+    if self.offlineOverride == true { return true }
+    if let lowPowerOverride { return lowPowerOverride }
+    if self.honorsHostRefreshEnvironment, ProcessInfo.processInfo.isLowPowerModeEnabled {
+      return true
+    }
+    _ = now
+    return false
+  }
+
+  private func refreshInterval(now: Date) -> TimeInterval {
+    TimeInterval(max(1, self.effectiveRefreshIntervalMinutes(now: now)) * 60)
+  }
+
+  private func admission(
+    for provider: ProviderID, trigger: RefreshTrigger, now: Date
+  ) -> RefreshAdmission {
+    RefreshSchedulePolicy.admit(
+      state: self.subscriptionSchedules[provider] ?? ProviderRefreshSchedule(),
+      trigger: trigger, now: now, interval: self.refreshInterval(now: now),
+      discretionarySuppressed: self.discretionaryRefreshIsSuppressed(now: now))
+  }
+
+  private func apiAdmission(
+    _ provider: APIConsumptionProvider, trigger: RefreshTrigger, now: Date
+  ) -> RefreshAdmission {
+    RefreshSchedulePolicy.admit(
+      state: self.apiSchedules[provider] ?? ProviderRefreshSchedule(),
+      trigger: trigger, now: now, interval: self.refreshInterval(now: now),
+      discretionarySuppressed: self.discretionaryRefreshIsSuppressed(now: now))
+  }
+
+  private func dueSubscriptionProviders(trigger: RefreshTrigger, now: Date) -> [ProviderID] {
+    ProviderID.allCases.filter { provider in
+      guard self.isEnabled(provider), self.states[provider]?.isRefreshing != true,
+        self.refreshTasks[provider] == nil
+      else { return false }
+      if ProviderDescriptor.forProvider(provider).usesAPIKey {
+        switch self.planKeyAvailability(for: provider) {
+        case .missing, .unavailable: return false
+        case .unknown, .present: break
+        }
+      }
+      return self.admission(for: provider, trigger: trigger, now: now).allowed
+    }
+  }
+
+  private func dueAPIProviders(
+    trigger: RefreshTrigger, now: Date
+  ) -> [APIConsumptionProvider] {
+    APIConsumptionProvider.allCases.filter { provider in
+      guard self.isAPIConsumptionEnabled(provider), self.apiTasks[provider] == nil else { return false }
+      switch self.apiConsumptionKeyAvailability(provider) {
+      case .missing, .unavailable: return false
+      case .unknown, .present: break
+      }
+      return self.apiAdmission(provider, trigger: trigger, now: now).allowed
+    }
+  }
+
+  private func refreshDueAPIConsumption(trigger: RefreshTrigger, now: Date) {
+    for provider in self.dueAPIProviders(trigger: trigger, now: now) {
+      self.startAPIRefresh(provider, trigger: trigger, respectingSchedule: true)
+    }
+  }
+
+  private func hasDueKeychainProbe(trigger: RefreshTrigger, now: Date) -> Bool {
+    for provider in APIConsumptionProvider.allCases {
+      if self.apiKeyCache[provider] == .unavailable,
+        self.keychainProbeIsDue(id: self.apiProbeID(provider), trigger: trigger, now: now)
+      {
+        return true
+      }
+    }
+    for provider in ProviderID.allCases where ProviderDescriptor.forProvider(provider).usesAPIKey {
+      if self.planKeyCache[provider] == .unavailable,
+        self.keychainProbeIsDue(id: self.planProbeID(provider), trigger: trigger, now: now)
+      {
+        return true
+      }
+    }
+    return false
+  }
+
+  private func keychainProbeIsDue(id: String, trigger: RefreshTrigger, now: Date) -> Bool {
+    switch trigger {
+    case .manual, .connectionRecovery:
+      return true
+    case .automatic, .activation, .keychainRecovery:
+      let last = self.lastKeychainProbeAt[id] ?? .distantPast
+      let elapsed = now.timeIntervalSince(last)
+      if elapsed < RefreshSchedulePolicy.keychainProbeSpacing { return false }
+      if trigger == .automatic {
+        let failures = self.keychainProbeFailures[id] ?? 0
+        if failures > 0 {
+          let delay = RefreshSchedulePolicy.backoff(
+            failures: failures, base: RefreshSchedulePolicy.keychainProbeSpacing,
+            cap: RefreshSchedulePolicy.keychainProbeCap)
+          if elapsed < delay { return false }
+        }
+      }
+      return true
+    }
+  }
+
+  private func nextKeychainProbeAt(id: String, now: Date) -> Date? {
+    guard self.lastKeychainProbeAt[id] != nil || (self.keychainProbeFailures[id] ?? 0) > 0 else {
+      return now
+    }
+    let failures = self.keychainProbeFailures[id] ?? 0
+    let delay = failures == 0
+      ? RefreshSchedulePolicy.keychainProbeSpacing
+      : RefreshSchedulePolicy.backoff(
+        failures: max(1, failures), base: RefreshSchedulePolicy.keychainProbeSpacing,
+        cap: RefreshSchedulePolicy.keychainProbeCap)
+    let last = self.lastKeychainProbeAt[id] ?? now
+    return last.addingTimeInterval(delay)
+  }
+
+  private func automaticWakeDelay(now: Date) -> TimeInterval {
+    let interval = self.refreshInterval(now: now)
+    if self.discretionaryRefreshIsSuppressed(now: now) {
+      return min(6 * 60 * 60, max(RefreshSchedulePolicy.minimumAutomaticDelay, interval))
+    }
+    var earliest = now.addingTimeInterval(interval)
+    for provider in ProviderID.allCases where self.isEnabled(provider) {
+      if ProviderDescriptor.forProvider(provider).usesAPIKey {
+        let availability = self.planKeyAvailability(for: provider)
+        if availability == .missing || availability == .unavailable { continue }
+      }
+      let next = RefreshSchedulePolicy.nextEligibleAt(
+        state: self.subscriptionSchedules[provider] ?? ProviderRefreshSchedule(),
+        now: now, interval: interval)
+      if next < earliest { earliest = next }
+    }
+    for provider in APIConsumptionProvider.allCases where self.isAPIConsumptionEnabled(provider) {
+      let availability = self.apiConsumptionKeyAvailability(provider)
+      if availability == .missing || availability == .unavailable { continue }
+      let next = RefreshSchedulePolicy.nextEligibleAt(
+        state: self.apiSchedules[provider] ?? ProviderRefreshSchedule(),
+        now: now, interval: interval)
+      if next < earliest { earliest = next }
+    }
+    for provider in APIConsumptionProvider.allCases where self.apiKeyCache[provider] == .unavailable {
+      if let next = self.nextKeychainProbeAt(id: self.apiProbeID(provider), now: now), next < earliest {
+        earliest = next
+      }
+    }
+    for provider in ProviderID.allCases where ProviderDescriptor.forProvider(provider).usesAPIKey
+      && self.planKeyCache[provider] == .unavailable {
+      if let next = self.nextKeychainProbeAt(id: self.planProbeID(provider), now: now), next < earliest {
+        earliest = next
+      }
+    }
+    return min(6 * 60 * 60, max(RefreshSchedulePolicy.minimumAutomaticDelay, earliest.timeIntervalSince(now)))
+  }
+
+  #if RESERVE_DEV_AUTOMATION
+  func automaticWakeDelayForTesting(now: Date) -> TimeInterval {
+    self.automaticWakeDelay(now: now)
+  }
+  #endif
+
+  private func retryLockedKeychainReads(trigger: RefreshTrigger, now: Date) {
+    for provider in APIConsumptionProvider.allCases {
+      guard self.apiKeyCache[provider] == .unavailable,
+        self.keychainProbeIsDue(id: self.apiProbeID(provider), trigger: trigger, now: now)
+      else { continue }
+      self.startAPIKeyRecoveryProbe(provider, trigger: trigger, now: now)
+    }
+    for provider in ProviderID.allCases where ProviderDescriptor.forProvider(provider).usesAPIKey {
+      guard self.planKeyCache[provider] == .unavailable,
+        self.keychainProbeIsDue(id: self.planProbeID(provider), trigger: trigger, now: now)
+      else { continue }
+      self.startPlanKeyRecoveryProbe(provider, trigger: trigger, now: now)
+    }
+  }
+
+  private func startAPIKeyRecoveryProbe(
+    _ provider: APIConsumptionProvider, trigger: RefreshTrigger, now: Date
+  ) {
+    guard self.apiProbeTasks[provider] == nil else { return }
+    let mutation = self.apiMutationGenerations[provider] ?? 0
+    let probeID = self.apiProbeID(provider)
+    self.lastKeychainProbeAt[probeID] = now
+    self.apiProbeTasks[provider] = Task { [weak self] in
+      guard let self else { return }
+      let availability = await self.resolveAPIKeyAvailability(provider)
+      guard !Task.isCancelled, (self.apiMutationGenerations[provider] ?? 0) == mutation else {
+        return
+      }
+      self.apiKeyCache[provider] = SavedKeyAvailability(availability)
+      switch availability {
+      case .unavailable:
+        self.keychainProbeFailures[probeID, default: 0] += 1
+        self.apiConsumptionErrors[provider] = KeychainAccessClassification.temporaryMessage(
+          displayName: provider.displayName)
+      case .missing:
+        self.keychainProbeFailures[probeID] = 0
+        self.apiConsumptionErrors[provider] = self.isAPIConsumptionEnabled(provider)
+          ? KeychainAccessClassification.missingMessage(
+            displayName: provider.displayName, keyKind: provider.keyKind)
+          : nil
+      case .present:
+        self.keychainProbeFailures[probeID] = 0
+        if self.apiConsumptionErrors[provider]
+          == KeychainAccessClassification.temporaryMessage(displayName: provider.displayName)
+        {
+          self.apiConsumptionErrors[provider] = nil
+        }
+      }
+      self.apiProbeTasks[provider] = nil
+      self.changed()
+      guard availability == .present, self.isAPIConsumptionEnabled(provider) else { return }
+      let fetchTrigger: RefreshTrigger = trigger == .manual ? .manual : .keychainRecovery
+      self.startAPIRefresh(provider, trigger: fetchTrigger, respectingSchedule: true)
+    }
+  }
+
+  private func startPlanKeyRecoveryProbe(
+    _ provider: ProviderID, trigger: RefreshTrigger, now: Date
+  ) {
+    guard self.planProbeTasks[provider] == nil else { return }
+    let mutation = self.planMutationGenerations[provider] ?? 0
+    let probeID = self.planProbeID(provider)
+    self.lastKeychainProbeAt[probeID] = now
+    self.planProbeTasks[provider] = Task { [weak self] in
+      guard let self else { return }
+      let availability = await self.resolvePlanKeyAvailability(provider)
+      guard !Task.isCancelled, (self.planMutationGenerations[provider] ?? 0) == mutation else {
+        return
+      }
+      self.planKeyCache[provider] = SavedKeyAvailability(availability)
+      switch availability {
+      case .unavailable:
+        self.keychainProbeFailures[probeID, default: 0] += 1
+        self.states[provider]?.error = KeychainAccessClassification.temporaryMessage(
+          displayName: provider.displayName)
+        self.states[provider]?.requiresConnection = false
+      case .missing:
+        self.keychainProbeFailures[probeID] = 0
+        if self.isEnabled(provider) {
+          self.states[provider]?.error = KeychainAccessClassification.missingMessage(
+            displayName: provider.displayName, keyKind: "API key")
+          self.states[provider]?.requiresConnection = true
+        }
+      case .present:
+        self.keychainProbeFailures[probeID] = 0
+        if self.states[provider]?.error
+          == KeychainAccessClassification.temporaryMessage(displayName: provider.displayName)
+        {
+          self.states[provider]?.error = nil
+        }
+      }
+      self.planProbeTasks[provider] = nil
+      self.changed()
+      guard availability == .present, self.isEnabled(provider) else { return }
+      let fetchTrigger: RefreshTrigger = trigger == .manual ? .manual : .keychainRecovery
+      self.refresh(provider, trigger: fetchTrigger)
+    }
+  }
+
+  private func recordSubscriptionSuccess(_ provider: ProviderID) {
+    var state = self.subscriptionSchedules[provider] ?? ProviderRefreshSchedule()
+    let now = self.now()
+    RefreshSchedulePolicy.recordSuccess(&state, now: now, interval: self.refreshInterval(now: now))
+    self.subscriptionSchedules[provider] = state
+  }
+
+  private func recordSubscriptionFailure(_ provider: ProviderID, _ error: Error) {
+    var state = self.subscriptionSchedules[provider] ?? ProviderRefreshSchedule()
+    RefreshSchedulePolicy.recordFailure(
+      &state, now: self.now(), failure: RefreshSchedulePolicy.failureClass(for: error))
+    self.subscriptionSchedules[provider] = state
+  }
+
+  private func recordAPISuccess(_ provider: APIConsumptionProvider) {
+    var state = self.apiSchedules[provider] ?? ProviderRefreshSchedule()
+    let now = self.now()
+    RefreshSchedulePolicy.recordSuccess(&state, now: now, interval: self.refreshInterval(now: now))
+    self.apiSchedules[provider] = state
+  }
+
+  private func recordAPIFailure(_ provider: APIConsumptionProvider, _ error: Error) {
+    var state = self.apiSchedules[provider] ?? ProviderRefreshSchedule()
+    RefreshSchedulePolicy.recordFailure(
+      &state, now: self.now(), failure: RefreshSchedulePolicy.failureClass(for: error))
+    self.apiSchedules[provider] = state
+  }
+
+  private func apiProbeID(_ provider: APIConsumptionProvider) -> String {
+    "api.\(provider.rawValue)"
+  }
+
+  private func planProbeID(_ provider: ProviderID) -> String {
+    "plan.\(provider.rawValue)"
+  }
+
+  private func invalidateAPIWork(_ provider: APIConsumptionProvider) {
+    self.apiGenerations[provider] = (self.apiGenerations[provider] ?? 0) + 1
+    self.apiTasks[provider]?.cancel()
+    self.apiTasks[provider] = nil
+    self.apiProbeTasks.removeValue(forKey: provider)?.cancel()
+    self.apiConsumptionRefreshing.remove(provider)
+  }
+
+  private func invalidateSubscriptionRead(_ provider: ProviderID) {
+    self.refreshTokens[provider] = (self.refreshTokens[provider] ?? 0) + 1
+    self.cancellationGenerations[provider] = (self.cancellationGenerations[provider] ?? 0) + 1
+    self.refreshTasks[provider]?.cancel()
+    self.refreshTasks[provider] = nil
+    self.planProbeTasks.removeValue(forKey: provider)?.cancel()
+    self.statusGenerations[provider] = (self.statusGenerations[provider] ?? 0) + 1
+    self.statusTasks[provider]?.cancel()
+    self.statusTasks[provider] = nil
+    self.states[provider]?.isRefreshing = false
+    self.states[provider]?.isConnecting = false
+  }
+
+  @discardableResult
+  private func startAPIRefresh(
+    _ provider: APIConsumptionProvider,
+    trigger: RefreshTrigger,
+    respectingSchedule: Bool
+  ) -> Bool {
+    guard self.isAPIConsumptionEnabled(provider) else { return false }
+    if self.apiConsumptionKeyAvailability(provider) == .missing { return false }
+    if respectingSchedule,
+      !self.apiAdmission(provider, trigger: trigger, now: self.now()).allowed
+    {
+      return false
+    }
+    if self.apiTasks[provider] != nil { return false }
+    let generation = (self.apiGenerations[provider] ?? 0) + 1
+    self.apiGenerations[provider] = generation
+    self.apiConsumptionRefreshing.insert(provider)
+    self.apiTasks[provider] = Task {
+      await self.performAPIConsumptionRefresh(provider, generation: generation)
+    }
+    self.changed()
+    return true
+  }
+
+  private func adoptSavedAPIKey(_ provider: APIConsumptionProvider) {
+    self.invalidateAPIWork(provider)
+    self.apiKeyCache[provider] = .present
+    self.apiSchedules[provider] = nil
+    self.keychainProbeFailures[self.apiProbeID(provider)] = 0
+    self.defaults.set(true, forKey: "apiConsumption.\(provider.rawValue).enabled")
+    self.apiConsumptionErrors[provider] = nil
+    self.changed()
+    self.startAPIRefresh(provider, trigger: .manual, respectingSchedule: false)
+  }
+
+  private func finishAPIKeyRemoval(_ provider: APIConsumptionProvider) {
+    self.apiKeyCache[provider] = .missing
+    self.apiSchedules[provider] = nil
+    self.keychainProbeFailures[self.apiProbeID(provider)] = 0
+    self.defaults.set(false, forKey: "apiConsumption.\(provider.rawValue).enabled")
+    self.apiConsumption[provider] = nil
+    self.apiConsumptionErrors[provider] = nil
+    self.changed()
+  }
+
+  private func adoptSavedPlanKey(_ provider: ProviderID, onFinished: (() -> Void)?) {
+    self.invalidateSubscriptionRead(provider)
+    self.planKeyCache[provider] = .present
+    self.subscriptionSchedules[provider] = nil
+    self.keychainProbeFailures[self.planProbeID(provider)] = 0
+    self.states[provider]?.error = nil
+    self.states[provider]?.requiresConnection = false
+    self.setEnabled(provider, enabled: true, refreshImmediately: false)
+    self.refresh(provider, queueIfBusy: false, trigger: .connectionRecovery) { onFinished?() }
+  }
+
+  private func deletePlanKeyValue(_ provider: ProviderID) {
+    if let injected = self.injectedPlanKeys {
+      injected.delete(provider)
+    } else {
+      self.states[provider]?.error = "Removing this key requires the async Keychain path."
+    }
+  }
+
+  private func deletePlanKeyValue(_ provider: ProviderID) async throws {
+    if let injected = self.injectedPlanKeys {
+      if let deleteAsync = injected.deleteAsync { try await deleteAsync(provider) }
+      else { injected.delete(provider) }
+    } else if self.usesProductionKeychain {
+      try await PlanKeyKeychain.delete(for: provider)
+    } else {
+      throw UsageProviderError.unavailable("Plan key storage is not configured.")
+    }
+  }
+
+  private func beginAPIKeyMutation(_ provider: APIConsumptionProvider) -> Int {
+    let generation = (self.apiMutationGenerations[provider] ?? 0) + 1
+    self.apiMutationGenerations[provider] = generation
+    self.invalidateAPIWork(provider)
+    return generation
+  }
+
+  private func beginPlanKeyMutation(_ provider: ProviderID) -> Int {
+    let generation = (self.planMutationGenerations[provider] ?? 0) + 1
+    self.planMutationGenerations[provider] = generation
+    self.invalidateSubscriptionRead(provider)
+    return generation
+  }
+
+  private func cleanUpCanceledPlanSave(_ provider: ProviderID, generation: Int) async {
+    guard self.planMutationGenerations[provider] == generation + 1,
+      self.planMutationsNeedingCleanup[provider]?.remove(generation) != nil
+    else { return }
+    self.planSaveCleanupEligible[provider]?.remove(generation)
+    do {
+      try await self.deletePlanKeyValue(provider)
+      self.planKeyCache[provider] = .missing
+    } catch {
+      // Do not claim removal when macOS could not perform it. The next probe
+      // will reconcile the actual Keychain state without prompting.
+      self.planKeyCache[provider] = .unavailable
+      self.states[provider]?.error = String(error.localizedDescription.prefix(240))
+    }
+  }
+
+  private func finishPlanSaveMutation(_ provider: ProviderID, generation: Int) {
+    self.planSaveCleanupEligible[provider]?.remove(generation)
+    self.planMutationsNeedingCleanup[provider]?.remove(generation)
+    if self.planSaveCleanupEligible[provider]?.isEmpty == true {
+      self.planSaveCleanupEligible[provider] = nil
+    }
+    if self.planMutationsNeedingCleanup[provider]?.isEmpty == true {
+      self.planMutationsNeedingCleanup[provider] = nil
+    }
+  }
+
+  private func reportAPIKeyMutationFailure(
+    _ error: Error, provider: APIConsumptionProvider
+  ) {
+    let availability = self.injectedAPIKeys.map { SavedKeyAvailability($0.availability(provider)) }
+      ?? .unavailable
+    self.apiKeyCache[provider] = availability
+    self.apiConsumptionErrors[provider] = String(error.localizedDescription.prefix(240))
+    self.changed()
+  }
+
+  private func reportPlanKeyMutationFailure(_ error: Error, provider: ProviderID) {
+    let availability: SavedKeyAvailability
+    if let injected = self.injectedPlanKeys {
+      if let probe = injected.availability { availability = SavedKeyAvailability(probe(provider)) }
+      else { availability = injected.hasKey(provider) ? .present : .missing }
+    } else {
+      availability = .unavailable
+    }
+    self.planKeyCache[provider] = availability
+    self.states[provider]?.error = String(error.localizedDescription.prefix(240))
+    self.changed()
+  }
+
+  private func resolveAPIKeyAvailability(
+    _ provider: APIConsumptionProvider
+  ) async -> KeychainItemAvailability {
+    if let injected = self.injectedAPIKeys { return injected.availability(provider) }
+    guard self.usesProductionKeychain else { return .missing }
+    return await APIConsumptionKeychain.availability(for: provider)
+  }
+
+  private func loadAPIKey(_ provider: APIConsumptionProvider) async throws -> String {
+    if let injected = self.injectedAPIKeys { return try injected.load(provider) }
+    return try await APIConsumptionKeychain.load(for: provider)
+  }
+
+  private func fetchAPIConsumption(
+    _ provider: APIConsumptionProvider, apiKey: String
+  ) async throws -> APIConsumptionSnapshot {
+    if let apiConsumptionFetch {
+      return try await apiConsumptionFetch(provider, apiKey)
+    }
+    guard self.usesProductionKeychain else {
+      throw UsageProviderError.unavailable("API consumption fixture is not configured.")
+    }
+    return try await APIConsumptionClient().fetch(provider, apiKey: apiKey)
+  }
+
+  private func resolvePlanKeyAvailability(_ provider: ProviderID) async -> KeychainItemAvailability {
+    if let injected = self.injectedPlanKeys {
+      if let availabilityAsync = injected.availabilityAsync {
+        return await availabilityAsync(provider)
+      }
+      if let availability = injected.availability { return availability(provider) }
+      return injected.hasKey(provider) ? .present : .missing
+    }
+    guard self.usesProductionKeychain else { return .missing }
+    return await PlanKeyKeychain.availability(for: provider)
+  }
+
+  private func isTemporaryKeychainFailure(_ error: Error) -> Bool {
+    guard let providerError = error as? UsageProviderError else { return false }
+    if case .unavailable = providerError { return true }
+    return false
+  }
+
+  private func scheduleProductionAPIProbe(_ provider: APIConsumptionProvider) {
+    guard self.apiProbeTasks[provider] == nil else { return }
+    let mutation = self.apiMutationGenerations[provider] ?? 0
+    self.apiProbeTasks[provider] = Task { [weak self] in
+      guard let self else { return }
+      let availability = await APIConsumptionKeychain.availability(for: provider)
+      guard !Task.isCancelled, (self.apiMutationGenerations[provider] ?? 0) == mutation,
+        self.apiKeyCache[provider] == nil
+      else {
+        if (self.apiMutationGenerations[provider] ?? 0) == mutation {
+          self.apiProbeTasks[provider] = nil
+        }
+        return
+      }
+      self.apiKeyCache[provider] = SavedKeyAvailability(availability)
+      self.apiProbeTasks[provider] = nil
+      self.changed()
+    }
+  }
+
+  private func scheduleProductionPlanProbe(_ provider: ProviderID) {
+    guard self.planProbeTasks[provider] == nil else { return }
+    let mutation = self.planMutationGenerations[provider] ?? 0
+    self.planProbeTasks[provider] = Task { [weak self] in
+      guard let self else { return }
+      let availability = await PlanKeyKeychain.availability(for: provider)
+      guard !Task.isCancelled, (self.planMutationGenerations[provider] ?? 0) == mutation,
+        self.planKeyCache[provider] == nil
+      else {
+        if (self.planMutationGenerations[provider] ?? 0) == mutation {
+          self.planProbeTasks[provider] = nil
+        }
+        return
+      }
+      self.planKeyCache[provider] = SavedKeyAvailability(availability)
+      self.planProbeTasks[provider] = nil
+      self.changed()
+    }
+  }
+
+  private func refreshServiceStatus(_ provider: ProviderID) {
+    guard self.serviceStatusFetch != nil || self.fetchOverride == nil else { return }
+    let generation = (self.statusGenerations[provider] ?? 0) + 1
+    self.statusGenerations[provider] = generation
+    self.statusTasks[provider]?.cancel()
+    let previous = self.states[provider]?.serviceStatus?.health
+    self.statusTasks[provider] = Task { [weak self] in
+      guard let self else { return }
+      defer {
+        if self.statusGenerations[provider] == generation {
+          self.statusTasks[provider] = nil
+        }
+      }
+      let status: ProviderServiceStatus?
+      if let serviceStatusFetch = self.serviceStatusFetch {
+        status = await serviceStatusFetch(provider)
+      } else {
+        status = await self.serviceStatusClient.fetch(provider)
+      }
+      guard self.statusGenerations[provider] == generation, self.isEnabled(provider) else { return }
+      guard !Task.isCancelled else { return }
+      self.states[provider]?.serviceStatus = status
+      self.reportServiceHealth(provider, previous: previous)
+      self.changed()
+    }
+  }
+
+  func subscriptionRefreshSchedule(for provider: ProviderID) -> ProviderRefreshSchedule {
+    self.subscriptionSchedules[provider] ?? ProviderRefreshSchedule()
+  }
+
+  func apiRefreshSchedule(for provider: APIConsumptionProvider) -> ProviderRefreshSchedule {
+    self.apiSchedules[provider] ?? ProviderRefreshSchedule()
   }
 
   private func persistSnapshots() async {
@@ -2346,6 +3262,74 @@ final class UsageStore {
       })
     try? await self.cache.save(snapshots)
   }
+}
+
+final class OperationLimiter: @unchecked Sendable {
+  private struct Waiter {
+    let id: UUID
+    let continuation: CheckedContinuation<Bool, Never>
+  }
+
+  private let limit: Int
+  private let lock = NSLock()
+  private var inFlight = 0
+  private var waiters: [Waiter] = []
+
+  init(limit: Int) {
+    self.limit = max(1, limit)
+  }
+
+  func acquire() async -> Bool {
+    if Task.isCancelled { return false }
+    let id = UUID()
+    return await withTaskCancellationHandler {
+      await withCheckedContinuation { continuation in
+        self.lock.lock()
+        if Task.isCancelled {
+          self.lock.unlock()
+          continuation.resume(returning: false)
+        } else if self.inFlight < self.limit {
+          self.inFlight += 1
+          self.lock.unlock()
+          continuation.resume(returning: true)
+        } else {
+          self.waiters.append(Waiter(id: id, continuation: continuation))
+          self.lock.unlock()
+        }
+      }
+    } onCancel: {
+      self.cancelWaiter(id)
+    }
+  }
+
+  func release() {
+    self.lock.lock()
+    if self.waiters.isEmpty {
+      self.inFlight = max(0, self.inFlight - 1)
+      self.lock.unlock()
+      return
+    }
+    let next = self.waiters.removeFirst().continuation
+    self.lock.unlock()
+    next.resume(returning: true)
+  }
+
+  private func cancelWaiter(_ id: UUID) {
+    self.lock.lock()
+    guard let index = self.waiters.firstIndex(where: { $0.id == id }) else {
+      self.lock.unlock()
+      return
+    }
+    let continuation = self.waiters.remove(at: index).continuation
+    self.lock.unlock()
+    continuation.resume(returning: false)
+  }
+
+  #if RESERVE_DEV_AUTOMATION
+  var waiterCountForTesting: Int {
+    self.lock.withLock { self.waiters.count }
+  }
+  #endif
 }
 
 private struct LoginConfiguration {
