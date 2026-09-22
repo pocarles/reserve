@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import ReserveCore
@@ -89,6 +90,47 @@ struct PassiveQuotaAndMetadataTests {
       == Data("my existing status".utf8))
     #expect(ClaudeStatuslineBridge.forward(input: Data(repeating: 32, count: 65_537), command: "/bin/cat") == nil)
     #expect(ClaudeStatuslineBridge.forward(input: Data(), command: "/usr/bin/yes", timeout: 0.1) == nil)
+  }
+
+  @Test func execChildCannotRetainStatuslinePipeEnds() throws {
+    let executable = try #require(strdup("/bin/sleep"))
+    let duration = try #require(strdup("10"))
+    let arguments = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: 3)
+    arguments.initialize(repeating: nil, count: 3)
+    arguments[0] = executable
+    arguments[1] = duration
+    let environment = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: 1)
+    environment.initialize(to: nil)
+    defer {
+      environment.deinitialize(count: 1)
+      environment.deallocate()
+      arguments.deinitialize(count: 3)
+      arguments.deallocate()
+      free(executable)
+      free(duration)
+    }
+
+    var holder: pid_t = -1
+    let input = Data("private but transient".utf8)
+    let result = ClaudeStatuslineBridge.forward(
+      input: input, command: "/bin/cat",
+      testingBeforeRun: {
+        var spawned: pid_t = -1
+        guard posix_spawn(&spawned, executable, nil, nil, arguments, environment) == 0
+        else { return }
+        holder = spawned
+      })
+    defer {
+      if holder > 0 {
+        _ = kill(holder, SIGKILL)
+        var status: Int32 = 0
+        while waitpid(holder, &status, 0) == -1, errno == EINTR {}
+      }
+    }
+
+    #expect(holder > 0)
+    #expect(kill(holder, 0) == 0)
+    #expect(result == input)
   }
 
   @Test func codexDecodesMultipleBucketsAndResetCountWithoutLegacy() throws {

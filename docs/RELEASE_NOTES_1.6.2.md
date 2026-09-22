@@ -14,6 +14,7 @@ Reserve does less repeated work and recovers from temporary failures with less i
 - Keychain reads run silently in the background. A temporarily locked Keychain no longer appears to be a missing key.
 - Saving and removing keys waits for the result. Failed removals preserve the saved-key state, and canceled requests cannot restore old readings or re-enable a provider.
 - Slow history scans and service-status checks no longer keep a completed quota refresh spinning.
+- Sharing Claude's status line is more reliable when other command-line tools are running.
 
 ## Smoother updates
 
