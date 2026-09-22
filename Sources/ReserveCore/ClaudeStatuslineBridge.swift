@@ -6,6 +6,9 @@ import Foundation
 public enum ClaudeStatuslineBridge {
   public static let maximumInputBytes = 65_536
   private static let marker = "reserveStatusline"
+  // Pipe reads and semaphore waits must not occupy Swift's cooperative pool.
+  // The receiver is a short-lived command, so one utility worker is sufficient.
+  private static let receiverQueue = DispatchQueue(label: "com.pocarles.reserve.statusline", qos: .utility)
 
   public static func cacheURL(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
     FileManager.default.homeDirectoryForCurrentUser
@@ -107,9 +110,12 @@ public enum ClaudeStatuslineBridge {
     guard arguments.count == 4 else { return true }
     let cache = URL(fileURLWithPath: arguments[2])
     let settings = URL(fileURLWithPath: arguments[3])
-    await Task.detached(priority: .utility) {
-      self.receive(cacheURL: cache, settingsURL: settings)
-    }.value
+    await withCheckedContinuation { continuation in
+      receiverQueue.async {
+        self.receive(cacheURL: cache, settingsURL: settings)
+        continuation.resume()
+      }
+    }
     return true
   }
 
@@ -132,12 +138,24 @@ public enum ClaudeStatuslineBridge {
       let command = original["command"] as? String,
       !command.isEmpty, command.utf8.count <= 16_384
     else { return }
-    if let output = forward(input: data, command: command) {
+    if let output = forwardBlocking(input: data, command: command) {
       try? FileHandle.standardOutput.write(contentsOf: output)
     }
   }
 
   static func forward(
+    input: Data, command: String, timeout: TimeInterval = 3,
+    testingBeforeRun: (@Sendable () -> Void)? = nil
+  ) async -> Data? {
+    await withCheckedContinuation { continuation in
+      receiverQueue.async {
+        continuation.resume(returning: forwardBlocking(input: input, command: command,
+          timeout: timeout, testingBeforeRun: testingBeforeRun))
+      }
+    }
+  }
+
+  private static func forwardBlocking(
     input: Data, command: String, timeout: TimeInterval = 3,
     testingBeforeRun: (() -> Void)? = nil
   ) -> Data? {
