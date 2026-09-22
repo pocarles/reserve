@@ -37,8 +37,20 @@ struct LocalHistoryVisitPlan: Equatable, Sendable {
 final class LocalHistoryChangeTracker: @unchecked Sendable {
   fileprivate final class CallbackContext {
     weak var owner: LocalHistoryChangeTracker?
+    let source: StreamSource
 
-    init(owner: LocalHistoryChangeTracker) { self.owner = owner }
+    init(owner: LocalHistoryChangeTracker, source: StreamSource) {
+      self.owner = owner
+      self.source = source
+    }
+  }
+
+  struct StreamSource: Equatable {
+    let provider: ProviderID
+    let path: String
+    let device: UInt64
+    let inode: UInt64
+    let configurationGeneration: Int
   }
 
   private final class StreamReleaseBatch: @unchecked Sendable {
@@ -57,6 +69,13 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     var path: String
     var identity: RootIdentity
     var configurationGeneration: Int
+
+    var source: StreamSource {
+      StreamSource(
+        provider: self.provider, path: self.path,
+        device: self.identity.device, inode: self.identity.inode,
+        configurationGeneration: self.configurationGeneration)
+    }
   }
 
   private struct MutableState {
@@ -161,7 +180,7 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     var started: [(PendingStart, FSEventStreamRef)] = []
     var failed: [PendingStart] = []
     for pending in toStart {
-      if let stream = self.makeStream(path: pending.path) {
+      if let stream = self.makeStream(pending) {
         started.append((pending, stream))
       } else {
         failed.append(pending)
@@ -208,6 +227,18 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     defer { self.lock.unlock() }
     if self.simulate { return self.state.watching.contains(provider) }
     return self.state.streams[provider] != nil
+  }
+
+  func testingStreamSource(_ provider: ProviderID) -> StreamSource? {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    guard let path = self.state.roots[provider],
+      let identity = self.state.rootIdentities[provider]
+    else { return nil }
+    return StreamSource(
+      provider: provider, path: path,
+      device: identity.device, inode: identity.inode,
+      configurationGeneration: self.state.configurationGeneration[provider] ?? 0)
   }
 
   func noteUnavailable(_ provider: ProviderID) {
@@ -309,8 +340,24 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     self.state.baselined.insert(provider)
   }
 
-  func handle(paths: [String], flags: [FSEventStreamEventFlags]) {
+  func handle(
+    paths: [String], flags: [FSEventStreamEventFlags], source: StreamSource? = nil
+  ) {
     self.lock.lock()
+    if let source {
+      let currentIdentity = self.state.rootIdentities[source.provider]
+      // Invalidating a retired stream does not retract callbacks already queued
+      // on its dispatch queue. Bind each callback to the stream configuration
+      // that produced it before it can dirty or stop a replacement stream.
+      guard self.state.roots[source.provider] == source.path,
+        currentIdentity?.device == source.device,
+        currentIdentity?.inode == source.inode,
+        self.state.configurationGeneration[source.provider] == source.configurationGeneration
+      else {
+        self.lock.unlock()
+        return
+      }
+    }
     var streamsToRelease: [FSEventStreamRef] = []
     let count = min(paths.count, flags.count)
     let globalLoss = UInt32(
@@ -328,7 +375,8 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
       }
     }
     if flags.prefix(count).contains(where: { $0 & invalidatesRoot != 0 }) {
-      for provider in self.state.roots.keys {
+      let providers = source.map { [$0.provider] } ?? Array(self.state.roots.keys)
+      for provider in providers {
         if let stream = self.state.streams.removeValue(forKey: provider) {
           streamsToRelease.append(stream)
         }
@@ -348,7 +396,9 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
       let path = URL(fileURLWithPath: paths[index]).standardizedFileURL.path
       guard let provider = self.providerLocked(for: path) else { continue }
       var slot = perProvider[provider] ?? ([], [], nil)
-      if let reason = self.fullReason(flag) {
+      if flag & invalidatesRoot != 0 {
+        continue
+      } else if let reason = self.fullReason(flag) {
         slot.full = reason
       } else if self.isDirectory(flag) {
         if self.isStructuralDirectory(flag) { slot.full = .ambiguous }
@@ -374,8 +424,9 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     }
   }
 
-  private func makeStream(path: String) -> FSEventStreamRef? {
-    let callbackContext = Unmanaged.passRetained(CallbackContext(owner: self))
+  private func makeStream(_ pending: PendingStart) -> FSEventStreamRef? {
+    let callbackContext = Unmanaged.passRetained(
+      CallbackContext(owner: self, source: pending.source))
     var context = FSEventStreamContext(
       version: 0,
       info: callbackContext.toOpaque(),
@@ -398,7 +449,7 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
       nil,
       localHistoryEventCallback,
       &context,
-      [path] as CFArray,
+      [pending.path] as CFArray,
       FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
       0.25,
       flags)
@@ -533,5 +584,6 @@ private let localHistoryEventCallback: FSEventStreamCallback = {
     if let path = name as? String { paths.append(path) }
   }
   context.owner?.handle(
-    paths: paths, flags: Array(UnsafeBufferPointer(start: eventFlags, count: numEvents)))
+    paths: paths, flags: Array(UnsafeBufferPointer(start: eventFlags, count: numEvents)),
+    source: context.source)
 }
