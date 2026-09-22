@@ -118,6 +118,40 @@ struct IncrementalHistoryTests {
     #expect(plan.visit == .full(.baseline))
   }
 
+  @Test func ordinaryEventWhileStreamStartsKeepsTheValidWatch() throws {
+    let fixture = try HistoryBench()
+    defer { fixture.remove() }
+    let tracker = LocalHistoryChangeTracker()
+    defer { tracker.stopAll() }
+    let changed = fixture.codex.appendingPathComponent("late.jsonl")
+    tracker.testingBeforeInstallingStreams = {
+      tracker.inject(provider: .openAI, changed: [changed])
+    }
+    tracker.synchronize(roots: [.openAI: fixture.codex])
+    tracker.testingBeforeInstallingStreams = nil
+
+    #expect(tracker.isWatching(.openAI))
+    let plan = try #require(
+      tracker.plan(
+        providers: [.openAI], now: .now, fullDiscoveryInterval: .seconds(60)
+      ).first)
+    #expect(plan.visit == .full(.baseline))
+  }
+
+  @Test func stopWhileStreamStartsPreventsLateInstallation() throws {
+    let fixture = try HistoryBench()
+    defer { fixture.remove() }
+    let tracker = LocalHistoryChangeTracker()
+    defer { tracker.stopAll() }
+    tracker.testingBeforeInstallingStreams = {
+      tracker.testingBeforeInstallingStreams = nil
+      tracker.synchronize(roots: [:])
+    }
+    tracker.synchronize(roots: [.openAI: fixture.codex])
+
+    #expect(tracker.isWatching(.openAI) == false)
+  }
+
   @Test func coldScanReusesDecodedIndexForCachedHistory() async throws {
     let fixture = try HistoryBench()
     defer { fixture.remove() }
@@ -553,13 +587,13 @@ struct IncrementalHistoryTests {
     try fixture.writeClaude("session.jsonl", input: 1, output: 0, at: now)
     let scanner = fixture.scanner(watchChanges: true)
     _ = try await scanner.scan(now: now, providers: [.openAI, .anthropic])
-    #expect(await scanner.testingIsWatching(.openAI))
-    #expect(await scanner.testingIsWatching(.anthropic))
+    #expect(try await self.waitForWatchState(scanner, .openAI, expected: true))
+    #expect(try await self.waitForWatchState(scanner, .anthropic, expected: true))
     _ = try await scanner.scan(now: now, providers: [.openAI])
-    #expect(await scanner.testingIsWatching(.openAI))
-    #expect(await scanner.testingIsWatching(.anthropic) == false)
+    #expect(try await self.waitForWatchState(scanner, .openAI, expected: true))
+    #expect(try await self.waitForWatchState(scanner, .anthropic, expected: false))
     await scanner.stopWatching()
-    #expect(await scanner.testingIsWatching(.openAI) == false)
+    #expect(try await self.waitForWatchState(scanner, .openAI, expected: false))
   }
 
   @Test func syntheticBenchmarkColdWarmAndSparseStayBounded() async throws {
@@ -597,6 +631,21 @@ struct IncrementalHistoryTests {
     #expect(sparseMetrics.treeWalks == coldMetrics.treeWalks)
     _ = await scanner.cachedHistory(now: now, providers: [.openAI])
     #expect(await scanner.scanMetrics.indexDecodes == coldMetrics.indexDecodes)
+  }
+
+  private func waitForWatchState(
+    _ scanner: LocalUsageScanner,
+    _ provider: ProviderID,
+    expected: Bool,
+    timeout: Duration = .seconds(2)
+  ) async throws -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+      if await scanner.testingIsWatching(provider) == expected { return true }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    return await scanner.testingIsWatching(provider) == expected
   }
 }
 

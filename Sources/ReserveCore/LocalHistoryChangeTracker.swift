@@ -56,7 +56,7 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     var provider: ProviderID
     var path: String
     var identity: RootIdentity
-    var generation: Int
+    var configurationGeneration: Int
   }
 
   private struct MutableState {
@@ -64,6 +64,10 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     var rootIdentities: [ProviderID: RootIdentity] = [:]
     var streams: [ProviderID: FSEventStreamRef] = [:]
     var modes: [ProviderID: Mode] = [:]
+    /// Changes only when a stream's selected root or lifetime changes. Dirty
+    /// events use `generation` below so an event delivered while a stream is
+    /// starting cannot make that valid stream look like stale configuration.
+    var configurationGeneration: [ProviderID: Int] = [:]
     var generation: [ProviderID: Int] = [:]
     var lastFull: [ProviderID: ContinuousClock.Instant] = [:]
     var baselined: Set<ProviderID> = []
@@ -97,7 +101,10 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     var stopList: [FSEventStreamRef] = []
     var toStart: [PendingStart] = []
     self.lock.lock()
-    let removed = self.state.watching.subtracting(normalized.keys)
+    // `roots` also contains streams that are still being created. Comparing
+    // only `watching` would let a concurrent stop miss a pending stream, which
+    // could then install after the caller had disabled it.
+    let removed = Set(self.state.roots.keys).subtracting(normalized.keys)
     for provider in removed {
       if let stream = self.state.streams.removeValue(forKey: provider) {
         stopList.append(stream)
@@ -108,6 +115,7 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
       self.state.roots.removeValue(forKey: provider)
       self.state.rootIdentities.removeValue(forKey: provider)
       self.state.modes[provider] = .needsBaseline
+      self.bumpConfigurationLocked(provider)
       self.bumpLocked(provider)
     }
     for (provider, path) in normalized {
@@ -123,6 +131,7 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
         self.state.baselined.remove(provider)
         self.state.lastFull.removeValue(forKey: provider)
         self.state.modes[provider] = .needsBaseline
+        self.bumpConfigurationLocked(provider)
         self.bumpLocked(provider)
       }
       if self.simulate {
@@ -144,7 +153,7 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
         provider: provider,
         path: path,
         identity: identity,
-        generation: self.state.generation[provider] ?? 0))
+        configurationGeneration: self.state.configurationGeneration[provider] ?? 0))
     }
     self.lock.unlock()
 
@@ -165,7 +174,8 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     for (pending, stream) in started {
       guard self.state.roots[pending.provider] == pending.path,
         self.state.rootIdentities[pending.provider] == pending.identity,
-        self.state.generation[pending.provider] == pending.generation,
+        self.state.configurationGeneration[pending.provider]
+          == pending.configurationGeneration,
         Self.rootIdentity(pending.path) == pending.identity
       else {
         abandoned.append(stream)
@@ -182,7 +192,8 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     for pending in failed {
       guard self.state.roots[pending.provider] == pending.path,
         self.state.rootIdentities[pending.provider] == pending.identity,
-        self.state.generation[pending.provider] == pending.generation
+        self.state.configurationGeneration[pending.provider]
+          == pending.configurationGeneration
       else { continue }
       self.state.watching.remove(pending.provider)
       self.state.modes[pending.provider] = .full(.unwatched)
@@ -323,6 +334,7 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
         }
         self.state.watching.remove(provider)
         self.state.rootIdentities.removeValue(forKey: provider)
+        self.bumpConfigurationLocked(provider)
         self.becomeFullLocked(provider, .rootUnavailable)
       }
     }
@@ -406,6 +418,9 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
     let streams = Array(self.state.streams.values)
     self.state.streams.removeAll()
     self.state.watching.removeAll()
+    for provider in Array(self.state.roots.keys) {
+      self.bumpConfigurationLocked(provider)
+    }
     self.lock.unlock()
     Self.release(streams)
   }
@@ -491,6 +506,10 @@ final class LocalHistoryChangeTracker: @unchecked Sendable {
 
   private func bumpLocked(_ provider: ProviderID) {
     self.state.generation[provider, default: 0] += 1
+  }
+
+  private func bumpConfigurationLocked(_ provider: ProviderID) {
+    self.state.configurationGeneration[provider, default: 0] += 1
   }
 
   private static func rootIdentity(_ path: String) -> RootIdentity? {
