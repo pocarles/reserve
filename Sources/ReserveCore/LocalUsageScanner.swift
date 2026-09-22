@@ -508,49 +508,70 @@ public actor LocalUsageScanner {
       cutoff: cutoff, budget: budget)
     for file in files {
       try budget.ensureTime()
-      let fileTotals = try autoreleasepool { () throws -> UsageTotals in
-        let metadata = try self.metadata(file)
-        let key = self.fileKey(provider: .openAI, url: file)
-        if retains { ledger.pendingRetained.insert(key) }
-        guard box.index.records[key] != nil || box.index.records.count < Self.maximumScannedFiles
-        else { return UsageTotals() }
-        var record = box.index.records[key]
-        if !metadata.matches(record) {
-          let requiredBytes = min(self.codexTailBytes, max(0, Int(clamping: metadata.size)))
-          if requiredBytes > remainingBytes {
-            budget.markStarved()
-            try budget.ensureTime()
-          }
-          // The path check above is only a cheap "anything new?" filter. What
-          // gets read, and the stamp recorded for it, come from the validated
-          // descriptor; a path swapped for a link, FIFO or foreign file since
-          // enumeration is skipped and its previous record left as it was.
-          if requiredBytes <= remainingBytes, let opened = DescriptorBoundFile.open(file),
-            let metadata = Self.metadata(opened)
-          {
-            defer { opened.close() }
-            let parsed = try self.parseCodexTail(
-              opened, deadline: .distantFuture, budget: budget, remainingBytes: &remainingBytes)
-            record = CachedFile(
-              provider: .openAI,
-              size: metadata.size,
-              modifiedAt: metadata.modifiedAt,
-              offset: metadata.size,
-              days: parsed.map { [Self.dayKey($0.timestamp): $0.totals] } ?? [:],
-              recentRows: [:],
-              recentOrder: [],
-              device: metadata.device,
-              inode: metadata.inode,
-              changedAt: metadata.changedAt)
-            try self.storeParsed(record!, key: key, box: box, ledger: ledger, budget: budget)
-          }
-        }
-        return record?.totals(since: cutoffKey) ?? UsageTotals()
-      }
+      let fileTotals = try self.scanCodexFile(
+        file,
+        cutoffKey: cutoffKey,
+        box: box,
+        ledger: ledger,
+        budget: budget,
+        retains: retains,
+        remainingBytes: &remainingBytes)
       total.add(fileTotals)
       try budget.ensureTime()
     }
     return total
+  }
+
+  /// Keeps each file's temporary state in a short lexical scope while the
+  /// parsing helpers below drain their Foundation objects per record. Avoiding
+  /// an outer `autoreleasepool` also keeps actor-isolated scan state on this
+  /// actor under Swift 6.1's stricter closure transfer analysis.
+  private func scanCodexFile(
+    _ file: URL,
+    cutoffKey: String,
+    box: IndexBox,
+    ledger: ScanLedger,
+    budget: ScanBudget,
+    retains: Bool,
+    remainingBytes: inout Int
+  ) throws -> UsageTotals {
+    let metadata = try self.metadata(file)
+    let key = self.fileKey(provider: .openAI, url: file)
+    if retains { ledger.pendingRetained.insert(key) }
+    guard box.index.records[key] != nil || box.index.records.count < Self.maximumScannedFiles
+    else { return UsageTotals() }
+    var record = box.index.records[key]
+    if !metadata.matches(record) {
+      let requiredBytes = min(self.codexTailBytes, max(0, Int(clamping: metadata.size)))
+      if requiredBytes > remainingBytes {
+        budget.markStarved()
+        try budget.ensureTime()
+      }
+      // The path check above is only a cheap "anything new?" filter. What
+      // gets read, and the stamp recorded for it, come from the validated
+      // descriptor; a path swapped for a link, FIFO or foreign file since
+      // enumeration is skipped and its previous record left as it was.
+      if requiredBytes <= remainingBytes, let opened = DescriptorBoundFile.open(file),
+        let metadata = Self.metadata(opened)
+      {
+        defer { opened.close() }
+        let parsed = try self.parseCodexTail(
+          opened, deadline: .distantFuture, budget: budget, remainingBytes: &remainingBytes)
+        record = CachedFile(
+          provider: .openAI,
+          size: metadata.size,
+          modifiedAt: metadata.modifiedAt,
+          offset: metadata.size,
+          days: parsed.map { [Self.dayKey($0.timestamp): $0.totals] } ?? [:],
+          recentRows: [:],
+          recentOrder: [],
+          device: metadata.device,
+          inode: metadata.inode,
+          changedAt: metadata.changedAt)
+        try self.storeParsed(record!, key: key, box: box, ledger: ledger, budget: budget)
+      }
+    }
+    return record?.totals(since: cutoffKey) ?? UsageTotals()
   }
 
   private func scanClaude(
@@ -569,84 +590,101 @@ public actor LocalUsageScanner {
       cutoff: cutoff, budget: budget)
     for file in files {
       try budget.ensureTime()
-      let fileTotals = try autoreleasepool { () throws -> UsageTotals in
-        let metadata = try self.metadata(file)
-        let key = self.fileKey(provider: .anthropic, url: file)
-        if retains { ledger.pendingRetained.insert(key) }
-        guard box.index.records[key] != nil || box.index.records.count < Self.maximumScannedFiles
-        else { return UsageTotals() }
-        var record = box.index.records[key]
-        if record?.provider != .anthropic || !metadata.sameFile(as: record)
-          || metadata.size < (record?.offset ?? 0)
-          || (metadata.size == (record?.offset ?? 0) && !metadata.matches(record))
-        {
-          record = CachedFile(
-            provider: .anthropic, size: 0, modifiedAt: 0, offset: 0,
-            days: [:], recentRows: [:], recentOrder: [])
-        }
-        let needsUpdate = !metadata.matches(record) || (record?.offset ?? 0) < metadata.size
-        if needsUpdate, remainingBytes <= 0 {
-          budget.markStarved()
-          try budget.ensureTime()
-        }
-        if needsUpdate, remainingBytes > 0,
-          // Skipped, like a vanished file, if the path is no longer a regular
-          // file this user owns; the reads and the new stamp below all come from
-          // this one descriptor.
-          let opened = DescriptorBoundFile.open(file),
-          let metadata = Self.metadata(opened)
-        {
-          defer { opened.close() }
-          if !metadata.sameFile(as: record) || metadata.size < (record?.offset ?? 0)
-            || (metadata.size == (record?.offset ?? 0) && !metadata.matches(record))
-          {
-            record = CachedFile(
-              provider: .anthropic, size: 0, modifiedAt: 0, offset: 0,
-              days: [:], recentRows: [:], recentOrder: [])
-          }
-          var updated = record!
-          let scanResult = try self.scanLines(
-            opened, from: updated.offset,
-            discardingOversizedLine: updated.discardingOversizedLine ?? false,
-            deadline: .distantFuture, budget: budget, remainingBytes: &remainingBytes
-          ) { data in
-            guard let row = Self.parseClaudeLine(data), row.dayKey >= cutoffKey else { return }
-            if let rowKey = row.key, let previous = updated.recentRows[rowKey] {
-              updated.days[previous.dayKey, default: UsageTotals()].subtract(previous.totals)
-            }
-            updated.days[row.dayKey, default: UsageTotals()].add(row.totals)
-            if let rowKey = row.key {
-              updated.recentRows[rowKey] = row
-              updated.recentOrder.removeAll { $0 == rowKey }
-              updated.recentOrder.append(rowKey)
-              while updated.recentOrder.count > 128 {
-                let evicted = updated.recentOrder.removeFirst()
-                updated.recentRows.removeValue(forKey: evicted)
-              }
-            }
-          }
-          updated.size = metadata.size
-          updated.offset = scanResult.offset
-          updated.discardingOversizedLine = scanResult.discardingOversizedLine
-          updated.modifiedAt = metadata.modifiedAt
-          updated.device = metadata.device
-          updated.inode = metadata.inode
-          updated.changedAt = metadata.changedAt
-          updated.days = updated.days.filter { $0.key >= cutoffKey }
-          record = updated
-          let incomplete = remainingBytes <= 0 && updated.offset < metadata.size
-          try self.storeParsed(updated, key: key, box: box, ledger: ledger, budget: budget)
-          if incomplete {
-            budget.markStarved()
-            try budget.ensureTime()
-          }
-        }
-        return record?.totals(since: cutoffKey) ?? UsageTotals()
-      }
+      let fileTotals = try self.scanClaudeFile(
+        file,
+        cutoffKey: cutoffKey,
+        box: box,
+        ledger: ledger,
+        budget: budget,
+        retains: retains,
+        remainingBytes: &remainingBytes)
       total.add(fileTotals)
       try budget.ensureTime()
     }
     return total
+  }
+
+  private func scanClaudeFile(
+    _ file: URL,
+    cutoffKey: String,
+    box: IndexBox,
+    ledger: ScanLedger,
+    budget: ScanBudget,
+    retains: Bool,
+    remainingBytes: inout Int
+  ) throws -> UsageTotals {
+    let metadata = try self.metadata(file)
+    let key = self.fileKey(provider: .anthropic, url: file)
+    if retains { ledger.pendingRetained.insert(key) }
+    guard box.index.records[key] != nil || box.index.records.count < Self.maximumScannedFiles
+    else { return UsageTotals() }
+    var record = box.index.records[key]
+    if record?.provider != .anthropic || !metadata.sameFile(as: record)
+      || metadata.size < (record?.offset ?? 0)
+      || (metadata.size == (record?.offset ?? 0) && !metadata.matches(record))
+    {
+      record = CachedFile(
+        provider: .anthropic, size: 0, modifiedAt: 0, offset: 0,
+        days: [:], recentRows: [:], recentOrder: [])
+    }
+    let needsUpdate = !metadata.matches(record) || (record?.offset ?? 0) < metadata.size
+    if needsUpdate, remainingBytes <= 0 {
+      budget.markStarved()
+      try budget.ensureTime()
+    }
+    if needsUpdate, remainingBytes > 0,
+      // Skipped, like a vanished file, if the path is no longer a regular
+      // file this user owns; the reads and the new stamp below all come from
+      // this one descriptor.
+      let opened = DescriptorBoundFile.open(file),
+      let metadata = Self.metadata(opened)
+    {
+      defer { opened.close() }
+      if !metadata.sameFile(as: record) || metadata.size < (record?.offset ?? 0)
+        || (metadata.size == (record?.offset ?? 0) && !metadata.matches(record))
+      {
+        record = CachedFile(
+          provider: .anthropic, size: 0, modifiedAt: 0, offset: 0,
+          days: [:], recentRows: [:], recentOrder: [])
+      }
+      var updated = record!
+      let scanResult = try self.scanLines(
+        opened, from: updated.offset,
+        discardingOversizedLine: updated.discardingOversizedLine ?? false,
+        deadline: .distantFuture, budget: budget, remainingBytes: &remainingBytes
+      ) { data in
+        guard let row = Self.parseClaudeLine(data), row.dayKey >= cutoffKey else { return }
+        if let rowKey = row.key, let previous = updated.recentRows[rowKey] {
+          updated.days[previous.dayKey, default: UsageTotals()].subtract(previous.totals)
+        }
+        updated.days[row.dayKey, default: UsageTotals()].add(row.totals)
+        if let rowKey = row.key {
+          updated.recentRows[rowKey] = row
+          updated.recentOrder.removeAll { $0 == rowKey }
+          updated.recentOrder.append(rowKey)
+          while updated.recentOrder.count > 128 {
+            let evicted = updated.recentOrder.removeFirst()
+            updated.recentRows.removeValue(forKey: evicted)
+          }
+        }
+      }
+      updated.size = metadata.size
+      updated.offset = scanResult.offset
+      updated.discardingOversizedLine = scanResult.discardingOversizedLine
+      updated.modifiedAt = metadata.modifiedAt
+      updated.device = metadata.device
+      updated.inode = metadata.inode
+      updated.changedAt = metadata.changedAt
+      updated.days = updated.days.filter { $0.key >= cutoffKey }
+      record = updated
+      let incomplete = remainingBytes <= 0 && updated.offset < metadata.size
+      try self.storeParsed(updated, key: key, box: box, ledger: ledger, budget: budget)
+      if incomplete {
+        budget.markStarved()
+        try budget.ensureTime()
+      }
+    }
+    return record?.totals(since: cutoffKey) ?? UsageTotals()
   }
 
   private func scanGrok(
