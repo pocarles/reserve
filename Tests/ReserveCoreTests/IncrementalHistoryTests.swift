@@ -64,9 +64,10 @@ struct IncrementalHistoryTests {
     {
       tracker.acknowledge(provider: plan.provider, token: plan.token, full: true, now: instant)
     }
+    let source = try #require(tracker.testingStreamSource(.openAI))
     tracker.handle(
       paths: ["/unrelated/event"],
-      flags: [UInt32(kFSEventStreamEventFlagKernelDropped)])
+      flags: [UInt32(kFSEventStreamEventFlagKernelDropped)], source: source)
     let plans = tracker.plan(
       providers: [.openAI, .anthropic], now: instant,
       fullDiscoveryInterval: .seconds(60))
@@ -116,6 +117,68 @@ struct IncrementalHistoryTests {
         providers: [.openAI], now: .now, fullDiscoveryInterval: .seconds(60)
       ).first)
     #expect(plan.visit == .full(.baseline))
+  }
+
+  @Test func retiredStreamCallbacksCannotInvalidateReplacementOrStoppedWatches() throws {
+    let fixture = try HistoryBench()
+    defer { fixture.remove() }
+    let tracker = LocalHistoryChangeTracker()
+    tracker.simulate = true
+    tracker.synchronize(roots: [.openAI: fixture.codex, .anthropic: fixture.claude])
+    let retired = try #require(tracker.testingStreamSource(.openAI))
+
+    try FileManager.default.removeItem(at: fixture.codex)
+    try FileManager.default.createDirectory(at: fixture.codex, withIntermediateDirectories: true)
+    tracker.synchronize(roots: [.openAI: fixture.codex, .anthropic: fixture.claude])
+    let replacement = try #require(tracker.testingStreamSource(.openAI))
+    #expect(replacement != retired)
+    let beforeStaleCallbacks = try #require(
+      tracker.plan(
+        providers: [.openAI], now: .now, fullDiscoveryInterval: .seconds(60)
+      ).first)
+
+    tracker.handle(
+      paths: [fixture.codex.appendingPathComponent("retired.jsonl").path],
+      flags: [UInt32(kFSEventStreamEventFlagItemIsFile)], source: retired)
+    tracker.handle(
+      paths: ["/unrelated/event"],
+      flags: [UInt32(kFSEventStreamEventFlagKernelDropped)], source: retired)
+    tracker.handle(
+      paths: [fixture.codex.path],
+      flags: [UInt32(kFSEventStreamEventFlagRootChanged)], source: retired)
+    #expect(tracker.isWatching(.openAI))
+    #expect(tracker.isWatching(.anthropic))
+    let replacementPlan = try #require(
+      tracker.plan(
+        providers: [.openAI], now: .now, fullDiscoveryInterval: .seconds(60)
+      ).first)
+    #expect(replacementPlan.visit == .full(.baseline))
+    #expect(replacementPlan.token == beforeStaleCallbacks.token)
+
+    tracker.handle(
+      paths: [fixture.codex.path],
+      flags: [UInt32(kFSEventStreamEventFlagRootChanged)], source: replacement)
+    #expect(tracker.isWatching(.openAI) == false)
+    #expect(tracker.isWatching(.anthropic))
+    let changedPlan = try #require(
+      tracker.plan(
+        providers: [.openAI], now: .now, fullDiscoveryInterval: .seconds(60)
+      ).first)
+    #expect(changedPlan.visit == .full(.rootUnavailable))
+
+    let stopped = LocalHistoryChangeTracker()
+    stopped.simulate = true
+    stopped.synchronize(roots: [.openAI: fixture.codex])
+    let stoppedSource = try #require(stopped.testingStreamSource(.openAI))
+    stopped.stopAll()
+    stopped.handle(
+      paths: [fixture.codex.path],
+      flags: [UInt32(kFSEventStreamEventFlagKernelDropped)], source: stoppedSource)
+    let stoppedPlan = try #require(
+      stopped.plan(
+        providers: [.openAI], now: .now, fullDiscoveryInterval: .seconds(60)
+      ).first)
+    #expect(stoppedPlan.visit == .full(.baseline))
   }
 
   @Test func ordinaryEventWhileStreamStartsKeepsTheValidWatch() throws {
