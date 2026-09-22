@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Claude Code's documented status-line feed. Only quota fields cross into the
@@ -5,6 +6,9 @@ import Foundation
 public enum ClaudeStatuslineBridge {
   public static let maximumInputBytes = 65_536
   private static let marker = "reserveStatusline"
+  // Pipe reads and semaphore waits must not occupy Swift's cooperative pool.
+  // The receiver is a short-lived command, so one utility worker is sufficient.
+  private static let receiverQueue = DispatchQueue(label: "com.pocarles.reserve.statusline", qos: .utility)
 
   public static func cacheURL(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
     FileManager.default.homeDirectoryForCurrentUser
@@ -106,9 +110,12 @@ public enum ClaudeStatuslineBridge {
     guard arguments.count == 4 else { return true }
     let cache = URL(fileURLWithPath: arguments[2])
     let settings = URL(fileURLWithPath: arguments[3])
-    await Task.detached(priority: .utility) {
-      self.receive(cacheURL: cache, settingsURL: settings)
-    }.value
+    await withCheckedContinuation { continuation in
+      receiverQueue.async {
+        self.receive(cacheURL: cache, settingsURL: settings)
+        continuation.resume()
+      }
+    }
     return true
   }
 
@@ -131,46 +138,96 @@ public enum ClaudeStatuslineBridge {
       let command = original["command"] as? String,
       !command.isEmpty, command.utf8.count <= 16_384
     else { return }
-    if let output = forward(input: data, command: command) {
+    if let output = forwardBlocking(input: data, command: command) {
       try? FileHandle.standardOutput.write(contentsOf: output)
     }
   }
 
-  static func forward(input: Data, command: String, timeout: TimeInterval = 3) -> Data? {
+  static func forward(
+    input: Data, command: String, timeout: TimeInterval = 3,
+    testingBeforeRun: (@Sendable () -> Void)? = nil
+  ) async -> Data? {
+    await withCheckedContinuation { continuation in
+      receiverQueue.async {
+        continuation.resume(returning: forwardBlocking(input: input, command: command,
+          timeout: timeout, testingBeforeRun: testingBeforeRun))
+      }
+    }
+  }
+
+  private static func forwardBlocking(
+    input: Data, command: String, timeout: TimeInterval = 3,
+    testingBeforeRun: (() -> Void)? = nil
+  ) -> Data? {
     guard input.count <= maximumInputBytes, command.utf8.count <= 16_384 else { return nil }
+    guard let stdin = CloseOnExecPipe(), let stdout = CloseOnExecPipe() else { return nil }
+    defer {
+      stdin.close()
+      stdout.close()
+    }
     let process = Process()
-    let stdin = Pipe()
-    let stdout = Pipe()
     process.executableURL = URL(fileURLWithPath: "/bin/sh")
     process.arguments = ["-c", command]
-    process.standardInput = stdin
-    process.standardOutput = stdout
+    process.standardInput = stdin.read
+    process.standardOutput = stdout.write
     process.standardError = FileHandle.nullDevice
     let completion = DispatchSemaphore(value: 0)
     process.terminationHandler = { _ in completion.signal() }
+    testingBeforeRun?()
     guard (try? process.run()) != nil else { return nil }
+    // `Process` has duplicated these descriptors into the child. Closing the
+    // parent's copies makes EOF depend only on the intended process tree.
+    try? stdin.read.close()
+    try? stdout.write.close()
     let output = Capture()
     let outputGroup = DispatchGroup()
     outputGroup.enter()
     DispatchQueue.global().async {
-      output.read(stdout.fileHandleForReading, maximumBytes: maximumInputBytes)
+      output.read(stdout.read, maximumBytes: maximumInputBytes)
       outputGroup.leave()
     }
     DispatchQueue.global().async {
-      try? stdin.fileHandleForWriting.write(contentsOf: input)
-      try? stdin.fileHandleForWriting.close()
+      try? stdin.write.write(contentsOf: input)
+      try? stdin.write.close()
     }
     guard completion.wait(timeout: .now() + timeout) == .success else {
       ProcessRunner.stop(process)
-      try? stdin.fileHandleForWriting.close()
-      try? stdout.fileHandleForReading.close()
+      try? stdin.write.close()
+      try? stdout.read.close()
       return nil
     }
     guard outputGroup.wait(timeout: .now() + 0.2) == .success, let result = output.data else {
-      try? stdout.fileHandleForReading.close()
+      try? stdout.read.close()
       return nil
     }
     return result
+  }
+
+  /// Foundation's `Pipe()` descriptors are inheritable on macOS. Another
+  /// process launched concurrently can retain an end and prevent EOF. Mark the
+  /// raw descriptors before exposing either handle to `Process` or test code.
+  private final class CloseOnExecPipe: @unchecked Sendable {
+    let read: FileHandle
+    let write: FileHandle
+
+    init?() {
+      var descriptors = [Int32](repeating: -1, count: 2)
+      guard pipe(&descriptors) == 0 else { return nil }
+      for descriptor in descriptors {
+        let flags = fcntl(descriptor, F_GETFD)
+        guard flags >= 0, fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0 else {
+          for openDescriptor in descriptors where openDescriptor >= 0 { Darwin.close(openDescriptor) }
+          return nil
+        }
+      }
+      self.read = FileHandle(fileDescriptor: descriptors[0], closeOnDealloc: true)
+      self.write = FileHandle(fileDescriptor: descriptors[1], closeOnDealloc: true)
+    }
+
+    func close() {
+      try? self.read.close()
+      try? self.write.close()
+    }
   }
 
   private final class Capture: @unchecked Sendable {

@@ -93,7 +93,12 @@ struct IncrementalHistoryTests {
       tracker.plan(
         providers: [.openAI], now: instant, fullDiscoveryInterval: .seconds(60)
       ).first)
-    #expect(replacement.visit == .full(.baseline))
+    // Native structural events may change the reason before this read. The
+    // contract is a full discovery with a valid replacement watch.
+    switch replacement.visit {
+    case .full: break
+    default: Issue.record("replacing a watched root must require full discovery")
+    }
     #expect(tracker.isWatching(.openAI))
   }
 
@@ -116,7 +121,13 @@ struct IncrementalHistoryTests {
       tracker.plan(
         providers: [.openAI], now: .now, fullDiscoveryInterval: .seconds(60)
       ).first)
-    #expect(plan.visit == .full(.baseline))
+    // A current native event can promote baseline to another full-scan
+    // reason. Stale callbacks are checked exactly in the simulated test below.
+    switch plan.visit {
+    case .full: break
+    default: Issue.record("a replacement stream must require full discovery")
+    }
+    #expect(tracker.isWatching(.openAI))
   }
 
   @Test func retiredStreamCallbacksCannotInvalidateReplacementOrStoppedWatches() throws {

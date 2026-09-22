@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import ReserveCore
@@ -82,13 +83,23 @@ struct PassiveQuotaAndMetadataTests {
     }
   }
 
-  @Test func originalStatuslineReceivesSameInputAndOutputIsBounded() {
+  @Test func originalStatuslineReceivesSameInputAndOutputIsBounded() async {
     let input = Data(#"{"transcript_path":"private but transient","rate_limits":null}"#.utf8)
-    #expect(ClaudeStatuslineBridge.forward(input: input, command: "/bin/cat") == input)
-    #expect(ClaudeStatuslineBridge.forward(input: Data(), command: "printf 'my existing status'")
+    #expect(await ClaudeStatuslineBridge.forward(input: input, command: "/bin/cat") == input)
+    #expect(await ClaudeStatuslineBridge.forward(input: Data(), command: "printf 'my existing status'")
       == Data("my existing status".utf8))
-    #expect(ClaudeStatuslineBridge.forward(input: Data(repeating: 32, count: 65_537), command: "/bin/cat") == nil)
-    #expect(ClaudeStatuslineBridge.forward(input: Data(), command: "/usr/bin/yes", timeout: 0.1) == nil)
+    #expect(await ClaudeStatuslineBridge.forward(input: Data(repeating: 32, count: 65_537), command: "/bin/cat") == nil)
+    #expect(await ClaudeStatuslineBridge.forward(input: Data(), command: "/usr/bin/yes", timeout: 0.1) == nil)
+  }
+
+  @Test func execChildCannotRetainStatuslinePipeEnds() async {
+    let holder = StatuslinePipeHolder()
+    defer { holder.stop() }
+    let input = Data("private but transient".utf8)
+    let result = await ClaudeStatuslineBridge.forward(input: input, command: "/bin/cat",
+      testingBeforeRun: { holder.launch() })
+    #expect(holder.isRunning)
+    #expect(result == input)
   }
 
   @Test func codexDecodesMultipleBucketsAndResetCountWithoutLegacy() throws {
@@ -158,5 +169,44 @@ struct PassiveQuotaAndMetadataTests {
     try Data("replacement".utf8).write(to: binary, options: .atomic)
     _ = try await cache.version(executable: binary.path) { await probe.load() }
     #expect(await probe.count == 2)
+  }
+}
+
+/// A separate exec keeps inherited descriptors open while forwarding runs.
+/// The lock protects the PID passed between the receiver queue and the test.
+private final class StatuslinePipeHolder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var pid: pid_t = -1
+
+  func launch() {
+    "/bin/sleep".withCString { executable in
+      "10".withCString { duration in
+        var arguments: [UnsafeMutablePointer<CChar>?] = [
+          UnsafeMutablePointer(mutating: executable), UnsafeMutablePointer(mutating: duration), nil]
+        var environment: [UnsafeMutablePointer<CChar>?] = [nil]
+        var spawned: pid_t = -1
+        let status = posix_spawn(&spawned, executable, nil, nil, &arguments, &environment)
+        lock.lock()
+        if status == 0 { pid = spawned }
+        lock.unlock()
+      }
+    }
+  }
+
+  var isRunning: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return pid > 0 && kill(pid, 0) == 0
+  }
+
+  func stop() {
+    lock.lock()
+    let spawned = pid
+    pid = -1
+    lock.unlock()
+    guard spawned > 0 else { return }
+    _ = kill(spawned, SIGKILL)
+    var status: Int32 = 0
+    while waitpid(spawned, &status, 0) == -1, errno == EINTR {}
   }
 }
