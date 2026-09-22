@@ -16,6 +16,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   /// One minute-level UI clock shared by the menu bar and open popover. Provider
   /// data still follows the store's independent configured refresh interval.
   private var minuteTimer: Timer?
+  private let uiRefresh = UISurfaceRefresh()
   private var dashboardIsDirty = true
   private var lastDashboardMinute: Int?
   /// A popover is positioned relative to its status item. Its contents may
@@ -48,15 +49,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.popover.animates = true
     self.popover.delegate = self
     self.store.observe { [weak self] in
-      guard let self else { return }
-      let now = Date()
-      self.dashboardIsDirty = true
-      self.applyAppearance()
-      self.updateStatusIcon(now: now)
-      if self.popover.isShown {
-        self.updateDashboardIfNeeded(force: true)
+      self?.uiRefresh.coalesce { [weak self] in
+        self?.applyObservedStoreChange()
       }
-      self.updateMinuteTimer(now: now)
     }
     // While Reserve follows the system, a system light/dark switch changes no
     // Reserve state, so nothing else would rebuild the open dashboard.
@@ -71,6 +66,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
   deinit {
     DistributedNotificationCenter.default.removeObserver(self)
+  }
+
+  private func applyObservedStoreChange() {
+    let now = Date()
+    self.dashboardIsDirty = true
+    self.applyAppearance()
+    self.updateStatusIcon(now: now)
+    if self.popover.isShown {
+      self.updateDashboardIfNeeded(force: true)
+    }
+    self.updateMinuteTimer(now: now)
   }
 
   @objc private func systemAppearanceChanged() {
@@ -116,6 +122,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   }
 
   var isDashboardShownForTesting: Bool { self.popover.isShown }
+
+  var dashboardHasContentForTesting: Bool {
+    guard self.popover.isShown,
+      let root = self.dashboardWindowForTesting?.contentView as? UsageDashboardView
+    else { return false }
+    return !root.subviews.isEmpty && root.frame.height > 0
+  }
 
   var popoverContentSizeForTesting: NSSize { self.popover.contentSize }
 
@@ -364,6 +377,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.store.menuBarProvider = .openAI
     self.store.menuBarShowsRemaining = true
     self.store.menuBarShowsReset = true
+    self.uiRefresh.flush()
     let providerStatusWorks =
       self.statusItem.length == self.stableStatusItemLength()
       && self.statusItem.button?.image?.accessibilityDescription == ProviderID.openAI.displayName
@@ -749,7 +763,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       let tileMarks = Self.descendants(of: dashboardController.view)
         .compactMap { $0 as? ProviderOverviewTile }
         .flatMap { Self.descendants(of: $0) }
-        .filter { ($0.identifier?.rawValue ?? "").hasPrefix("menu-bar-pin-") }
+        .filter { ($0.identifier?.rawValue ?? "").hasPrefix("menu-bar-pin-") && !$0.isHidden }
       self.store.menuBarProvider = original
       dashboardController.update()
       dashboardController.view.layoutSubtreeIfNeeded()
@@ -1059,6 +1073,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.lockedStatusItemLength = nil
     self.updateStatusIcon()
     self.updateMinuteTimer()
+    // The closed popover does not need its control tree. The next open builds
+    // the current reading instead of patching a hidden one.
+    self.dashboardController?.releaseRenderedTree()
+    self.dashboardIsDirty = true
   }
 
   func popoverDidShow(_ notification: Notification) {
@@ -1279,14 +1297,34 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.updateMinuteTimer(now: now)
   }
 
+  var dashboardFullRebuildsForTesting: Int {
+    self.dashboardController?.fullRebuildCount ?? 0
+  }
+
+  var dashboardContentUpdatesForTesting: Int {
+    self.dashboardController?.contentUpdateCount ?? 0
+  }
+
+  var dashboardRegionRebuildsForTesting: Int {
+    self.dashboardController?.regionRebuildCount ?? 0
+  }
+
   private func updateDashboardIfNeeded(force: Bool = false) {
     let minute = Int(Date().timeIntervalSince1970 / 60)
     guard force || self.dashboardIsDirty || self.lastDashboardMinute != minute else { return }
     let controller = self.dashboardControllerForUse()
+    let before = controller.isViewLoaded ? controller.preferredContentSize : .zero
     if controller.isViewLoaded {
       controller.update()
     } else {
       controller.loadViewIfNeeded()
+    }
+    let after = controller.preferredContentSize
+    if self.popover.isShown, before != after {
+      let animates = self.popover.animates
+      self.popover.animates = false
+      self.popover.contentSize = after
+      self.popover.animates = animates
     }
     self.dashboardIsDirty = false
     self.lastDashboardMinute = minute
@@ -1301,9 +1339,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   /// come in front of the popover exactly as Settings does, or it lands behind.
   private func apiConsumptionReadings() -> [APIConsumptionReading] {
     APIConsumptionProvider.allCases.compactMap { provider in
-      guard self.store.isAPIConsumptionEnabled(provider),
-        self.store.hasAPIConsumptionKey(provider)
-      else { return nil }
+      // An unavailable Keychain does not hide the last known reading.
+      guard self.store.isAPIConsumptionEnabled(provider) else { return nil }
       return APIConsumptionReading(
         provider: provider,
         snapshot: self.store.apiConsumption[provider],

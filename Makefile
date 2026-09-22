@@ -1,4 +1,4 @@
-.PHONY: build warnings-as-errors swift-test selftest ui-test lifecycle-test connection-test check package package-dry verify-package run probe clean
+.PHONY: build warnings-as-errors swift-test selftest ui-test lifecycle-test connection-test stress-ui reliability-test check package package-dry verify-package run probe clean
 
 build:
 	swift build
@@ -23,7 +23,15 @@ lifecycle-test:
 connection-test:
 	swift run Reserve --self-test-connections
 
-check: warnings-as-errors swift-test selftest ui-test lifecycle-test connection-test
+# Open/close memory growth and cached dashboard update counts. No provider calls.
+stress-ui:
+	swift run Reserve --stress-ui
+
+# Isolated slow/offline/recovery checks. The body lives in RefreshReliabilitySelfTest.
+reliability-test:
+	swift run Reserve --self-test-reliability
+
+check: warnings-as-errors swift-test selftest ui-test lifecycle-test connection-test stress-ui reliability-test
 
 package:
 	./Scripts/package_app.sh --mode local

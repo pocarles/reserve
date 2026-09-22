@@ -68,6 +68,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   private var restoreAfterUpdatePresentation = false
   /// Last document offset per pane, so a store refresh does not jump the reader.
   private var savedScrollOffsets: [Pane: NSPoint] = [:]
+  private let uiRefresh = UISurfaceRefresh()
+  private var installedStructure = ""
+  private var needsLiveRefresh = false
+  private var pendingStructural = false
+  /// One in-flight key save. A second click does nothing until it finishes.
+  private var keySaveInFlight = false
+  private var keyOperationStatus: (identifier: String, text: String)?
 
   init(
     store: UsageStore,
@@ -101,6 +108,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     // Settings shows live provider state — connection, plan, freshness — so it
     // has to observe the same store the dashboard does. Without this it keeps
     // whatever was true when the pane was last built.
+    self.installedStructure = self.controlStructureSignature()
     self.storeObserver = store.observe { [weak self] in self?.storeChanged() }
     self.updater?.onChange = { [weak self] in self?.storeChanged() }
     self.updater?.onWillPresentUpdateUI = { [weak self] in
@@ -111,17 +119,37 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
   }
 
-  /// Rebuilds the visible pane when the store changes.
-  ///
-  /// Rebuilding replaces every control, so it is deliberately skipped while a
-  /// text field is being edited — otherwise a refresh landing mid-keystroke
-  /// would take the field editor away and discard what was typed.
+  /// Schedules one refresh for a burst of store events. Hidden windows wait
+  /// until they are shown. Typing keeps the field, and other readings still move.
   private func storeChanged() {
-    guard let window = self.window, window.isVisible else { return }
     guard !self.isApplyingPane else { return }
-    if window.firstResponder is NSText { return }
-    self.rememberScrollOffset()
-    self.applyPane(animated: false)
+    self.uiRefresh.coalesce { [weak self] in self?.applyLiveUpdate() }
+  }
+
+  private var editingField: NSTextField? {
+    guard let editor = self.window?.firstResponder as? NSText else { return nil }
+    return editor.delegate as? NSTextField
+  }
+
+  private func applyLiveUpdate() {
+    guard let window = self.window, window.isVisible, window.contentView != nil else {
+      self.needsLiveRefresh = true
+      return
+    }
+    self.needsLiveRefresh = false
+    let structure = self.controlStructureSignature()
+    if structure != self.installedStructure {
+      if self.editingField != nil {
+        self.applyLiveLabels()
+        self.pendingStructural = true
+        return
+      }
+      self.rememberScrollOffset()
+      self.applyPane(animated: false)
+      self.pendingStructural = false
+      return
+    }
+    self.applyLiveLabels()
   }
 
   required init?(coder: NSCoder) { nil }
@@ -134,6 +162,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     super.showWindow(sender)
     self.window?.makeKeyAndOrderFront(nil)
     self.window?.orderFrontRegardless()
+    if self.needsLiveRefresh || self.pendingStructural {
+      self.uiRefresh.flush()
+      if self.needsLiveRefresh || self.pendingStructural {
+        self.applyLiveUpdate()
+      }
+    }
   }
 
   func windowWillClose(_ notification: Notification) {
@@ -231,9 +265,23 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let window = self.window else { return }
     guard !self.isApplyingPane else { return }
     self.isApplyingPane = true
-    defer { self.isApplyingPane = false }
+    defer {
+      self.isApplyingPane = false
+      self.installedStructure = self.controlStructureSignature()
+    }
+    let drafts = Self.descendants(of: window.contentView ?? NSView())
+      .compactMap { $0 as? NSTextField }.reduce(into: [String: String]()) { values, field in
+        guard let id = field.identifier?.rawValue,
+          id.hasPrefix("api-key-") || id.hasPrefix("plan-key-") else { return }
+        values[id] = field.stringValue
+      }
     window.title = self.pane.title
     let content = self.makeContentView()
+    for field in Self.descendants(of: content).compactMap({ $0 as? NSTextField }) {
+      if let id = field.identifier?.rawValue, let draft = drafts[id] {
+        field.stringValue = draft
+      }
+    }
     content.layoutSubtreeIfNeeded()
     let screenLimit = (window.screen ?? NSScreen.main)?.visibleFrame.height ?? 800
     let limit = max(SettingsLayout.minimumHeight, screenLimit - 80)
@@ -281,6 +329,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       let top = NSPoint(x: 0, y: max(0, document.frame.height - scroll.contentView.bounds.height))
       scroll.contentView.scroll(to: saved ?? top)
       scroll.reflectScrolledClipView(scroll.contentView)
+    }
+    if let operation = self.keyOperationStatus {
+      self.setStatus(operation.identifier, operation.text)
     }
   }
 
@@ -417,8 +468,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       ])
   }
 
-  private func insightsPane() -> NSView {
-    let rows = ProviderID.allCases.filter { self.store.isEnabled($0) }.map(self.insightRow)
+  private func insightsFacts() -> (
+    states: [ProviderViewState], published: [(ProviderViewState, InsightHistorySeries)],
+    totalText: String, activityFooter: String
+  ) {
     let states = ProviderID.allCases.compactMap { self.store.states[$0] }
       .filter { self.store.isEnabled($0.provider) }
     let rangeDays = self.store.insightHistoryDays
@@ -449,6 +502,32 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         ? "≈ \(Self.moneyOrUnavailable(apiValue)) estimated API value for \(rangeLabel). \(coverage). \(priced)."
         : "≈ \(Self.moneyOrUnavailable(apiValue)) estimated API value for \(rangeLabel). \(coverage). \(priced). "
           + "\(DashboardFormat.money(planTotal))/month across \(trackedPlans) is a separate reference."
+    let activityFooter: String
+    if states.contains(where: {
+      $0.provider == .openAI && $0.localUsage == nil
+        && $0.snapshot?.accountTokenActivity?.dailyUsageBuckets?.isEmpty == false
+    }) {
+      activityFooter = "OpenAI uses provider-reported account history when available. Local rows cover activity on this Mac."
+    } else if origins.contains(.localDevice), origins.contains(.providerAccount) {
+      activityFooter = "OpenAI, Claude, and Grok use session logs on this Mac. Cursor uses "
+        + "provider-reported account totals, which can include other devices."
+    } else if origins.contains(.providerAccount) {
+      activityFooter = "Provider-reported account totals can include activity from other devices."
+    } else {
+      activityFooter = "Measured from session logs on this Mac. Activity from other devices is "
+        + "not included."
+    }
+
+    return (states, published, totalText, activityFooter)
+  }
+
+  private func insightsPane() -> NSView {
+    let rows = ProviderID.allCases.filter { self.store.isEnabled($0) }.map(self.insightRow)
+    let facts = self.insightsFacts()
+    let states = facts.states
+    let published = facts.published
+    let totalText = facts.totalText
+    let activityFooter = facts.activityFooter
     let total = SettingsLabel(
       totalText, size: 13, weight: .medium, color: .labelColor, wraps: true)
     total.identifier = NSUserInterfaceItemIdentifier("insights-total")
@@ -476,21 +555,6 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       return self.accountTotalRow(provider: state.provider, usage: usage)
     }
 
-    let activityFooter: String
-    if states.contains(where: {
-      $0.provider == .openAI && $0.localUsage == nil
-        && $0.snapshot?.accountTokenActivity?.dailyUsageBuckets?.isEmpty == false
-    }) {
-      activityFooter = "OpenAI uses provider-reported account history when available. Local rows cover activity on this Mac."
-    } else if origins.contains(.localDevice), origins.contains(.providerAccount) {
-      activityFooter = "OpenAI, Claude, and Grok use session logs on this Mac. Cursor uses "
-        + "provider-reported account totals, which can include other devices."
-    } else if origins.contains(.providerAccount) {
-      activityFooter = "Provider-reported account totals can include activity from other devices."
-    } else {
-      activityFooter = "Measured from session logs on this Mac. Activity from other devices is "
-        + "not included."
-    }
 
     return self.pane(
       identifier: "pane-insights",
@@ -502,6 +566,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         self.section(
           title: "Activity",
           footer: activityFooter,
+          footerIdentifier: "insights-activity-source",
           rows: rows),
         self.section(
           title: "Account totals",
@@ -894,15 +959,18 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let plan = SettingsLabel(
       Self.displayPlanName(self.store.states[provider]?.snapshot?.planName),
       size: 12, color: .secondaryLabelColor)
+    plan.identifier = NSUserInterfaceItemIdentifier("settings-plan-\(provider.rawValue)")
     plan.widthAnchor.constraint(equalToConstant: 118).isActive = true
     let state = self.providerStatus(provider)
     let status = SettingsLabel(state.text, size: 12, color: state.color)
+    status.identifier = NSUserInterfaceItemIdentifier("settings-status-\(provider.rawValue)")
     status.widthAnchor.constraint(equalToConstant: 128).isActive = true
     let updated = SettingsLabel(
       (self.store.states[provider]?.snapshot?.fetchedAt).map {
         DashboardFormat.updated($0, now: Date()).replacingOccurrences(of: "Updated ", with: "")
       } ?? "never",
       size: 12, color: .tertiaryLabelColor)
+    updated.identifier = NSUserInterfaceItemIdentifier("settings-updated-\(provider.rawValue)")
     let spacer = NSView()
     spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
     let disclose = NSButton(
@@ -1075,6 +1143,17 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   /// Where each number came from, so estimates cannot masquerade as authority.
+  private func tokenSourceText(_ provider: ProviderID) -> String {
+    let state = self.store.states[provider]
+    if let usage = state?.localUsage {
+      return usage.origin == .providerAccount
+        ? "Tokens and value · provider-reported account data"
+        : "Tokens · from local logs on this Mac · value estimated"
+    }
+    return state?.snapshot?.detailedUsageUnavailable == true
+      ? "Tokens · detailed usage unavailable for this account" : "Tokens · no usage data found"
+  }
+
   private func sourceLabels(_ provider: ProviderID) -> NSView {
     let state = self.store.states[provider]
     let quotaSource = state?.snapshot?.source ?? "not connected"
@@ -1082,19 +1161,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let quota = SettingsLabel(
       "\(quotaPrefix) · provider reported · \(quotaSource)",
       size: 12, color: .secondaryLabelColor)
+    quota.identifier = NSUserInterfaceItemIdentifier("settings-source-quota-\(provider.rawValue)")
     let tokens = SettingsLabel(
-      state?.localUsage == nil
-        ? (state?.snapshot?.detailedUsageUnavailable == true
-          ? "Tokens · detailed usage unavailable for this account"
-          : "Tokens · no usage data found")
-        : state?.localUsage?.origin == .providerAccount
-          ? "Tokens and value · provider-reported account data"
-          : "Tokens · from local logs on this Mac · value estimated",
-      size: 12, color: .secondaryLabelColor)
+      self.tokenSourceText(provider), size: 12, color: .secondaryLabelColor)
+    tokens.identifier = NSUserInterfaceItemIdentifier("settings-source-tokens-\(provider.rawValue)")
     let freshness = SettingsLabel(
       (state?.snapshot?.fetchedAt).map { DashboardFormat.updated($0, now: Date()) }
         ?? "Never updated",
       size: 12, color: .tertiaryLabelColor)
+    freshness.identifier = NSUserInterfaceItemIdentifier(
+      "settings-source-freshness-\(provider.rawValue)")
     let stack = NSStackView(views: [quota, tokens, freshness])
     stack.orientation = .vertical
     stack.alignment = .leading
@@ -1103,16 +1179,18 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func apiProviderRow(_ provider: APIConsumptionProvider) -> NSView {
-    let saved = self.store.hasAPIConsumptionKey(provider)
+    let availability = self.store.apiConsumptionKeyAvailability(provider)
+    let saved = availability == .present
+    let writable = availability == .present || availability == .missing
     let checkbox = NSButton(
       checkboxWithTitle: "", target: self, action: #selector(self.apiConsumptionChanged(_:)))
     checkbox.identifier = NSUserInterfaceItemIdentifier("api-enabled-\(provider.rawValue)")
     checkbox.state = self.store.isAPIConsumptionEnabled(provider) ? .on : .off
-    checkbox.isEnabled = saved
+    checkbox.isEnabled = saved || self.store.isAPIConsumptionEnabled(provider)
     checkbox.toolTip =
       saved
       ? "Measure \(provider.displayName) API consumption"
-      : "Save a \(provider.keyKind.lowercased()) first"
+      : (writable ? "Save a \(provider.keyKind.lowercased()) first" : "Waiting for Keychain access")
     checkbox.setAccessibilityLabel("Measure \(provider.displayName) API consumption")
 
     let name = SettingsLabel(provider.displayName, size: 13, weight: .medium, color: .labelColor)
@@ -1171,6 +1249,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         + "(\(provider.keyHint)). Return saves it.",
       minimumWidth: 120)
 
+    if !writable {
+      field.isEnabled = false
+      field.placeholderString = availability == .unknown ? "Checking Keychain…" : "Keychain temporarily unavailable"
+      buttons.first?.isEnabled = false
+    }
     let fields = NSStackView(views: [field] + buttons)
     fields.orientation = .horizontal
     fields.alignment = .centerY
@@ -1195,7 +1278,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   /// Paste, save, remove and "Get a key" for a key-connected plan, mirroring
   /// the API account rows. The key goes straight to the Keychain.
   private func planKeyControls(_ provider: ProviderID) -> NSView {
-    let saved = self.store.hasPlanKey(provider)
+    let availability = self.store.planKeyAvailability(for: provider)
+    let saved = availability == .present
+    let writable = availability == .present || availability == .missing
     let connection = ProviderDescriptor.forProvider(provider).apiKeyConnection
     let hint = connection?.keyHint ?? "API key"
     let field = NSSecureTextField()
@@ -1204,6 +1289,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
     field.bezelStyle = .roundedBezel
     field.target = self
+    field.delegate = self
     field.action = #selector(self.planKeySubmitted(_:))
     field.toolTip = "Paste a \(provider.displayName) API key (\(hint)). Return saves it."
     field.setAccessibilityLabel("\(provider.displayName) API key")
@@ -1235,6 +1321,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       button.setContentHuggingPriority(.required, for: .horizontal)
       button.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
+    if !writable {
+      field.isEnabled = false
+      field.placeholderString = availability == .unknown ? "Checking Keychain…" : "Keychain temporarily unavailable"
+      buttons.first?.isEnabled = false
+    }
     let row = NSStackView(views: [field] + buttons)
     row.orientation = .horizontal
     row.alignment = .centerY
@@ -1263,21 +1354,51 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let provider = self.planKeyProvider(for: sender),
       let field = self.planKeyField(for: provider)
     else { return }
+    guard !self.keySaveInFlight else { return }
     let value = field.stringValue
     guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-    field.stringValue = ""
-    do {
-      try self.store.savePlanKey(value, for: provider)
-    } catch {
-      self.presentError(error)
+    self.keySaveInFlight = true
+    sender.isEnabled = false
+    self.setStatus("settings-status-\(provider.rawValue)", "Saving…")
+    Task { @MainActor in
+      defer {
+        self.keySaveInFlight = false
+        self.keyOperationStatus = nil
+        sender.isEnabled = true
+        self.applyLiveUpdate()
+      }
+      do {
+        try await self.store.savePlanKey(value, for: provider)
+        self.planKeyField(for: provider)?.stringValue = ""
+        field.stringValue = ""
+        self.rememberScrollOffset()
+        self.applyPane(animated: false)
+      } catch is CancellationError { } catch {
+        self.presentKeySaveError(error, key: value)
+      }
     }
-    self.applyPane(animated: false)
   }
 
   @objc private func planKeyRemoved(_ sender: NSButton) {
     guard let provider = self.planKeyProvider(for: sender) else { return }
-    self.store.removePlanKey(provider)
-    self.applyPane(animated: false)
+    guard !self.keySaveInFlight else { return }
+    self.keySaveInFlight = true
+    sender.isEnabled = false
+    self.setStatus("settings-status-\(provider.rawValue)", "Removing…")
+    Task { @MainActor in
+      defer {
+        self.keySaveInFlight = false
+        self.keyOperationStatus = nil
+        sender.isEnabled = true
+        self.applyLiveUpdate()
+      }
+      do {
+        try await self.store.removePlanKeyAsync(provider)
+        self.applyLiveUpdate()
+      } catch is CancellationError { } catch {
+        self.presentKeySaveError(error, key: "", action: "removed")
+      }
+    }
   }
 
   @objc private func planKeyPageOpened(_ sender: NSButton) {
@@ -1289,6 +1410,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func apiReading(for provider: APIConsumptionProvider, saved: Bool) -> String {
+    switch self.store.apiConsumptionKeyAvailability(provider) {
+    case .unknown: return "Checking Keychain…"
+    case .unavailable: return "Keychain temporarily unavailable · retrying automatically"
+    case .missing, .present: break
+    }
     if self.store.apiConsumptionRefreshing.contains(provider) { return "Measuring…" }
     let snapshot = self.store.apiConsumption[provider]
     if self.store.apiConsumptionErrors[provider] != nil, snapshot == nil { return "Needs attention" }
@@ -1353,6 +1479,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     field.maximumNumberOfLines = 1
     field.target = self
     field.action = #selector(self.apiKeySubmitted(_:))
+    field.delegate = self
     field.toolTip = toolTip
     field.setAccessibilityLabel(accessibility)
     // Yields rather than breaking the row if a provider's buttons ever grow wide.
@@ -1376,6 +1503,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         ?? (self.store.states[provider]?.snapshot?.detailedUsageUnavailable == true
           ? "Details unavailable" : "No usage data"),
       size: 12, color: .secondaryLabelColor)
+    today.identifier = NSUserInterfaceItemIdentifier("insights-today-\(provider.rawValue)")
     today.widthAnchor.constraint(equalToConstant: 130).isActive = true
     let rolling = SettingsLabel(
       activity?.rolling.map {
@@ -1383,6 +1511,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       }
         ?? "Unavailable",
       size: 12, color: .secondaryLabelColor)
+    rolling.identifier = NSUserInterfaceItemIdentifier("insights-rolling-\(provider.rawValue)")
     rolling.widthAnchor.constraint(equalToConstant: 150).isActive = true
     let value = SettingsLabel(
       Self.rangeValueText(activity),
@@ -1411,6 +1540,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let value = SettingsLabel(
       "≈ \(DashboardFormat.money(usage.apiEquivalentCostUSD)) account",
       size: 12, color: .labelColor)
+    value.identifier = NSUserInterfaceItemIdentifier("insights-account-value-\(provider.rawValue)")
     let row = NSStackView(views: [name, totals, value])
     row.orientation = .horizontal
     row.alignment = .centerY
@@ -1586,6 +1716,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let peak = series.map(\.tokens).max() ?? 0
     let peakText = caption ?? "peak \(DashboardFormat.tokens(peak))"
     let peakLabel = SettingsLabel(peakText, size: 11, color: .tertiaryLabelColor)
+    peakLabel.identifier = NSUserInterfaceItemIdentifier("insights-peak-\(provider.rawValue)")
     peakLabel.widthAnchor.constraint(equalToConstant: 90).isActive = true
     peakLabel.alignment = .right
     let row = NSStackView(views: [name, chart, peakLabel])
@@ -1695,7 +1826,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     return root
   }
 
-  private func section(title: String?, footer: String? = nil, rows: [NSView]) -> NSView {
+  private func section(
+    title: String?, footer: String? = nil, footerIdentifier: String? = nil, rows: [NSView]
+  ) -> NSView {
     var views: [NSView] = []
     if let title {
       views.append(SettingsLabel(title, size: 11, weight: .semibold, color: .secondaryLabelColor))
@@ -1703,6 +1836,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     views.append(contentsOf: rows)
     if let footer {
       let label = NSTextField(wrappingLabelWithString: footer)
+      label.identifier = footerIdentifier.map { NSUserInterfaceItemIdentifier($0) }
       label.font = .systemFont(ofSize: 11)
       label.textColor = .tertiaryLabelColor
       label.widthAnchor.constraint(equalToConstant: SettingsLayout.contentWidth).isActive = true
@@ -1801,16 +1935,54 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let provider = self.apiProvider(for: sender),
       let field = self.apiKeyField(for: provider)
     else { return }
+    guard !self.keySaveInFlight else { return }
     let value = field.stringValue
     guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-    do {
-      try self.store.saveAPIConsumptionKey(value, for: provider)
-      self.clearAPICredentialFields(for: provider)
-      field.stringValue = ""
-    } catch {
-      self.presentError(error)
+    self.keySaveInFlight = true
+    sender.isEnabled = false
+    self.setStatus("api-status-\(provider.rawValue)", "Saving…")
+    Task { @MainActor in
+      defer {
+        self.keySaveInFlight = false
+        self.keyOperationStatus = nil
+        sender.isEnabled = true
+        self.applyLiveUpdate()
+      }
+      do {
+        try await self.store.saveAPIConsumptionKey(value, for: provider)
+        self.clearAPICredentialFields(for: provider)
+        field.stringValue = ""
+        self.rememberScrollOffset()
+        self.applyPane(animated: false)
+      } catch is CancellationError { } catch {
+        self.presentKeySaveError(error, key: value)
+      }
     }
-    self.applyPane(animated: false)
+  }
+
+  private func setStatus(_ identifier: String, _ text: String) {
+    self.keyOperationStatus = (identifier, text)
+    guard let root = self.window?.contentView else { return }
+    Self.descendants(of: root).compactMap { $0 as? NSTextField }.first {
+      $0.identifier?.rawValue == identifier
+    }?.stringValue = text
+  }
+
+  /// The alert names the failure and never repeats the pasted key.
+  private func presentKeySaveError(_ error: Error, key: String, action: String = "saved") {
+    var message = error.localizedDescription
+    if key.count >= 4 {
+      message = message.replacingOccurrences(of: key, with: "that key")
+    }
+    let alert = NSAlert()
+    alert.messageText = "The key could not be \(action)"
+    alert.informativeText = message
+    alert.addButton(withTitle: "OK")
+    if let window = self.window {
+      alert.beginSheetModal(for: window)
+    } else {
+      alert.runModal()
+    }
   }
 
   @objc private func apiKeyPageOpened(_ sender: NSButton) {
@@ -1822,8 +1994,24 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   @objc private func apiKeyRemoved(_ sender: NSButton) {
     guard let provider = self.apiProvider(for: sender) else { return }
-    self.store.removeAPIConsumptionKey(provider)
-    self.applyPane(animated: false)
+    guard !self.keySaveInFlight else { return }
+    self.keySaveInFlight = true
+    sender.isEnabled = false
+    self.setStatus("api-status-\(provider.rawValue)", "Removing…")
+    Task { @MainActor in
+      defer {
+        self.keySaveInFlight = false
+        self.keyOperationStatus = nil
+        sender.isEnabled = true
+        self.applyLiveUpdate()
+      }
+      do {
+        try await self.store.removeAPIConsumptionKeyAsync(provider)
+        self.applyLiveUpdate()
+      } catch is CancellationError { } catch {
+        self.presentKeySaveError(error, key: "", action: "removed")
+      }
+    }
   }
 
   private func apiProvider(for sender: NSControl) -> APIConsumptionProvider? {
@@ -1987,6 +2175,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     } else if identifier.hasPrefix("renewal.") {
       self.renewalDayChanged(field)
     }
+    // AppKit still owns the field editor while delivering this notification.
+    // Apply deferred changes on the next turn, after it releases that editor.
+    self.uiRefresh.coalesce { [weak self] in self?.applyLiveUpdate() }
   }
 
   func controlTextDidChange(_ notification: Notification) {
@@ -2041,6 +2232,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let state = self.store.states[provider]
     // Key-connected plans have no tool to detect; the key is what matters.
     if ProviderDescriptor.forProvider(provider).usesAPIKey {
+      switch self.store.planKeyAvailability(for: provider) {
+      case .unknown: return ("Checking Keychain…", .secondaryLabelColor)
+      case .unavailable: return ("Keychain unavailable", .secondaryLabelColor)
+      case .missing, .present: break
+      }
       let saved = self.store.hasPlanKey(provider)
       if !self.store.isEnabled(provider) { return (saved ? "Key saved" : "Off", .secondaryLabelColor) }
       if !saved || state?.requiresConnection == true { return ("Key needed", ReserveColor.accent) }
@@ -2093,6 +2289,255 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let window = self.window else { return "" }
     return Self.descendants(of: window.contentView ?? NSView()).compactMap { $0 as? NSTextField }
       .first { $0.identifier?.rawValue == identifier }?.stringValue ?? ""
+  }
+
+  /// Which controls exist. Reading text, status colour, and timestamps are not
+  /// part of it, so those updates keep the same fields.
+  private func controlStructureSignature() -> String {
+    var parts = [
+      self.pane.rawValue,
+      ReserveAppearance.current.rawValue,
+      ReserveAppearance.resolvedAppearance.name.rawValue,
+    ]
+    switch self.pane {
+    case .providers:
+      for provider in ProviderID.allCases {
+        let enabled = self.store.isEnabled(provider)
+        let state = self.store.states[provider] ?? ProviderViewState(provider: provider)
+        let setup = AllowanceBuilder.setupAction(for: state)
+        let expanded = self.expandedProviders.contains(provider)
+        let quick = !enabled || setup != nil
+        var detail = ""
+        if expanded {
+          let reportedRenewal = state.snapshot?.billingRenewsAt != nil
+          let planKey = ProviderDescriptor.forProvider(provider).usesAPIKey
+          let savedKey = planKey ? String(describing: self.store.planKeyAvailability(for: provider)) : "-"
+          detail = [
+            reportedRenewal ? "reported" : "manual",
+            planKey ? "key" : "-",
+            savedKey,
+            setup?.buttonTitle ?? "-",
+          ].joined(separator: ",")
+        }
+        parts.append(
+          "\(provider.rawValue):\(enabled):\(expanded):\(quick):\(setup?.buttonTitle ?? "-"):\(detail)")
+      }
+    case .api:
+      for provider in APIConsumptionProvider.allCases {
+        parts.append("\(provider.rawValue):\(self.store.apiConsumptionKeyAvailability(provider))")
+      }
+    case .insights:
+      let enabled = ProviderID.allCases.filter { self.store.isEnabled($0) }
+      parts.append(enabled.map(\.rawValue).joined(separator: ","))
+      parts.append(String(self.store.insightHistoryDays))
+      let keys = Set(InsightHistoryRange.dayKeys(count: self.store.insightHistoryDays, now: Date()))
+      for provider in enabled {
+        let snapshot = self.store.states[provider]?.snapshot
+        parts.append("\(provider.rawValue):account=\(snapshot?.accountUsage?.origin == .providerAccount)")
+        if !ProviderDescriptor.forProvider(provider).capabilities.contains(.localHistory) {
+          let hasChart = snapshot?.accountTokenActivity?.dailyUsageBuckets?.contains { keys.contains($0.day) } == true
+          parts.append("chart=\(hasChart)")
+        }
+      }
+    case .appearance:
+      parts.append(self.store.appearanceMode.rawValue)
+      parts.append(self.store.appearanceTheme.rawValue)
+    case .general, .notifications, .privacy, .about:
+      break
+    }
+    return parts.joined(separator: "\u{1}")
+  }
+
+  /// Writes the current readings into the controls already on screen.
+  private func applyLiveLabels() {
+    guard let root = self.window?.contentView else { return }
+    let views = Self.descendants(of: root)
+    func field(_ identifier: String) -> NSTextField? {
+      views.compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == identifier }
+    }
+    func setText(_ identifier: String, _ text: String, color: NSColor? = nil) {
+      guard let label = field(identifier), label !== self.editingField else { return }
+      if label.stringValue != text { label.stringValue = text }
+      if let color { label.textColor = color }
+    }
+    func button(_ identifier: String) -> NSButton? {
+      views.compactMap { $0 as? NSButton }.first { $0.identifier?.rawValue == identifier }
+    }
+    func check(_ identifier: String, _ enabled: Bool) {
+      button(identifier)?.state = enabled ? .on : .off
+    }
+    func select(_ identifier: String, _ index: Int) {
+      (button(identifier) as? NSPopUpButton)?.selectItem(at: index)
+    }
+    switch self.pane {
+    case .providers:
+      for provider in ProviderID.allCases {
+        let status = self.providerStatus(provider)
+        setText(
+          "settings-plan-\(provider.rawValue)",
+          Self.displayPlanName(self.store.states[provider]?.snapshot?.planName))
+        setText("settings-status-\(provider.rawValue)", status.text, color: status.color)
+        let updated = (self.store.states[provider]?.snapshot?.fetchedAt).map {
+          DashboardFormat.updated($0, now: Date()).replacingOccurrences(of: "Updated ", with: "")
+        } ?? "never"
+        setText("settings-updated-\(provider.rawValue)", updated)
+        setText("renewal-status.\(provider.rawValue)", self.renewalStatusText(for: provider))
+        setText("subscription.\(provider.rawValue)",
+          self.store.monthlySubscriptionCost(for: provider).map { String(format: "%.0f", $0) } ?? "")
+        setText("renewal.\(provider.rawValue)", self.store.renewalDay(for: provider).map(String.init) ?? "")
+        check("settings-keychain-\(provider.rawValue)", self.store.keychainReadAllowed(for: provider))
+        if provider == .anthropic {
+          check("settings-claude-passive", self.store.claudePassiveUpdatesEnabled)
+          button("settings-keychain-anthropic")?.isEnabled = !self.store.claudePassiveUpdatesEnabled
+        }
+        if let button = views.compactMap({ $0 as? NSButton }).first(where: {
+          $0.identifier?.rawValue == provider.rawValue
+        }) {
+          let state: NSControl.StateValue = self.store.isEnabled(provider) ? .on : .off
+          if button.state != state { button.state = state }
+        }
+        setText("settings-source-tokens-\(provider.rawValue)", self.tokenSourceText(provider))
+        let providerState = self.store.states[provider]
+        let quotaSource = providerState?.snapshot?.source ?? "not connected"
+        let quotaPrefix = providerState?.snapshot?.windows.isEmpty == true ? "Usage" : "Limits"
+        setText(
+          "settings-source-quota-\(provider.rawValue)",
+          "\(quotaPrefix) · provider reported · \(quotaSource)")
+        setText(
+          "settings-source-freshness-\(provider.rawValue)",
+          (providerState?.snapshot?.fetchedAt).map { DashboardFormat.updated($0, now: Date()) }
+            ?? "Never updated")
+      }
+    case .api:
+      for provider in APIConsumptionProvider.allCases {
+        let saved = self.store.hasAPIConsumptionKey(provider)
+        check("api-enabled-\(provider.rawValue)", self.store.isAPIConsumptionEnabled(provider))
+        setText("api-status-\(provider.rawValue)", self.apiReading(for: provider, saved: saved))
+        field("api-status-\(provider.rawValue)")?.toolTip =
+          self.store.apiConsumptionErrors[provider]
+          ?? self.store.apiConsumption[provider]?.breakdownSummary
+          ?? field("api-status-\(provider.rawValue)")?.stringValue
+      }
+    case .general:
+      check("history-local-enabled", self.store.localHistoryEnabled)
+      check("settings-hide-personal", self.store.hidesPersonalInfo)
+      check("menu-bar-remaining", self.store.menuBarShowsRemaining)
+      check("menu-bar-reset", self.store.menuBarShowsReset)
+      select("settings-refresh-interval", Self.refreshIntervalMinutes.firstIndex(of: self.store.refreshIntervalMinutes) ?? 0)
+      select("settings-dashboard-hotkey", DashboardHotKeyChoice.allCases.firstIndex(of: self.store.dashboardHotKey) ?? 0)
+      select("menu-bar-provider", self.store.menuBarProvider.flatMap { ProviderID.allCases.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+      setText("settings-hotkey-status", self.hotKeyStatusText())
+      if let preview = views.first(where: { $0.identifier?.rawValue == "menu-bar-preview" })
+        as? MenuBarPreview
+      {
+        preview.reload()
+      }
+    case .insights:
+      let facts = self.insightsFacts()
+      setText("insights-total", facts.totalText)
+      setText("insights-activity-source", facts.activityFooter)
+      let keys = Set(InsightHistoryRange.dayKeys(count: self.store.insightHistoryDays, now: Date()))
+      for (state, series) in facts.published {
+        let provider = state.provider
+        let activity = Self.rangeActivity(series: series, state: state)
+        setText("insights-value-\(provider.rawValue)", Self.rangeValueText(activity))
+        setText("insights-today-\(provider.rawValue)",
+          activity?.today.map { "\(DashboardFormat.tokens($0)) today" }
+            ?? (state.snapshot?.detailedUsageUnavailable == true ? "Details unavailable" : "No usage data"))
+        setText("insights-rolling-\(provider.rawValue)",
+          activity?.rolling.map { "\(DashboardFormat.tokens($0)) in \(max(series.requestedDays, self.store.insightHistoryDays)) days" }
+            ?? "Unavailable")
+        setText("insights-coverage-\(provider.rawValue)", "\(series.coveredDays)/\(series.requestedDays) days")
+        (views.first { $0.identifier?.rawValue == "insights-heatmap-\(provider.rawValue)" } as? UsageHeatmapView)?.apply(series)
+        if let chart = views.first(where: { $0.identifier?.rawValue == "insights-chart-\(provider.rawValue)" }) as? ReserveSparkline {
+          let daily = (state.snapshot?.accountTokenActivity?.dailyUsageBuckets ?? [])
+            .filter { keys.contains($0.day) }.sorted { $0.day < $1.day }
+          chart.apply(series: daily)
+          setText("insights-peak-\(provider.rawValue)", "peak \(DashboardFormat.tokens(daily.map(\.tokens).max() ?? 0))")
+        }
+        if let usage = state.snapshot?.accountUsage, usage.origin == .providerAccount {
+          setText("insights-account-\(provider.rawValue)", "\(DashboardFormat.tokens(usage.totalTokens)) in \(usage.periodDays) days, account")
+          setText("insights-account-value-\(provider.rawValue)", "≈ \(DashboardFormat.money(usage.apiEquivalentCostUSD)) account")
+        }
+      }
+      self.reflowLiveContent()
+    case .about:
+      self.updateButton?.isEnabled = self.updater?.canCheckForUpdates ?? false
+      if let checked = self.updater?.lastUpdateCheckDate {
+        let ago = DashboardFormat.updated(checked, now: Date())
+          .replacingOccurrences(of: "Updated ", with: "")
+        setText("about-update-status", "Checked \(ago)")
+      }
+    case .notifications:
+      check("settings-notifications", self.store.notificationsEnabled)
+      for control in views.compactMap({ $0 as? NSButton }) {
+        guard let identifier = control.identifier?.rawValue,
+          identifier.hasPrefix("notification.option.") else { continue }
+        let key = String(identifier.dropFirst("notification.option.".count))
+        control.state = self.store.notificationPreference(key) ? .on : .off
+      }
+    case .appearance, .privacy:
+      break
+    }
+    if let operation = self.keyOperationStatus {
+      setText(operation.identifier, operation.text)
+    }
+  }
+
+  /// Wrapping readings can change the document height without changing its
+  /// controls. Keep their identities and the reader's distance from the top.
+  private func reflowLiveContent() {
+    guard let window = self.window, let installed = window.contentView else { return }
+    let existingScroll = installed as? NSScrollView
+    let document = existingScroll?.documentView ?? installed
+    guard let stack = document.subviews.first as? NSStackView else { return }
+    document.layoutSubtreeIfNeeded()
+    let natural = max(SettingsLayout.minimumHeight,
+      ceil(stack.fittingSize.height) + 2 * SettingsLayout.inset)
+    guard abs(document.frame.height - natural) >= 1 else { return }
+    let limit = max(SettingsLayout.minimumHeight,
+      ((window.screen ?? NSScreen.main)?.visibleFrame.height ?? 800) - 80)
+    let distanceFromTop = existingScroll.map {
+      max(0, document.frame.height - $0.contentView.documentVisibleRect.maxY)
+    } ?? 0
+    document.frame.size.height = natural
+    let scroll: NSScrollView?
+    if natural > limit {
+      if let existingScroll {
+        scroll = existingScroll
+      } else {
+        let newScroll = NSScrollView()
+        newScroll.identifier = NSUserInterfaceItemIdentifier("settings-scroll")
+        newScroll.hasVerticalScroller = true
+        newScroll.autohidesScrollers = false
+        newScroll.scrollerStyle = .legacy
+        newScroll.drawsBackground = false
+        window.contentView = nil
+        newScroll.documentView = document
+        window.contentView = newScroll
+        scroll = newScroll
+      }
+      document.frame.size.width = SettingsLayout.defaultSize.width
+        - NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+    } else {
+      if let existingScroll {
+        existingScroll.documentView = nil
+        window.contentView = document
+      }
+      document.frame.size.width = SettingsLayout.defaultSize.width
+      scroll = nil
+    }
+    let size = NSSize(width: SettingsLayout.defaultSize.width, height: min(natural, limit))
+    let frame = window.frame
+    let target = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+    window.setFrame(NSRect(x: frame.minX, y: frame.maxY - target.height,
+      width: target.width, height: target.height), display: true)
+    document.layoutSubtreeIfNeeded()
+    if let scroll {
+      let maximum = max(0, natural - scroll.contentView.bounds.height)
+      scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, maximum - distanceFromTop)))
+      scroll.reflectScrolledClipView(scroll.contentView)
+    }
   }
 
   private func rememberScrollOffset() {
@@ -2657,7 +3102,11 @@ private final class ThemePreview: NSView {
 /// A live preview of what the menu bar will show.
 @MainActor
 private final class MenuBarPreview: NSView {
+  private let store: UsageStore
+  private var lastPresentation: String?
+
   init(store: UsageStore) {
+    self.store = store
     super.init(frame: .zero)
     self.identifier = NSUserInterfaceItemIdentifier("menu-bar-preview")
     self.setAccessibilityRole(.group)
@@ -2668,12 +3117,27 @@ private final class MenuBarPreview: NSView {
     self.applyChrome()
     self.layer?.cornerRadius = 6
     self.layer?.borderWidth = 1
+    self.reload()
+    self.heightAnchor.constraint(equalToConstant: 26).isActive = true
+  }
 
+  /// Replaces the sample row when the menu-bar reading changes. The preview
+  /// view itself stays put.
+  func reload() {
     let now = Date()
     let summaries = store.orderedStates.filter { store.isEnabled($0.provider) }
       .map { AllowanceBuilder.summary(for: $0, now: now) }
     let selection = AllowanceBuilder.menuBarSummary(
       from: summaries, pinnedProvider: store.menuBarProvider)
+    let presentation = "\(selection.isPinned):\(selection.summary?.provider.rawValue ?? "-"):"
+      + "\(selection.summary?.primary?.remainingPercent ?? -1):\(String(describing: selection.summary?.paceState)):"
+      + "\(store.menuBarShowsRemaining):\(store.menuBarShowsReset)"
+    guard presentation != self.lastPresentation else { return }
+    self.lastPresentation = presentation
+    self.setAccessibilityLabel(
+      store.menuBarProvider.map { "Menu bar preview, \($0.displayName)" }
+        ?? "Menu bar preview, Reserve icon")
+    for subview in self.subviews { subview.removeFromSuperview() }
     let image = selection.isPinned
       ? selection.summary.map { ProviderArtwork.image(for: $0.provider) }
       : NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: "Reserve")
@@ -2707,7 +3171,6 @@ private final class MenuBarPreview: NSView {
       row.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 9),
       row.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -9),
       row.centerYAnchor.constraint(equalTo: self.centerYAnchor),
-      self.heightAnchor.constraint(equalToConstant: 26),
     ])
   }
 

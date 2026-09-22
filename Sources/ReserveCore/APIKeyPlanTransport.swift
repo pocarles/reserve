@@ -98,11 +98,13 @@ struct APIKeyPlanTransport: Sendable {
   }
 
   private static func retryAfter(_ response: HTTPURLResponse, now: Date = Date()) -> Date? {
-    guard let value = response.value(forHTTPHeaderField: "Retry-After"),
-      let seconds = TimeInterval(value.trimmingCharacters(in: .whitespaces)),
-      seconds.isFinite, seconds > 0, seconds <= 24 * 60 * 60
-    else { return nil }
-    return now.addingTimeInterval(seconds)
+    Self.retryDeadline(from: response.value(forHTTPHeaderField: "Retry-After"), now: now)
+  }
+
+  /// Delay-seconds or an HTTP-date. Future deadlines are preserved. Unusable values are nil
+  /// so a caller can apply its own fallback instead of treating them as "now".
+  static func retryDeadline(from header: String?, now: Date = Date()) -> Date? {
+    HTTPRetryAfter.deadline(from: header, now: now)
   }
 
   /// A whole number within a sane range. `Int(Double)` traps outside `Int`'s

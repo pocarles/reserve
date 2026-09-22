@@ -531,6 +531,207 @@ enum LifecycleSelfTest {
     return result
   }
 
+  /// Routine readings keep the open dashboard and the Settings controls already
+  /// on screen. A value typed into one field survives an update of other rows.
+  static func checkLiveUpdateIdentity(
+    store: UsageStore,
+    controller: StatusItemController,
+    settings: SettingsWindowController
+  ) -> Result {
+    var result = Result()
+    guard let window = controller.dashboardWindowForTesting,
+      let root = window.contentView as? UsageDashboardView
+    else {
+      result.failures.append("live update check needs the open dashboard")
+      return result
+    }
+    settings.show(.providers)
+    self.settle()
+    guard let settingsWindow = settings.window, let settingsRoot = settingsWindow.contentView else {
+      result.failures.append("settings was not open for the live update check")
+      return result
+    }
+    let disclose = self.descendants(of: settingsRoot).compactMap { $0 as? NSButton }.first {
+      $0.identifier?.rawValue == "provider-disclose-openAI"
+    }
+    disclose?.performClick(nil)
+    self.settle()
+    guard let field = self.descendants(of: settingsWindow.contentView ?? NSView())
+      .compactMap({ $0 as? NSTextField })
+      .first(where: { $0.identifier?.rawValue == "subscription.openAI" }),
+      let updated = self.descendants(of: settingsWindow.contentView ?? NSView())
+      .compactMap({ $0 as? NSTextField })
+      .first(where: { $0.identifier?.rawValue == "settings-updated-grok" })
+    else {
+      result.failures.append("the provider row or subscription field was not on screen")
+      return result
+    }
+    let originalField = field.stringValue
+    settingsWindow.makeFirstResponder(field)
+    field.stringValue = "42"
+    let rootID = ObjectIdentifier(root)
+    let openAITile = self.visibleTiles(in: window).first {
+      self.providerIdentifier($0) == "provider-tile-openAI"
+    }
+    let grokTile = self.visibleTiles(in: window).first {
+      self.providerIdentifier($0) == "provider-tile-grok"
+    }
+    let card = self.visibleCards(in: window).first
+    let tileID = openAITile.map(ObjectIdentifier.init)
+    let grokID = grokTile.map(ObjectIdentifier.init)
+    let cardID = card.map(ObjectIdentifier.init)
+    let fieldID = ObjectIdentifier(field)
+    let updatedID = ObjectIdentifier(updated)
+    let beforeUpdated = updated.stringValue
+    let fullBefore = controller.dashboardFullRebuildsForTesting
+    let regionBefore = controller.dashboardRegionRebuildsForTesting
+
+    store.installPreviewSnapshots(
+      now: Date().addingTimeInterval(-180), scenario: .exhausted)
+    self.settle(0.25)
+
+    let sameRoot = window.contentView.map(ObjectIdentifier.init) == rootID
+    let openAIAfter = self.visibleTiles(in: window).first {
+      self.providerIdentifier($0) == "provider-tile-openAI"
+    }
+    let grokAfter = self.visibleTiles(in: window).first {
+      self.providerIdentifier($0) == "provider-tile-grok"
+    }
+    let settingsAfter = settingsWindow.contentView.map { self.descendants(of: $0) } ?? []
+    let fieldAfter = settingsAfter.compactMap { $0 as? NSTextField }.first {
+      $0.identifier?.rawValue == "subscription.openAI"
+    }
+    let updatedAfter = settingsAfter.compactMap { $0 as? NSTextField }.first {
+      $0.identifier?.rawValue == "settings-updated-grok"
+    }
+    result.expect(sameRoot, "a usage reading replaced the dashboard view")
+    result.expect(
+      openAIAfter.map(ObjectIdentifier.init) == tileID,
+      "a usage reading replaced the OpenAI tile")
+    result.expect(
+      grokAfter.map(ObjectIdentifier.init) == grokID,
+      "a usage reading replaced an unchanged provider tile")
+    result.expect(
+      self.visibleCards(in: window).first.map(ObjectIdentifier.init) == cardID,
+      "a usage reading replaced the open provider card")
+    let openAIText = openAIAfter.flatMap { tile in
+      self.descendants(of: tile).compactMap { $0 as? NSTextField }.first {
+        $0.identifier?.rawValue == "tile-value-openAI"
+      }?.stringValue
+    }
+    result.expect(
+      openAIText == "0% left",
+      "the OpenAI tile still reads \(openAIText ?? "nothing") after the exhausted reading")
+    result.expect(
+      fieldAfter.map(ObjectIdentifier.init) == fieldID && fieldAfter?.stringValue == "42",
+      "editing the subscription cost was lost while another provider updated")
+    result.expect(
+      updatedAfter.map(ObjectIdentifier.init) == updatedID
+        && updatedAfter?.stringValue != beforeUpdated,
+      "the other provider row did not take the new reading")
+    result.expect(
+      controller.dashboardFullRebuildsForTesting == fullBefore,
+      "the usage reading rebuilt the whole dashboard")
+    result.expect(
+      controller.dashboardRegionRebuildsForTesting == regionBefore,
+      "the usage reading rebuilt a provider region")
+
+    field.stringValue = originalField
+    settingsWindow.makeFirstResponder(nil)
+    store.installPreviewSnapshots(scenario: .deficit)
+    settings.show(.general)
+    self.settle(0.2)
+    return result
+  }
+
+  /// Cached history and preferences must update retained controls, including
+  /// after an unrelated layout change was deferred by a key draft.
+  static func checkSettingsLiveValues() -> Result {
+    var result = Result()
+    let suite = "com.reserve.settings-live.\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else {
+      result.failures.append("could not create isolated Settings preferences")
+      return result
+    }
+    let originalTheme = ReserveAppearance.current
+    let originalMode = ReserveAppearance.mode
+    defer {
+      defaults.removePersistentDomain(forName: suite)
+      ReserveAppearance.current = originalTheme
+      ReserveAppearance.mode = originalMode
+    }
+    let store = UsageStore(defaults: defaults, startAutomatically: false, notificationsActive: false)
+    store.installPreviewSnapshots()
+    let settings = SettingsWindowController(store: store, updater: nil, setupProvider: { _ in })
+    defer { settings.window?.close() }
+    func view(_ id: String) -> NSView? {
+      self.descendants(of: settings.window?.contentView ?? NSView()).first {
+        $0.identifier?.rawValue == id
+      }
+    }
+    settings.show(.general)
+    self.settle()
+    let privacy = view("settings-hide-personal") as? NSButton
+    let privacyID = privacy.map(ObjectIdentifier.init)
+    let originalPrivacy = store.hidesPersonalInfo
+    store.hidesPersonalInfo.toggle()
+    store.menuBarProvider = .grok
+    store.refreshIntervalMinutes = 15
+    self.settle()
+    result.expect(view("settings-hide-personal").map(ObjectIdentifier.init) == privacyID
+      && privacy?.state == (originalPrivacy ? .off : .on),
+      "Settings privacy checkbox did not update in place")
+    result.expect((view("settings-refresh-interval") as? NSPopUpButton)?.indexOfSelectedItem == 4,
+      "Settings refresh interval kept an old selection")
+    result.expect((view("menu-bar-provider") as? NSPopUpButton)?.indexOfSelectedItem
+      == (ProviderID.allCases.firstIndex(of: .grok) ?? -1) + 1,
+      "Settings pin selection kept an old provider")
+
+    let day = InsightHistoryRange.dayKeys(count: 1, now: Date())[0]
+    store.publishDailyHistoryForTesting([InsightHistoryDay(day: day, tokens: 100, costUSD: 1)], provider: .openAI)
+    settings.show(.insights)
+    self.settle()
+    let heatmap = view("insights-heatmap-openAI") as? UsageHeatmapView
+    let heatmapID = heatmap.map(ObjectIdentifier.init)
+    let beforeCaption = heatmap?.dayCaptionForTesting(at: store.insightHistoryDays - 1)
+    let total = view("insights-total") as? NSTextField
+    let totalID = total.map(ObjectIdentifier.init)
+    let beforeTotal = total?.stringValue
+    store.publishDailyHistoryForTesting([InsightHistoryDay(day: day, tokens: 9_000, costUSD: 99)], provider: .openAI)
+    self.settle()
+    result.expect(view("insights-heatmap-openAI").map(ObjectIdentifier.init) == heatmapID
+      && heatmap?.dayCaptionForTesting(at: store.insightHistoryDays - 1) != beforeCaption,
+      "Insights heatmap failed to update the retained chart")
+    result.expect(view("insights-total").map(ObjectIdentifier.init) == totalID
+      && total?.stringValue != beforeTotal,
+      "Insights total failed to update the retained label")
+    if let last = view("insights-total"), let window = settings.window {
+      result.expect(self.unreachableReason(last, in: window) == nil,
+        "updated Insights total fell outside the scrollable document")
+    }
+
+    settings.show(.api)
+    self.settle()
+    if let key = view("api-key-openAI") as? NSTextField, let window = settings.window {
+      window.makeFirstResponder(key)
+      key.stringValue = "unsaved-fixture"
+      let before = view("api-provider-openAI")
+      store.appearanceTheme = store.appearanceTheme == .ember ? .ocean : .ember
+      self.settle()
+      result.expect(view("api-provider-openAI") === before && key.stringValue == "unsaved-fixture",
+        "a required Settings layout change interrupted key editing")
+      window.makeFirstResponder(nil)
+      self.settle()
+      result.expect(view("api-provider-openAI") !== before,
+        "Settings left a layout change pending after key editing ended")
+      result.expect((view("api-key-openAI") as? NSTextField)?.stringValue == "unsaved-fixture",
+        "a required Settings layout change discarded an unsaved key draft")
+    } else {
+      result.failures.append("API key field missing from isolated Settings check")
+    }
+    return result
+  }
+
   // MARK: - Geometry
 
   /// The popover has to fit the screen it opens on, including the smallest

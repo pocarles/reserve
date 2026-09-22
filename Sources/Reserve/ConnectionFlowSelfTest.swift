@@ -130,6 +130,7 @@ enum ConnectionFlowSelfTest {
         "\(provider.displayName) key field is not a visible secure field")
       keyField?.stringValue = "short"
       click("connection-primary", in: coordinator.panel)
+      await settle { coordinator.phase == .needsKey && savedPlanKeys[provider] == nil }
       expect(coordinator.phase == .needsKey && savedPlanKeys[provider] == nil,
         "an invalid \(provider.displayName) key was accepted")
       keyField?.stringValue = "test-\(provider.rawValue)-key-0123456789"
@@ -153,6 +154,10 @@ enum ConnectionFlowSelfTest {
       await settle { coordinator.phase == .needsKey }
       expect(savedPlanKeys[provider] != nil, "a rejected \(provider.displayName) key was not checked")
       click("connection-close", in: coordinator.panel)
+      await settle {
+        coordinator.activeProvider == nil && savedPlanKeys[provider] == nil
+          && !store.hasPlanKey(provider)
+      }
       expect(coordinator.activeProvider == nil && savedPlanKeys[provider] == nil
         && !store.hasPlanKey(provider),
         "a rejected \(provider.displayName) key stayed in Keychain after Cancel")
@@ -934,7 +939,10 @@ enum ConnectionFlowSelfTest {
         fetchOverride: { provider, allowAccess in
           try await probe.fetch(provider, allowAccess: allowAccess)
         },
-        openLoginURL: { _ in failures.append("\(scenario): unexpectedly opened sign-in"); return false })
+        openLoginURL: { _ in failures.append("\(scenario): unexpectedly opened sign-in"); return false },
+        planKeys: PlanKeyStorage(
+          hasKey: { _ in true }, save: { _, _ in }, delete: { _ in },
+          availability: { _ in .present }))
       for provider in ProviderID.allCases {
         store.setEnabled(provider, enabled: false, refreshImmediately: false)
       }

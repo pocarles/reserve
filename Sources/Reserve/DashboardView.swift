@@ -48,6 +48,21 @@ final class DashboardViewController: NSViewController {
   private let store: UsageStore
   private let actions: DashboardActions
   private var lastSignature: String?
+  /// Whole-tree replacements. Routine readings should not move this.
+  private(set) var fullRebuildCount = 0
+  /// In-place reading updates. Clock-only ticks are not counted.
+  private(set) var contentUpdateCount = 0
+
+  var regionRebuildCount: Int {
+    (self.isViewLoaded ? self.view as? UsageDashboardView : nil)?.regionRebuildCount ?? 0
+  }
+
+  /// Drops the built tree after the popover closes. The next open builds it again.
+  func releaseRenderedTree() {
+    guard self.isViewLoaded else { return }
+    self.view = NSView(frame: NSRect(origin: .zero, size: DashboardMetrics.size))
+    self.lastSignature = nil
+  }
 
   init(store: UsageStore, actions: DashboardActions) {
     self.store = store
@@ -147,26 +162,45 @@ final class DashboardViewController: NSViewController {
     let screen = (self.isViewLoaded ? self.view.window?.screen : nil) ?? NSScreen.main
     let now = Date()
     let visibleStates = self.store.orderedStates.filter { self.store.isEnabled($0.provider) }
+    let refreshing = self.store.isRefreshingAll
     let signature = Self.signature(
       summaries: visibleStates.map { AllowanceBuilder.summary(for: $0, now: now) },
       selectedMenuBarProvider: self.store.menuBarProvider,
       expandedProvider: self.store.expandedProvider,
-      isRefreshing: self.store.isRefreshingAll || self.store.isScanningLocalUsage,
+      isRefreshing: refreshing,
       hidesPersonal: self.store.hidesPersonalInfo,
       apiReadings: self.actions.apiConsumptionReadings(),
       now: now)
-    if self.isViewLoaded, signature == self.lastSignature {
+    if self.isViewLoaded, self.view is UsageDashboardView, signature == self.lastSignature {
       for clock in Self.descendants(of: self.view).compactMap({ $0 as? any ReserveClockUpdating }) {
         clock.updateClock(now)
       }
       return
     }
+    let maximumHeight = DashboardMetrics.availableHeight(on: screen)
+    if self.isViewLoaded, let dashboard = self.view as? UsageDashboardView,
+      dashboard.apply(
+        states: visibleStates,
+        selectedMenuBarProvider: self.store.menuBarProvider,
+        expandedProvider: self.store.expandedProvider,
+        isRefreshing: refreshing,
+        refreshStartedAt: self.store.refreshStartedAt,
+        now: now,
+        maximumHeight: maximumHeight,
+        actions: self.actions)
+    {
+      self.lastSignature = signature
+      self.preferredContentSize = dashboard.frame.size
+      self.contentUpdateCount += 1
+      return
+    }
+    self.fullRebuildCount += 1
     self.lastSignature = signature
     let dashboard = UsageDashboardView(
       states: visibleStates,
       selectedMenuBarProvider: self.store.menuBarProvider,
       expandedProvider: self.store.expandedProvider,
-      isRefreshing: self.store.isRefreshingAll || self.store.isScanningLocalUsage,
+      isRefreshing: self.store.isRefreshingAll,
       refreshStartedAt: self.store.refreshStartedAt,
       now: now,
       maximumHeight: DashboardMetrics.availableHeight(on: screen),
@@ -202,6 +236,21 @@ final class UsageDashboardView: NSView {
   /// The height this dashboard was laid out for. The popover has to display it
   /// at this height; showing it at any other height means rows are off screen.
   private(set) var intendedHeight: CGFloat = DashboardMetrics.minimumHeight
+  /// Replacements of one provider tile, the detail card, or the API block.
+  private(set) var regionRebuildCount = 0
+  private var column: NSStackView?
+  private var headerView: DashboardHeaderView?
+  private var overviewGrid: ProviderOverviewGrid?
+  private var detailCard: ProviderDashboardCard?
+  private var emptyState: NSView?
+  private var apiSection: APIConsumptionSection?
+  private var footerView: DashboardFooterView?
+  private var viewBeforeFooter: NSView?
+  private var appliedAppearance = ""
+  private var showsEmpty = false
+  private var providerIDs: [ProviderID] = []
+  private var isScrollable = false
+  private var scrollDocument: FlippedView?
 
   init(
     states: [ProviderViewState],
@@ -228,6 +277,7 @@ final class UsageDashboardView: NSView {
     stack.alignment = .leading
     stack.spacing = DashboardMetrics.rowGap
     stack.translatesAutoresizingMaskIntoConstraints = false
+    self.column = stack
     self.addSubview(stack)
     NSLayoutConstraint.activate([
       stack.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: DashboardMetrics.inset),
@@ -241,6 +291,7 @@ final class UsageDashboardView: NSView {
     let header = DashboardHeaderView(
       summaries: summaries, isRefreshing: isRefreshing, refreshStartedAt: refreshStartedAt,
       now: now, actions: actions)
+    self.headerView = header
     stack.addArrangedSubview(header)
     stack.setCustomSpacing(DashboardMetrics.headerGap, after: header)
 
@@ -253,6 +304,8 @@ final class UsageDashboardView: NSView {
         summaries: summaries, selectedProvider: selectedSummary?.provider,
         menuBarProvider: selectedMenuBarProvider, now: now,
         selectProvider: actions.toggleProviderDetail)
+      self.overviewGrid = overview
+      self.providerIDs = summaries.map(\.provider)
       stack.addArrangedSubview(overview)
       last = overview
 
@@ -266,23 +319,29 @@ final class UsageDashboardView: NSView {
           toggleDetail: actions.toggleProviderDetail)
         detail.identifier = NSUserInterfaceItemIdentifier(
           "provider-card-\(summary.provider.rawValue)")
+        self.detailCard = detail
         stack.addArrangedSubview(detail)
         last = detail
       }
     }
+    self.showsEmpty = summaries.isEmpty
     if summaries.isEmpty {
       let empty = EmptyProvidersView(openSettings: actions.openSettings)
+      self.emptyState = empty
       stack.addArrangedSubview(empty)
       last = empty
     }
     if let consumption = APIConsumptionSection(
       readings: actions.apiConsumptionReadings(), now: now, toggle: actions.toggleAPIDetail)
     {
+      self.apiSection = consumption
       stack.addArrangedSubview(consumption)
       last = consumption
     }
 
     let footer = DashboardFooterView(actions: actions)
+    self.footerView = footer
+    self.viewBeforeFooter = last
     stack.addArrangedSubview(footer)
     stack.setCustomSpacing(DashboardMetrics.footerGap, after: last)
 
@@ -294,10 +353,169 @@ final class UsageDashboardView: NSView {
     let height = min(ceiling, max(DashboardMetrics.minimumHeight, content))
     self.intendedHeight = height
     self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: height)
-    if content > height {
+    if Self.requiresScrolling(contentHeight: content, ceiling: ceiling) {
       self.makeScrollable(stack: stack, contentHeight: content)
+      self.isScrollable = true
+    }
+    self.appliedAppearance = Self.appearanceKey()
+    self.layoutSubtreeIfNeeded()
+  }
+
+  /// Updates labels, meters, and the refresh spinner when the set of controls
+  /// is unchanged. A provider list, theme, or scroll-mode change returns false
+  /// so the caller can replace the affected tree.
+  func apply(
+    states: [ProviderViewState],
+    selectedMenuBarProvider: ProviderID?,
+    expandedProvider: ProviderID?,
+    isRefreshing: Bool,
+    refreshStartedAt: Date?,
+    now: Date,
+    maximumHeight: CGFloat,
+    actions: DashboardActions
+  ) -> Bool {
+    if Self.appearanceKey() != self.appliedAppearance { return false }
+    let summaries = states.map { AllowanceBuilder.summary(for: $0, now: now) }
+    if summaries.isEmpty != self.showsEmpty { return false }
+    guard let column = self.column, let header = self.headerView else { return false }
+    header.apply(
+      summaries: summaries, isRefreshing: isRefreshing, refreshStartedAt: refreshStartedAt,
+      now: now)
+    let ids = summaries.map(\.provider)
+    if !summaries.isEmpty {
+      if let overview = self.overviewGrid, ids == self.providerIDs {
+        let previousTileRebuilds = overview.tileRebuildCount
+        overview.apply(
+          summaries: summaries, selectedProvider: expandedProvider ?? summaries.first?.provider,
+          menuBarProvider: selectedMenuBarProvider, now: now,
+          selectProvider: actions.toggleProviderDetail)
+        self.regionRebuildCount += overview.tileRebuildCount - previousTileRebuilds
+      } else {
+        self.replaceOverview(
+          summaries: summaries, selectedProvider: expandedProvider ?? summaries.first?.provider,
+          menuBarProvider: selectedMenuBarProvider, now: now, actions: actions, column: column)
+      }
+      self.providerIDs = ids
+      let selected = expandedProvider.flatMap { id in summaries.first { $0.provider == id } }
+        ?? summaries.first
+      if let selected {
+        var keptDetail = false
+        if let detail = self.detailCard, detail.providerID == selected.provider {
+          let previousRegionRebuilds = detail.regionRebuildCount
+          keptDetail = detail.apply(
+            summary: selected, now: now,
+            isSelectedForMenuBar: selectedMenuBarProvider == selected.provider)
+          self.regionRebuildCount += detail.regionRebuildCount - previousRegionRebuilds
+        }
+        if !keptDetail {
+          self.replaceDetail(
+            summary: selected, now: now, selectedMenuBarProvider: selectedMenuBarProvider,
+            actions: actions, column: column)
+        }
+      }
+    }
+    let readings = actions.apiConsumptionReadings()
+    if readings.isEmpty {
+      if self.apiSection != nil { return false }
+    } else if let section = self.apiSection {
+      if !section.apply(readings: readings, now: now, toggle: actions.toggleAPIDetail) {
+        self.replaceAPI(readings: readings, now: now, actions: actions, column: column)
+      }
+    } else {
+      return false
+    }
+    self.viewBeforeFooter.map { column.setCustomSpacing(DashboardMetrics.footerGap, after: $0) }
+    guard self.relayout(maximumHeight: maximumHeight) else { return false }
+    return true
+  }
+
+  private static func appearanceKey() -> String {
+    "\(ReserveAppearance.current.rawValue)\u{1}\(ReserveAppearance.resolvedAppearance.name.rawValue)"
+  }
+
+  private func replaceOverview(
+    summaries: [ProviderSummary],
+    selectedProvider: ProviderID?,
+    menuBarProvider: ProviderID?,
+    now: Date,
+    actions: DashboardActions,
+    column: NSStackView
+  ) {
+    let overview = ProviderOverviewGrid(
+      summaries: summaries, selectedProvider: selectedProvider,
+      menuBarProvider: menuBarProvider, now: now,
+      selectProvider: actions.toggleProviderDetail)
+    if let existing = self.overviewGrid {
+      column.replaceArrangedSubview(existing, with: overview)
+    }
+    self.overviewGrid = overview
+    self.regionRebuildCount += 1
+  }
+
+  private func replaceDetail(
+    summary: ProviderSummary,
+    now: Date,
+    selectedMenuBarProvider: ProviderID?,
+    actions: DashboardActions,
+    column: NSStackView
+  ) {
+    let detail = ProviderDashboardCard(
+      summary: summary, now: now,
+      isSelectedForMenuBar: selectedMenuBarProvider == summary.provider,
+      isExpanded: true, showsDisclosure: false,
+      connectProvider: actions.connectProvider,
+      selectMenuBarProvider: actions.selectMenuBarProvider,
+      toggleDetail: actions.toggleProviderDetail)
+    detail.identifier = NSUserInterfaceItemIdentifier("provider-card-\(summary.provider.rawValue)")
+    if let existing = self.detailCard {
+      column.replaceArrangedSubview(existing, with: detail)
+      if self.viewBeforeFooter === existing { self.viewBeforeFooter = detail }
+    }
+    self.detailCard = detail
+    self.regionRebuildCount += 1
+  }
+
+  private func replaceAPI(
+    readings: [APIConsumptionReading],
+    now: Date,
+    actions: DashboardActions,
+    column: NSStackView
+  ) {
+    guard let section = APIConsumptionSection(
+      readings: readings, now: now, toggle: actions.toggleAPIDetail)
+    else { return }
+    if let existing = self.apiSection {
+      column.replaceArrangedSubview(existing, with: section)
+      if self.viewBeforeFooter === existing { self.viewBeforeFooter = section }
+    }
+    self.apiSection = section
+    self.regionRebuildCount += 1
+  }
+
+  private func relayout(maximumHeight: CGFloat) -> Bool {
+    let ceiling = max(DashboardMetrics.minimumHeight, maximumHeight)
+    self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: ceiling)
+    self.layoutSubtreeIfNeeded()
+    guard let column = self.column else { return false }
+    let content = ceil(column.frame.height) + 2 * DashboardMetrics.inset
+    let height = min(ceiling, max(DashboardMetrics.minimumHeight, content))
+    let needsScroll = Self.requiresScrolling(contentHeight: content, ceiling: ceiling)
+    if needsScroll != self.isScrollable { return false }
+    self.intendedHeight = height
+    self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: height)
+    if needsScroll, let document = self.scrollDocument {
+      document.frame.size.height = content
     }
     self.layoutSubtreeIfNeeded()
+    return true
+  }
+
+  /// Construction and retained layout must make the same decision at the
+  /// fractional-point boundary. AppKit can settle a newly attached stack a
+  /// fraction of a point differently; that is not enough clipping to justify
+  /// replacing the whole tree with a scroll view.
+  private static func requiresScrolling(contentHeight: CGFloat, ceiling: CGFloat) -> Bool {
+    contentHeight > ceiling + 0.5
   }
 
   /// Opening a provider can push the column past the ceiling. Only then does the
@@ -319,6 +537,7 @@ final class UsageDashboardView: NSView {
         equalTo: document.bottomAnchor, constant: -DashboardMetrics.inset),
     ])
     let scroll = NSScrollView(frame: self.bounds)
+    self.scrollDocument = document
     scroll.documentView = document
     scroll.hasVerticalScroller = true
     scroll.scrollerStyle = .overlay
@@ -361,6 +580,10 @@ private final class FlippedView: NSView {
 /// Name, one conclusion, and the secondary controls.
 @MainActor
 private final class DashboardHeaderView: NSView {
+  private var conclusionLabel: ReserveLabel?
+  private var conclusionIcon: NSImageView?
+  private var refreshButton: ReserveIconButton?
+
   init(
     summaries: [ProviderSummary],
     isRefreshing: Bool,
@@ -380,6 +603,7 @@ private final class DashboardHeaderView: NSView {
       color: headline.state.color
     ).flexible()
     conclusion.toolTip = headline.primary
+    self.conclusionLabel = conclusion
     let conclusionIcon = NSImageView(
       image: NSImage(systemSymbolName: headline.state.symbol, accessibilityDescription: nil)
         ?? NSImage())
@@ -390,6 +614,7 @@ private final class DashboardHeaderView: NSView {
     conclusionIcon.setAccessibilityLabel("")
     conclusionIcon.translatesAutoresizingMaskIntoConstraints = false
     conclusionIcon.widthAnchor.constraint(equalToConstant: 14).isActive = true
+    self.conclusionIcon = conclusionIcon
     let conclusionRow = NSStackView.row([conclusionIcon, conclusion], spacing: 6)
     conclusionRow.identifier = NSUserInterfaceItemIdentifier("dashboard-headline")
 
@@ -398,6 +623,7 @@ private final class DashboardHeaderView: NSView {
       spinningSince: isRefreshing ? now.timeIntervalSince(refreshStartedAt ?? now) : nil,
       action: actions.refreshAll)
     refresh.identifier = NSUserInterfaceItemIdentifier("refresh-all")
+    self.refreshButton = refresh
     let more = DashboardMenuButton(actions: actions)
     more.identifier = NSUserInterfaceItemIdentifier("more-actions")
     let top = NSStackView.row(
@@ -416,6 +642,25 @@ private final class DashboardHeaderView: NSView {
       stack.bottomAnchor.constraint(equalTo: self.bottomAnchor),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
     ])
+  }
+
+  func apply(
+    summaries: [ProviderSummary],
+    isRefreshing: Bool,
+    refreshStartedAt: Date?,
+    now: Date
+  ) {
+    let headline = AllowanceBuilder.headline(for: summaries, now: now)
+    self.conclusionLabel?.setDisplayedText(headline.primary, color: headline.state.color)
+    self.conclusionLabel?.toolTip = headline.primary
+    self.conclusionLabel?.clockText = { date in
+      AllowanceBuilder.headline(for: summaries.map { $0.at(date) }, now: date).primary
+    }
+    self.conclusionIcon?.image = NSImage(
+      systemSymbolName: headline.state.symbol, accessibilityDescription: nil)
+    self.conclusionIcon?.contentTintColor = headline.state.color
+    let phase = isRefreshing ? now.timeIntervalSince(refreshStartedAt ?? now) : nil
+    self.refreshButton?.setSpinning(since: phase)
   }
 
   required init?(coder: NSCoder) { nil }
@@ -498,6 +743,8 @@ final class DashboardMenuButton: NSButton {
 /// API spend, kept apart from subscription limits. Absent unless a key was saved.
 @MainActor
 private final class APIConsumptionSection: NSView {
+  private var structure = ""
+
   init?(
     readings: [APIConsumptionReading], now: Date,
     toggle: @escaping (APIConsumptionProvider) -> Void = { _ in }
@@ -525,6 +772,84 @@ private final class APIConsumptionSection: NSView {
       stack.bottomAnchor.constraint(equalTo: self.bottomAnchor, constant: -10),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
     ])
+    self.structure = Self.structureKey(readings)
+  }
+
+  func apply(
+    readings: [APIConsumptionReading],
+    now: Date,
+    toggle: @escaping (APIConsumptionProvider) -> Void
+  ) -> Bool {
+    guard Self.structureKey(readings) == self.structure else { return false }
+    _ = toggle
+    for reading in readings {
+      let presented = Self.presented(reading, now: now)
+      (self.control(id: "api-amount-\(reading.provider.rawValue)") as? ReserveLabel)?
+        .setDisplayedText(presented.value)
+      let caption = self.control(id: "api-caption-\(reading.provider.rawValue)") as? ReserveLabel
+      caption?.setDisplayedText(presented.detail)
+      caption?.toolTip = presented.toolTip
+    }
+    return true
+  }
+
+  private func control(id: String) -> NSView? {
+    Self.walk(self).first { $0.identifier?.rawValue == id }
+  }
+
+  private static func walk(_ view: NSView) -> [NSView] {
+    [view] + view.subviews.flatMap { walk($0) }
+  }
+
+  private static func structureKey(_ readings: [APIConsumptionReading]) -> String {
+    readings.map { reading in
+      let details = reading.isExpanded
+        ? PrivacyPresentation.details(
+          reading.snapshot?.details ?? [], hidingPersonal: reading.hidesPersonalInfo
+        ).map { "\($0.label)=\($0.value)" }.joined(separator: "\u{1}")
+        : ""
+      let expandedError = reading.isExpanded ? (reading.error ?? "") : ""
+      return [
+        reading.provider.rawValue,
+        reading.isExpanded ? "open" : "closed",
+        reading.hidesPersonalInfo ? "private" : "plain",
+        details,
+        expandedError,
+      ].joined(separator: "\u{2}")
+    }.joined(separator: "|")
+  }
+
+  private static func presented(
+    _ reading: APIConsumptionReading, now: Date
+  ) -> (value: String, detail: String, toolTip: String) {
+    let value: String
+    let detail: String
+    if reading.isRefreshing, reading.snapshot == nil {
+      value = "Measuring"
+      detail = reading.provider.keyKind
+    } else if let note = reading.snapshot?.note {
+      value = note.headline
+      detail = note.detail ?? reading.snapshot?.source ?? ""
+    } else if let primary = reading.snapshot?.primary {
+      value = DashboardFormat.money(primary.usedUSD)
+      var caption: String
+      if let limit = primary.limitUSD {
+        caption = "of \(DashboardFormat.money(limit)) · \(primary.label)"
+      } else if let reset = primary.resetsAt, reset > now {
+        caption = "\(primary.label) · resets \(DashboardFormat.moment(reset, now: now))"
+      } else {
+        caption = primary.label
+      }
+      if let leader = reading.snapshot?.dominantBreakdownItem {
+        caption += " · mostly \(leader.label)"
+      }
+      detail = caption
+    } else {
+      value = "—"
+      detail = reading.error ?? "Waiting for the first read"
+    }
+    let toolTip = reading.error ?? reading.snapshot?.breakdownSummary ?? detail
+    return (value, detail, toolTip)
   }
 
   required init?(coder: NSCoder) { nil }
@@ -586,40 +911,16 @@ private final class APIConsumptionSection: NSView {
       font: ReserveFont.sans(ReserveType.body, .medium),
       color: ReserveColor.text
     ).width(84)
-    let value: String
-    let detail: String
-    if reading.isRefreshing, reading.snapshot == nil {
-      value = "Measuring"
-      detail = reading.provider.keyKind
-    } else if let note = reading.snapshot?.note {
-      value = note.headline
-      detail = note.detail ?? reading.snapshot?.source ?? ""
-    } else if let primary = reading.snapshot?.primary {
-      value = DashboardFormat.money(primary.usedUSD)
-      var caption: String
-      if let limit = primary.limitUSD {
-        caption = "of \(DashboardFormat.money(limit)) · \(primary.label)"
-      } else if let reset = primary.resetsAt, reset > now {
-        caption = "\(primary.label) · resets \(DashboardFormat.moment(reset, now: now))"
-      } else {
-        caption = primary.label
-      }
-      // Naming the model is only worth the width when one of them dominates.
-      if let leader = reading.snapshot?.dominantBreakdownItem {
-        caption += " · mostly \(leader.label)"
-      }
-      detail = caption
-    } else {
-      value = "—"
-      detail = reading.error ?? "Waiting for the first read"
-    }
+    let presented = Self.presented(reading, now: now)
     let amount = ReserveLabel(
-      value, font: ReserveFont.digits(ReserveType.body, .semibold), color: ReserveColor.text
+      presented.value, font: ReserveFont.digits(ReserveType.body, .semibold), color: ReserveColor.text
     ).fitted()
+    amount.identifier = NSUserInterfaceItemIdentifier("api-amount-\(reading.provider.rawValue)")
     let caption = ReserveLabel(
-      detail, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+      presented.detail, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
     ).flexible()
-    caption.toolTip = reading.error ?? reading.snapshot?.breakdownSummary ?? detail
+    caption.identifier = NSUserInterfaceItemIdentifier("api-caption-\(reading.provider.rawValue)")
+    caption.toolTip = presented.toolTip
     let disclosure = APIDetailDisclosureButton(
       provider: reading.provider, isExpanded: reading.isExpanded, action: toggle)
     // The spacer takes the spare width, so every row's chevron lines up on the right.
@@ -638,12 +939,18 @@ private final class APIConsumptionSection: NSView {
 /// add rows rather than turning the dashboard into a long accordion.
 @MainActor
 final class ProviderOverviewGrid: ReserveSurface {
+  private var tiles: [ProviderID: ProviderOverviewTile] = [:]
+  private var countLabel: ReserveLabel?
+  private var selectProvider: ((ProviderID) -> Void)?
+  private(set) var tileRebuildCount = 0
+
   init(
     summaries: [ProviderSummary], selectedProvider: ProviderID?, menuBarProvider: ProviderID?,
     now: Date,
     selectProvider: @escaping (ProviderID) -> Void
   ) {
     super.init(fill: ReserveColor.section, radius: ReserveRadius.section)
+    self.selectProvider = selectProvider
     self.identifier = NSUserInterfaceItemIdentifier("provider-overview")
 
     let title = ReserveLabel(
@@ -654,6 +961,7 @@ final class ProviderOverviewGrid: ReserveSurface {
       "\(summaries.count) \(summaries.count == 1 ? "provider" : "providers")",
       font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
     ).fitted()
+    self.countLabel = count
     let heading = NSStackView.row([title, NSStackView.spacer(), count], spacing: 8)
     heading.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewInnerWidth).isActive = true
 
@@ -661,19 +969,20 @@ final class ProviderOverviewGrid: ReserveSurface {
     var index = 0
     while index < summaries.count {
       let first = summaries[index]
-      var columns: [NSView] = [
-        ProviderOverviewTile(
-          summary: first, now: now, isSelected: selectedProvider == first.provider,
-          isPinnedForMenuBar: menuBarProvider == first.provider,
-          selectProvider: selectProvider)
-      ]
+      let firstTile = ProviderOverviewTile(
+        summary: first, now: now, isSelected: selectedProvider == first.provider,
+        isPinnedForMenuBar: menuBarProvider == first.provider,
+        selectProvider: selectProvider)
+      self.tiles[first.provider] = firstTile
+      var columns: [NSView] = [firstTile]
       if summaries.indices.contains(index + 1) {
         let second = summaries[index + 1]
-        columns.append(
-          ProviderOverviewTile(
-            summary: second, now: now, isSelected: selectedProvider == second.provider,
-            isPinnedForMenuBar: menuBarProvider == second.provider,
-            selectProvider: selectProvider))
+        let secondTile = ProviderOverviewTile(
+          summary: second, now: now, isSelected: selectedProvider == second.provider,
+          isPinnedForMenuBar: menuBarProvider == second.provider,
+          selectProvider: selectProvider)
+        self.tiles[second.provider] = secondTile
+        columns.append(secondTile)
       } else {
         let placeholder = NSView()
         placeholder.translatesAutoresizingMaskIntoConstraints = false
@@ -700,6 +1009,48 @@ final class ProviderOverviewGrid: ReserveSurface {
     ])
   }
 
+  func apply(
+    summaries: [ProviderSummary],
+    selectedProvider: ProviderID?,
+    menuBarProvider: ProviderID?,
+    now: Date,
+    selectProvider: @escaping (ProviderID) -> Void
+  ) {
+    self.selectProvider = selectProvider
+    let countText = "\(summaries.count) \(summaries.count == 1 ? "provider" : "providers")"
+    self.countLabel?.setDisplayedText(countText)
+    for summary in summaries {
+      guard let tile = self.tiles[summary.provider] else { continue }
+      let selected = selectedProvider == summary.provider
+      let pinned = menuBarProvider == summary.provider
+      if !tile.apply(
+        summary: summary, now: now, isSelected: selected, isPinnedForMenuBar: pinned)
+      {
+        self.replaceTile(
+          summary: summary, now: now, isSelected: selected, isPinned: pinned,
+          selectProvider: selectProvider)
+      }
+    }
+  }
+
+  private func replaceTile(
+    summary: ProviderSummary,
+    now: Date,
+    isSelected: Bool,
+    isPinned: Bool,
+    selectProvider: @escaping (ProviderID) -> Void
+  ) {
+    guard let existing = self.tiles[summary.provider],
+      let row = existing.superview as? NSStackView
+    else { return }
+    let tile = ProviderOverviewTile(
+      summary: summary, now: now, isSelected: isSelected, isPinnedForMenuBar: isPinned,
+      selectProvider: selectProvider)
+    row.replaceArrangedSubview(existing, with: tile)
+    self.tiles[summary.provider] = tile
+    self.tileRebuildCount += 1
+  }
+
   required init?(coder: NSCoder) { nil }
 }
 
@@ -708,11 +1059,18 @@ final class ProviderOverviewGrid: ReserveSurface {
 @MainActor
 final class ProviderOverviewTile: NSView, ReserveClockUpdating {
   private let provider: ProviderID
-  private let isSelected: Bool
+  private var isSelected: Bool
   private let selectProvider: (ProviderID) -> Void
   private var isHovered = false
   private var hoverTrackingArea: NSTrackingArea?
   private var spokenClock: ((Date) -> String)?
+  private var valueLabel: ReserveLabel?
+  private var meter: ReserveMeter?
+  private var stateIcon: NSImageView?
+  private var stateLabel: ReserveLabel?
+  private var selectedMark: NSImageView?
+  private var pinMark: NSImageView?
+  private var showsMeter = false
 
   init(
     summary: ProviderSummary, now: Date, isSelected: Bool, isPinnedForMenuBar: Bool,
@@ -750,20 +1108,19 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
     selectedMark.isHidden = !isSelected
     selectedMark.translatesAutoresizingMaskIntoConstraints = false
     selectedMark.widthAnchor.constraint(equalToConstant: 14).isActive = true
-    var identityViews: [NSView] = [logo, name, NSStackView.spacer()]
-    if isPinnedForMenuBar {
-      let pin = NSImageView(
-        image: NSImage(systemSymbolName: "pin.fill", accessibilityDescription: nil) ?? NSImage())
-      pin.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
-      pin.contentTintColor = ReserveColor.muted
-      pin.setAccessibilityElement(false)
-      pin.setAccessibilityLabel("")
-      pin.translatesAutoresizingMaskIntoConstraints = false
-      pin.widthAnchor.constraint(equalToConstant: 11).isActive = true
-      pin.identifier = NSUserInterfaceItemIdentifier("menu-bar-pin-\(summary.provider.rawValue)")
-      identityViews.append(pin)
-    }
-    identityViews.append(selectedMark)
+    self.selectedMark = selectedMark
+    let pin = NSImageView(
+      image: NSImage(systemSymbolName: "pin.fill", accessibilityDescription: nil) ?? NSImage())
+    pin.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+    pin.contentTintColor = ReserveColor.muted
+    pin.setAccessibilityElement(false)
+    pin.setAccessibilityLabel("")
+    pin.translatesAutoresizingMaskIntoConstraints = false
+    pin.widthAnchor.constraint(equalToConstant: 11).isActive = true
+    pin.identifier = NSUserInterfaceItemIdentifier("menu-bar-pin-\(summary.provider.rawValue)")
+    pin.isHidden = !isPinnedForMenuBar
+    self.pinMark = pin
+    let identityViews: [NSView] = [logo, name, NSStackView.spacer(), pin, selectedMark]
     let identity = NSStackView.row(identityViews, spacing: 6)
     identity.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewTileContentWidth)
       .isActive = true
@@ -785,6 +1142,8 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
     let value = ReserveLabel(
       valueText, font: ReserveFont.digits(ReserveType.summaryValue, .semibold), color: valueColor
     ).flexible()
+    value.identifier = NSUserInterfaceItemIdentifier("tile-value-\(summary.provider.rawValue)")
+    self.valueLabel = value
 
     var content: [NSView] = [identity, value]
     if let primary = summary.primary {
@@ -797,6 +1156,8 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
       meter.heightAnchor.constraint(equalToConstant: 5).isActive = true
       meter.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewTileContentWidth)
         .isActive = true
+      self.meter = meter
+      self.showsMeter = true
       content.append(meter)
     }
 
@@ -812,9 +1173,11 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
     stateIcon.setAccessibilityLabel("")
     stateIcon.translatesAutoresizingMaskIntoConstraints = false
     stateIcon.widthAnchor.constraint(equalToConstant: 11).isActive = true
+    self.stateIcon = stateIcon
     let state = ReserveLabel(
       stateText, font: ReserveFont.sans(ReserveType.support, .medium), color: stateColor
     ).flexible()
+    self.stateLabel = state
     let stateRow = NSStackView.row([stateIcon, state], spacing: 4)
     stateRow.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewTileContentWidth)
       .isActive = true
@@ -834,6 +1197,55 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
   }
 
   required init?(coder: NSCoder) { nil }
+
+  /// Returns false when the tile would have to gain or lose its meter.
+  func apply(
+    summary: ProviderSummary, now: Date, isSelected: Bool, isPinnedForMenuBar: Bool
+  ) -> Bool {
+    let wantsMeter = summary.primary != nil
+    guard wantsMeter == self.showsMeter else { return false }
+    self.isSelected = isSelected
+    self.pinMark?.isHidden = !isPinnedForMenuBar
+    self.selectedMark?.isHidden = !isSelected
+    let valueText: String
+    let valueColor: NSColor
+    if let primary = summary.primary {
+      valueText =
+        "\(DashboardFormat.remainingPercent(primary.remainingPercent))% "
+        + (summary.paceState == .stale ? "last known" : "left")
+      valueColor = summary.paceState == .stale ? ReserveColor.muted : ReserveColor.text
+      self.meter?.applyReading(
+        remainingPercent: primary.remainingPercent,
+        paceRemainingPercent: summary.paceState == .stale
+          ? nil : primary.expectedPercent.map { 100 - $0 },
+        color: summary.paceState.color,
+        isStale: summary.paceState == .stale)
+    } else if let usage = summary.localUsage, usage.origin == .providerAccount {
+      valueText = "\(DashboardFormat.tokens(usage.todayTokens)) today"
+      valueColor = ReserveColor.text
+    } else {
+      valueText = "Plan unavailable"
+      valueColor = ReserveColor.muted
+    }
+    self.valueLabel?.setDisplayedText(valueText, color: valueColor)
+    let stateColor: NSColor = summary.setupAction == nil ? summary.paceState.color : ReserveColor.muted
+    let stateText = summary.setupAction == nil ? summary.paceState.label : "Setup needed"
+    self.stateLabel?.setDisplayedText(stateText, color: stateColor)
+    self.stateIcon?.contentTintColor = stateColor
+    self.stateIcon?.image = NSImage(
+      systemSymbolName: summary.setupAction == nil
+        ? summary.paceState.symbol : "person.crop.circle.badge.plus",
+      accessibilityDescription: nil)
+    self.setAccessibilityLabel(
+      "\(summary.provider.displayName) provider"
+        + (isPinnedForMenuBar ? ", shown in the menu bar" : ""))
+    self.setAccessibilityValue(ProviderDashboardCard.spokenState(summary: summary, now: now))
+    self.spokenClock = { date in
+      ProviderDashboardCard.spokenState(summary: summary.at(date), now: date)
+    }
+    self.needsDisplay = true
+    return true
+  }
 
   func updateClock(_ now: Date) {
     if let spoken = self.spokenClock?(now) { self.setAccessibilityValue(spoken) }
@@ -909,13 +1321,18 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
 @MainActor
 final class ProviderDashboardCard: NSView, ReserveClockUpdating {
   private let provider: ProviderID
+  var providerID: ProviderID { self.provider }
   private let selectMenuBarProvider: (ProviderID) -> Void
   private let toggleDetail: (ProviderID) -> Void
-  private let isSelectedForMenuBar: Bool
-  private let hasUnavailableLiveData: Bool
+  private var isSelectedForMenuBar: Bool
+  private var hasUnavailableLiveData: Bool
+  private let isExpanded: Bool
+  private let showsDisclosure: Bool
+  private var renderedStructure = ""
   private var isHovered = false
   private var hoverTrackingArea: NSTrackingArea?
   private var spokenClock: ((Date) -> String)?
+  private(set) var regionRebuildCount = 0
 
   init(
     summary: ProviderSummary,
@@ -932,6 +1349,8 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
     self.toggleDetail = toggleDetail
     self.isSelectedForMenuBar = isSelectedForMenuBar
     self.hasUnavailableLiveData = summary.paceState == .stale
+    self.isExpanded = isExpanded
+    self.showsDisclosure = showsDisclosure
     super.init(frame: .zero)
     self.wantsLayer = true
     self.toolTip =
@@ -1012,6 +1431,138 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
         equalTo: self.bottomAnchor, constant: -DashboardMetrics.cardPadding),
       self.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
     ])
+    self.renderedStructure = Self.structureKey(
+      summary: summary, isExpanded: isExpanded, showsDisclosure: showsDisclosure)
+  }
+
+  /// Keeps this card when the controls on it are the same. Percentages, pace
+  /// copy, and the refresh clock update in place.
+  func apply(summary: ProviderSummary, now: Date, isSelectedForMenuBar: Bool) -> Bool {
+    let key = Self.structureKey(
+      summary: summary, isExpanded: self.isExpanded, showsDisclosure: self.showsDisclosure)
+    guard key == self.renderedStructure else { return false }
+    self.isSelectedForMenuBar = isSelectedForMenuBar
+    self.hasUnavailableLiveData = summary.paceState == .stale
+    let accessibleName = [summary.provider.displayName, summary.planName]
+      .filter { !$0.isEmpty }.joined(separator: " ")
+    self.setAccessibilityLabel(
+      accessibleName + (isSelectedForMenuBar ? ", shown in the menu bar" : ""))
+    self.setAccessibilityValue(Self.spokenState(summary: summary, now: now))
+    self.spokenClock = { date in Self.spokenState(summary: summary.at(date), now: date) }
+    self.toolTip = isSelectedForMenuBar
+      ? "Shown in menu bar"
+      : "Click to show \(summary.provider.displayName) in the menu bar"
+    let providerName = [summary.provider.displayName, summary.planName]
+      .filter { !$0.isEmpty }.joined(separator: " · ")
+    (self.control(id: "provider-name-\(summary.provider.rawValue)") as? ReserveLabel)?
+      .setDisplayedText(providerName)
+    self.control(id: "menu-bar-pin-\(summary.provider.rawValue)")?.isHidden = !isSelectedForMenuBar
+    if let primary = summary.primary {
+      (self.control(id: "remaining-\(summary.provider.rawValue)") as? RemainingValueView)?
+        .apply(allowance: primary, paceState: summary.paceState)
+    }
+    for allowance in summary.allowances {
+      let meter = (self.control(id: "allowance-\(allowance.id)") as? AllowanceView)
+        ?? (self.control(id: "allowance-detail-\(allowance.id)") as? AllowanceView)
+        ?? (self.control(id: "secondary-\(allowance.id)") as? AllowanceView)
+      meter?.apply(
+        allowance: allowance, paceState: allowance.isPrimary ? summary.paceState : allowance.paceState,
+        lastUpdated: summary.lastUpdated, now: now)
+      (self.control(id: "secondary-\(allowance.id)") as? SecondaryAllowanceLine)?
+        .apply(allowance: allowance, primaryReset: summary.primary?.resetsAt, now: now)
+    }
+    (self.control(id: "freshness-\(summary.provider.rawValue)") as? ProviderFreshnessBanner)?
+      .apply(summary: summary, now: now)
+    if let grid = self.control(id: "usage-detail-\(summary.provider.rawValue)") as? UsageDetailGrid,
+      !grid.apply(summary: summary, now: now), let stack = grid.superview as? NSStackView
+    {
+      let replacement = UsageDetailGrid(summary: summary, now: now)
+      stack.replaceArrangedSubview(grid, with: replacement)
+      self.regionRebuildCount += 1
+    }
+    if let pinButton = self.control(id: "pin-menu-bar-\(summary.provider.rawValue)") as? NSButton {
+      pinButton.title = isSelectedForMenuBar ? "Pinned" : "Pin \(summary.provider.displayName)"
+      pinButton.toolTip = isSelectedForMenuBar
+        ? "\(summary.provider.displayName) is shown in the menu bar"
+        : "Show \(summary.provider.displayName) in the menu bar"
+      pinButton.setAccessibilityLabel(pinButton.toolTip)
+      pinButton.isEnabled = !isSelectedForMenuBar
+    }
+    self.needsDisplay = true
+    return true
+  }
+
+  private func control(id: String) -> NSView? {
+    Self.walk(self).first { $0.identifier?.rawValue == id }
+  }
+
+  private static func walk(_ view: NSView) -> [NSView] {
+    [view] + view.subviews.flatMap { walk($0) }
+  }
+
+  static func structureKey(
+    summary: ProviderSummary, isExpanded: Bool, showsDisclosure: Bool
+  ) -> String {
+    let secondary = summary.secondary.filter { isExpanded || !$0.isComponentShare }
+    let primaryReset = summary.primary?.resetsAt
+    let secondaryStructure = secondary.map { allowance -> String in
+      let sharesPrimaryReset: Bool
+      if let reset = allowance.resetsAt, let primaryReset {
+        sharesPrimaryReset = abs(primaryReset.timeIntervalSince(reset)) < 1
+      } else {
+        sharesPrimaryReset = false
+      }
+      return "\(allowance.id):\(allowance.isComponentShare):\(sharesPrimaryReset)"
+    }.joined(separator: ",")
+    var parts: [String] = []
+    parts.append(summary.provider.rawValue)
+    parts.append(isExpanded ? "open" : "closed")
+    parts.append(showsDisclosure ? "disclose" : "flat")
+    parts.append(summary.primary?.id ?? "-")
+    parts.append(summary.allowances.map(\.id).joined(separator: ","))
+    parts.append(summary.paceState == .stale ? "stale" : "live")
+    if summary.serviceIsExceptional {
+      let serviceParts: [String] = [
+        summary.serviceStatus?.health.rawValue ?? "service",
+        summary.serviceStatus?.detail ?? "",
+        summary.serviceStatus?.pageURL.absoluteString ?? "",
+        summary.serviceStatus?.notices?.joined(separator: "\u{2}") ?? "",
+      ]
+      parts.append(serviceParts.joined(separator: "\u{3}"))
+    } else {
+      parts.append("-")
+    }
+    parts.append(summary.setupAction?.buttonTitle ?? "-")
+    parts.append(summary.needsConnection ? "needs-connection" : "connected")
+    parts.append(summary.requiresKeychainAccess ? "keychain" : "no-keychain")
+    parts.append(summary.usageAccessDenied ? "access-denied" : "access-ok")
+    parts.append(summary.signInCouldNotStart ? "signin-failed" : "signin-ok")
+    parts.append(summary.isConnecting ? "connecting" : "not-connecting")
+    parts.append(summary.error ?? "-")
+    let localUsageKind: String
+    if let usage = summary.localUsage {
+      localUsageKind = usage.origin == .providerAccount ? "account" : "local"
+    } else {
+      localUsageKind = "no-local"
+    }
+    parts.append(localUsageKind)
+    parts.append(secondaryStructure)
+    parts.append(summary.details.map(\.label).joined(separator: ","))
+    if let primary = summary.primary {
+      let forecast = DashboardFormat.showsForecast(
+        primary, paceState: summary.paceState,
+        observationTimeKnown: summary.observationTimeKnown)
+      parts.append(forecast ? "forecast" : "no-forecast")
+    }
+    if isExpanded {
+      parts.append(summary.subscriptionCostUSD == nil ? "-" : "cost")
+      parts.append(summary.billingRenewsAt == nil ? "-" : "bill")
+      parts.append(summary.includedSpend == nil ? "-" : "spend")
+      parts.append(summary.localUsage?.dailyTokens.contains { $0.tokens > 0 } == true ? "chart" : "-")
+      parts.append(summary.historyPossible ? "hist" : "-")
+      parts.append(summary.localHistoryError == nil ? "-" : "hist-err")
+    }
+    return parts.joined(separator: "\u{1}")
   }
 
   required init?(coder: NSCoder) { nil }
@@ -1165,27 +1716,25 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
       font: ReserveFont.sans(ReserveType.providerName, .semibold),
       color: ReserveColor.text
     ).flexible()
+    name.identifier = NSUserInterfaceItemIdentifier("provider-name-\(summary.provider.rawValue)")
     name.toolTip = summary.planName.isEmpty
       ? summary.provider.displayName : "\(summary.provider.displayName) · \(summary.planName)"
 
-    var identity: [NSView] = [logo, name]
-    if isSelectedForMenuBar {
-      // Configuration state is a quiet mark, never a full-card treatment.
-      let pin = NSImageView(
-        image: NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Shown in menu bar")
-          ?? NSImage())
-      pin.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
-      pin.contentTintColor = ReserveColor.accent
-      pin.toolTip = "Shown in menu bar"
-      pin.setAccessibilityLabel("Shown in menu bar")
-      pin.setAccessibilityElement(false)
-      pin.setAccessibilityLabel("")
-      pin.translatesAutoresizingMaskIntoConstraints = false
-      pin.widthAnchor.constraint(equalToConstant: 12).isActive = true
-      pin.identifier = NSUserInterfaceItemIdentifier(
-        "menu-bar-pin-\(summary.provider.rawValue)")
-      identity.append(pin)
-    }
+    // The pin stays in the row and hides when this provider is not the menu-bar
+    // choice, so pinning does not rebuild the card.
+    let pin = NSImageView(
+      image: NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Shown in menu bar")
+        ?? NSImage())
+    pin.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+    pin.contentTintColor = ReserveColor.accent
+    pin.toolTip = "Shown in menu bar"
+    pin.setAccessibilityElement(false)
+    pin.setAccessibilityLabel("")
+    pin.translatesAutoresizingMaskIntoConstraints = false
+    pin.widthAnchor.constraint(equalToConstant: 12).isActive = true
+    pin.identifier = NSUserInterfaceItemIdentifier("menu-bar-pin-\(summary.provider.rawValue)")
+    pin.isHidden = !isSelectedForMenuBar
+    let identity: [NSView] = [logo, name, pin]
 
     let trailing: NSView
     if let setupAction = summary.setupAction,
@@ -1202,7 +1751,9 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
       connect.toolTip = setupAction.toolTip(for: summary.provider)
       trailing = connect
     } else if let primary = summary.primary {
-      trailing = RemainingValueView(allowance: primary, paceState: summary.paceState)
+      let remaining = RemainingValueView(allowance: primary, paceState: summary.paceState)
+      remaining.identifier = NSUserInterfaceItemIdentifier("remaining-\(summary.provider.rawValue)")
+      trailing = remaining
     } else if let usage = summary.localUsage, usage.origin == .providerAccount {
       let today = DashboardFormat.tokens(usage.todayTokens)
       let value = ReserveLabel(
@@ -1296,39 +1847,12 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
 @MainActor
 private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
   private var spokenClock: ((Date) -> String)?
+  private var messageLabel: ReserveLabel?
+
   init(summary: ProviderSummary, now: Date) {
     super.init(frame: .zero)
     self.identifier = NSUserInterfaceItemIdentifier("freshness-\(summary.provider.rawValue)")
-    let state: String
-    let fullState: String
-    if summary.setupAction == .install {
-      state = "Setup needed"
-      fullState = state
-    } else if summary.setupAction == .update {
-      state = "Update needed"
-      fullState = state
-    } else if summary.usageAccessDenied {
-      state = "Usage access denied"
-      fullState = state
-    } else if summary.requiresKeychainAccess {
-      state = "Waiting for permission"
-      fullState = state
-    } else if summary.setupAction == .addKey {
-      state = "API key needed"
-      fullState = state
-    } else if summary.signInCouldNotStart {
-      state = "Sign-in could not start"
-      fullState = state
-    } else if summary.needsConnection {
-      state = "Sign-in needed"
-      fullState = state
-    } else if summary.error != nil {
-      state = "Usage unavailable"
-      fullState = "Usage temporarily unavailable"
-    } else {
-      state = "Cached"
-      fullState = "Cached data"
-    }
+    let (state, fullState) = Self.stateWords(for: summary)
     let age = summary.lastUpdated.map {
       "last checked \(Self.compactAge(since: $0, now: now))"
     } ?? "not checked yet"
@@ -1363,6 +1887,7 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
     }
     label.identifier = NSUserInterfaceItemIdentifier(
       "freshness-label-\(summary.provider.rawValue)")
+    self.messageLabel = label
     self.toolTip = summary.error ?? fullMessage
     self.setAccessibilityLabel(fullMessage)
 
@@ -1382,6 +1907,34 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
 
   required init?(coder: NSCoder) { nil }
 
+  func apply(summary: ProviderSummary, now: Date) {
+    let (stateWord, fullStateWord) = Self.stateWords(for: summary)
+    let age = summary.lastUpdated.map {
+      "last checked \(Self.compactAge(since: $0, now: now))"
+    } ?? "not checked yet"
+    let fullAge = summary.lastUpdated.map {
+      DashboardFormat.updated($0, now: now).replacingOccurrences(of: "Updated", with: "last updated")
+    } ?? "never updated"
+    self.messageLabel?.setDisplayedText("\(stateWord) · \(age)")
+    let lastUpdated = summary.lastUpdated
+    self.messageLabel?.clockText = { date in
+      let age = lastUpdated.map {
+        "last checked \(Self.compactAge(since: $0, now: date))"
+      } ?? "not checked yet"
+      return "\(stateWord) · \(age)"
+    }
+    self.spokenClock = { date in
+      let age = lastUpdated.map {
+        DashboardFormat.updated($0, now: date).replacingOccurrences(
+          of: "Updated", with: "last updated")
+      } ?? "never updated"
+      return "\(fullStateWord) · \(age)"
+    }
+    let fullMessage = "\(fullStateWord) · \(fullAge)"
+    self.toolTip = summary.error ?? fullMessage
+    self.setAccessibilityLabel(fullMessage)
+  }
+
   func updateClock(_ now: Date) {
     if let spoken = self.spokenClock?(now) { self.setAccessibilityLabel(spoken) }
   }
@@ -1392,11 +1945,26 @@ private final class ProviderFreshnessBanner: NSView, ReserveClockUpdating {
     if seconds < 3_600 { return "\(Int(seconds / 60))m ago" }
     return "\(Int(seconds / 3_600))h ago"
   }
+
+  private static func stateWords(for summary: ProviderSummary) -> (String, String) {
+    if summary.setupAction == .install { return ("Setup needed", "Setup needed") }
+    if summary.setupAction == .update { return ("Update needed", "Update needed") }
+    if summary.usageAccessDenied { return ("Usage access denied", "Usage access denied") }
+    if summary.requiresKeychainAccess { return ("Waiting for permission", "Waiting for permission") }
+    if summary.setupAction == .addKey { return ("API key needed", "API key needed") }
+    if summary.signInCouldNotStart { return ("Sign-in could not start", "Sign-in could not start") }
+    if summary.needsConnection { return ("Sign-in needed", "Sign-in needed") }
+    if summary.error != nil { return ("Usage unavailable", "Usage temporarily unavailable") }
+    return ("Cached", "Cached data")
+  }
 }
 
 /// "80% left" — every percentage states what it measures.
 @MainActor
 private final class RemainingValueView: NSView {
+  private var valueLabel: ReserveLabel?
+  private var unitLabel: ReserveLabel?
+
   init(allowance: Allowance, paceState: UsagePaceState) {
     super.init(frame: .zero)
     let percentage = DashboardFormat.remainingPercent(allowance.remainingPercent)
@@ -1411,6 +1979,8 @@ private final class RemainingValueView: NSView {
     ).fitted()
     value.setAccessibilityLabel(
       "\(percentage) percent \(paceState == .stale ? "last known" : "left"), \(paceState.label)")
+    self.valueLabel = value
+    self.unitLabel = unit
     let row = NSStackView.row([value, unit], spacing: 5)
     row.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(row)
@@ -1420,6 +1990,16 @@ private final class RemainingValueView: NSView {
       row.topAnchor.constraint(equalTo: self.topAnchor),
       row.bottomAnchor.constraint(equalTo: self.bottomAnchor),
     ])
+  }
+
+  func apply(allowance: Allowance, paceState: UsagePaceState) {
+    let percentage = DashboardFormat.remainingPercent(allowance.remainingPercent)
+    let stale = paceState == .stale
+    self.valueLabel?.setDisplayedText(
+      "\(percentage)%", color: stale ? ReserveColor.muted : ReserveColor.text)
+    self.valueLabel?.setAccessibilityLabel(
+      "\(percentage) percent \(stale ? "last known" : "left"), \(paceState.label)")
+    self.unitLabel?.setDisplayedText(stale ? "last known" : "left")
   }
 
   required init?(coder: NSCoder) { nil }
@@ -1506,6 +2086,12 @@ private final class ServiceBanner: ReserveSurface {
 /// The limit window component: title, reset, bar, and one plain-English forecast.
 @MainActor
 private final class AllowanceView: NSView {
+  private var captionLabel: ReserveLabel?
+  private var meterView: ReserveMeter?
+  private var forecastLabel: ReserveLabel?
+  private var detailValueLabel: ReserveLabel?
+  private var isDetail = false
+
   init(
     allowance: Allowance,
     paceState: UsagePaceState,
@@ -1515,6 +2101,7 @@ private final class AllowanceView: NSView {
     showsForecast: Bool = true
   ) {
     super.init(frame: .zero)
+    self.isDetail = isDetail
     self.identifier = NSUserInterfaceItemIdentifier(
       isDetail ? "allowance-detail-\(allowance.id)" : "allowance-\(allowance.id)")
 
@@ -1530,6 +2117,7 @@ private final class AllowanceView: NSView {
         "\(DashboardFormat.remainingPercent(allowance.remainingPercent))% left",
         font: ReserveFont.digits(ReserveType.body, .semibold), color: ReserveColor.text
       ).fitted()
+      self.detailValueLabel = left
       header = [NSStackView.row([title, NSStackView.spacer(), left], spacing: 8)]
     }
 
@@ -1543,6 +2131,7 @@ private final class AllowanceView: NSView {
       color: ReserveColor.muted
     ).flexible()
     caption.toolTip = captionText
+    self.captionLabel = caption
     caption.clockText = { date in isDetail ? DashboardFormat.resetLine(allowance, now: date) : DashboardFormat.limitLine(allowance, now: date) }
 
     let meter = ReserveMeter(
@@ -1560,6 +2149,7 @@ private final class AllowanceView: NSView {
     }
     meter.heightAnchor.constraint(equalToConstant: DashboardMetrics.meterHeight).isActive = true
     meter.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+    self.meterView = meter
 
     let forecast = ReserveLabel(
       DashboardFormat.forecast(
@@ -1577,6 +2167,7 @@ private final class AllowanceView: NSView {
       return DashboardFormat.forecast(current, paceState: state, lastUpdated: lastUpdated, now: date)
     }
     forecast.identifier = NSUserInterfaceItemIdentifier("forecast")
+    self.forecastLabel = forecast
     forecast.toolTip = DashboardFormat.forecast(
       allowance, paceState: paceState, lastUpdated: lastUpdated, now: now)
 
@@ -1594,6 +2185,51 @@ private final class AllowanceView: NSView {
     ])
   }
 
+  func apply(allowance: Allowance, paceState: UsagePaceState, lastUpdated: Date?, now: Date) {
+    let captionText = self.isDetail
+      ? DashboardFormat.resetLine(allowance, now: now)
+      : DashboardFormat.limitLine(allowance, now: now)
+    self.captionLabel?.setDisplayedText(captionText)
+    let isDetail = self.isDetail
+    self.captionLabel?.clockText = { date in
+      isDetail
+        ? DashboardFormat.resetLine(allowance, now: date)
+        : DashboardFormat.limitLine(allowance, now: date)
+    }
+    self.detailValueLabel?.setDisplayedText(
+      "\(DashboardFormat.remainingPercent(allowance.remainingPercent))% left")
+    self.meterView?.applyReading(
+      remainingPercent: allowance.remainingPercent,
+      paceRemainingPercent: paceState == .stale ? nil : allowance.expectedPercent.map { 100 - $0 },
+      color: paceState.color,
+      isStale: paceState == .stale)
+    self.meterView?.clockPresentation = { date in
+      let window = UsageWindow(
+        id: allowance.id, label: allowance.title, usedPercent: allowance.usedPercent,
+        windowMinutes: allowance.windowMinutes, resetsAt: allowance.resetsAt)
+      let state = UsagePaceState.calculate(
+        for: window, fetchedAt: lastUpdated, hasError: paceState == .stale, now: date)
+      let projection = state == .stale ? nil : UsagePaceProjection.calculate(for: window, now: date)
+      return (projection.map { 100 - $0.elapsedPercent }, state == .stale)
+    }
+    let forecastText = DashboardFormat.forecast(
+      allowance, paceState: paceState, lastUpdated: lastUpdated, now: now)
+    let forecastColor = paceState == .exhausted || paceState.deficitPercent != nil
+      ? paceState.color : ReserveColor.muted
+    self.forecastLabel?.setDisplayedText(forecastText, color: forecastColor)
+    self.forecastLabel?.clockText = { date in
+      let window = UsageWindow(
+        id: allowance.id, label: allowance.title, usedPercent: allowance.usedPercent,
+        windowMinutes: allowance.windowMinutes, resetsAt: allowance.resetsAt)
+      var current = allowance
+      current.projection = paceState == .stale
+        ? nil : UsagePaceProjection.calculate(for: window, now: date)
+      let state = UsagePaceState.calculate(
+        for: window, fetchedAt: lastUpdated, hasError: paceState == .stale, now: date)
+      return DashboardFormat.forecast(current, paceState: state, lastUpdated: lastUpdated, now: date)
+    }
+  }
+
   required init?(coder: NSCoder) { nil }
 }
 
@@ -1602,38 +2238,8 @@ private final class AllowanceView: NSView {
 private final class SecondaryAllowanceRow: NSView {
   init(allowances: [Allowance], primaryReset: Date?, now: Date) {
     super.init(frame: .zero)
-    let lines = allowances.map { allowance -> NSView in
-      let title = ReserveLabel(
-        allowance.title, font: ReserveFont.sans(ReserveType.metadata, .medium),
-        color: ReserveColor.muted)
-      let value = ReserveLabel(
-        (allowance.isComponentShare
-          ? "\(DashboardFormat.remainingPercent(allowance.usedPercent))% of pool used"
-          : "\(DashboardFormat.remainingPercent(allowance.remainingPercent))% \(allowance.paceState == .stale ? "last known" : "left")"),
-        font: ReserveFont.digits(ReserveType.metadata, .medium),
-        color: ReserveColor.text
-      ).fitted()
-      title.flexible()
-      var informationViews: [NSView] = [title, value]
-      let sharesPrimaryReset =
-        allowance.resetsAt.flatMap { reset in primaryReset.map { abs($0.timeIntervalSince(reset)) < 1 } }
-        ?? false
-      if !sharesPrimaryReset {
-        let detail = ReserveLabel(
-          DashboardFormat.secondaryDetail(allowance, now: now),
-          font: ReserveFont.sans(ReserveType.metadata),
-          color: ReserveColor.muted
-        ).fitted()
-        detail.clockText = { date in DashboardFormat.secondaryDetail(allowance, now: date) }
-        informationViews.append(detail)
-      }
-      let information = NSStackView.row(informationViews, spacing: 7)
-      information.setContentHuggingPriority(.required, for: .horizontal)
-      let row = NSStackView.row(
-        [information, NSStackView.spacer()], spacing: 0)
-      row.identifier = NSUserInterfaceItemIdentifier("secondary-\(allowance.id)")
-      row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
-      return row
+    let lines = allowances.map {
+      SecondaryAllowanceLine(allowance: $0, primaryReset: primaryReset, now: now)
     }
     let stack = NSStackView.column(lines, spacing: 5)
     stack.translatesAutoresizingMaskIntoConstraints = false
@@ -1648,6 +2254,67 @@ private final class SecondaryAllowanceRow: NSView {
   }
 
   required init?(coder: NSCoder) { nil }
+}
+
+@MainActor
+private final class SecondaryAllowanceLine: NSView {
+  private let titleLabel: ReserveLabel
+  private let valueLabel: ReserveLabel
+  private var detailLabel: ReserveLabel?
+
+  init(allowance: Allowance, primaryReset: Date?, now: Date) {
+    self.titleLabel = ReserveLabel(
+      allowance.title, font: ReserveFont.sans(ReserveType.metadata, .medium),
+      color: ReserveColor.muted).flexible()
+    self.valueLabel = ReserveLabel(
+      "", font: ReserveFont.digits(ReserveType.metadata, .medium), color: ReserveColor.text
+    ).fitted()
+    super.init(frame: .zero)
+    self.identifier = NSUserInterfaceItemIdentifier("secondary-\(allowance.id)")
+    var informationViews: [NSView] = [self.titleLabel, self.valueLabel]
+    if !Self.sharesPrimaryReset(allowance, primaryReset: primaryReset) {
+      let detail = ReserveLabel(
+        "", font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+      ).fitted()
+      self.detailLabel = detail
+      informationViews.append(detail)
+    }
+    let information = NSStackView.row(informationViews, spacing: 7)
+    information.setContentHuggingPriority(.required, for: .horizontal)
+    let row = NSStackView.row([information, NSStackView.spacer()], spacing: 0)
+    row.translatesAutoresizingMaskIntoConstraints = false
+    self.addSubview(row)
+    NSLayoutConstraint.activate([
+      row.leadingAnchor.constraint(equalTo: self.leadingAnchor),
+      row.trailingAnchor.constraint(equalTo: self.trailingAnchor),
+      row.topAnchor.constraint(equalTo: self.topAnchor),
+      row.bottomAnchor.constraint(equalTo: self.bottomAnchor),
+      self.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth),
+    ])
+    self.apply(allowance: allowance, primaryReset: primaryReset, now: now)
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  func apply(allowance: Allowance, primaryReset: Date?, now: Date) {
+    self.titleLabel.setDisplayedText(allowance.title)
+    let value = allowance.isComponentShare
+      ? "\(DashboardFormat.remainingPercent(allowance.usedPercent))% of pool used"
+      : "\(DashboardFormat.remainingPercent(allowance.remainingPercent))% \(allowance.paceState == .stale ? "last known" : "left")"
+    self.valueLabel.setDisplayedText(value)
+    let detailText = DashboardFormat.secondaryDetail(allowance, now: now)
+    self.detailLabel?.setDisplayedText(detailText)
+    let capturedAllowance = allowance
+    self.detailLabel?.clockText = { date in
+      DashboardFormat.secondaryDetail(capturedAllowance, now: date)
+    }
+  }
+
+  private static func sharesPrimaryReset(_ allowance: Allowance, primaryReset: Date?) -> Bool {
+    allowance.resetsAt.flatMap { reset in
+      primaryReset.map { abs($0.timeIntervalSince(reset)) < 1 }
+    } ?? false
+  }
 }
 
 /// The disclosure that opens a provider's additional limits and usage. It is a button,
@@ -1731,137 +2398,45 @@ final class APIDetailDisclosureButton: NSButton {
 /// carries.
 @MainActor
 private final class UsageDetailGrid: NSView {
+  private enum ClockValue {
+    case none
+    case age(Date)
+    case moment(Date)
+  }
+
+  private struct RowSpec {
+    enum Kind: String { case fact, cell, note, chart }
+    let kind: Kind
+    let id: String
+    let label: String
+    let value: String
+    var clock: ClockValue = .none
+    var alternateValues: [String] = []
+    var series: [DailyUsage] = []
+
+    var structureKey: String { "\(self.kind.rawValue)\u{1}\(self.id)\u{1}\(self.label)" }
+  }
+
+  private enum RowBinding {
+    enum WidthPolicy { case fitted, capped(CGFloat), fixed(CGFloat) }
+    case value(label: ReserveLabel, width: WidthPolicy)
+    case note(ReserveLabel)
+    case chart(ReserveSparkline)
+  }
+
+  private var renderedStructure: [String] = []
+  private var bindings: [RowBinding] = []
+
   init(summary: ProviderSummary, now: Date = Date()) {
     super.init(frame: .zero)
     self.identifier = NSUserInterfaceItemIdentifier("usage-detail-\(summary.provider.rawValue)")
-    let usage = summary.localUsage
-    let accountData = usage?.origin == .providerAccount
-    // Who is signed in and what the provider says about the account come first.
-    var rows: [NSView] = summary.details.map { Self.fact($0.label, $0.value) }
-    if let usage {
-      rows.append(
-        Self.cell(
-          accountData ? "Tokens today" : "Local tokens today",
-          DashboardFormat.tokens(usage.todayTokens)))
-      rows.append(
-        Self.cell(
-          accountData ? "Tokens, last 30 days" : "Local tokens, last 30 days",
-          DashboardFormat.tokens(usage.totalTokens)))
-      rows.append(
-        Self.cell(
-          accountData ? "Usage value" : "Estimated API value",
-          // API-equivalent value is modeled from token counts either way, so it
-          // carries the approximation mark.
-          "≈ \(DashboardFormat.money(usage.apiEquivalentCostUSD))"))
-      if usage.inputTokens > 0 || usage.outputTokens > 0 {
-        rows.append(
-          Self.fact(
-            "Input / output, 30 days",
-            "\(DashboardFormat.tokens(usage.inputTokens)) / \(DashboardFormat.tokens(usage.outputTokens))"))
-      }
-      if usage.cachedInputTokens > 0 {
-        rows.append(
-          Self.fact(
-            "Cached tokens, 30 days",
-            DashboardFormat.tokens(usage.cachedInputTokens)))
-      }
-    }
-    if let models = usage?.modelCosts.prefix(3), !models.isEmpty {
-      let text = models.map {
-        "\($0.model) \(DashboardFormat.money($0.costUSD))"
-      }.joined(separator: " · ")
-      rows.append(Self.cell("Models", text))
-    }
-    if let series = usage?.dailyTokens, series.contains(where: { $0.tokens > 0 }) {
-      let chart = ReserveSparkline(series: series, color: ReserveColor.chartPrimary)
-      chart.identifier = NSUserInterfaceItemIdentifier(
-        "usage-chart-\(summary.provider.rawValue)")
-      chart.translatesAutoresizingMaskIntoConstraints = false
-      chart.heightAnchor.constraint(equalToConstant: 26).isActive = true
-      chart.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive =
-        true
-      let caption = ReserveLabel(
-        "Daily tokens · last \(series.count) days · compressed scale",
-        font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.subtle
-      ).flexible()
-      caption.toolTip = ReserveSparkline.scaleExplanation
-      rows.append(contentsOf: [chart, caption])
-    }
-    if let cost = summary.subscriptionCostUSD {
-      rows.append(Self.cell(summary.subscriptionCostLabel ?? "Monthly cost", DashboardFormat.money(cost)))
-    }
-    if let renewal = summary.billingRenewsAt, renewal > now {
-      rows.append(Self.cell("Renews", DashboardFormat.moment(renewal, now: now)))
-    }
-    if let count = summary.availableResetCount, count > 0 {
-      rows.append(Self.cell("Resets available", String(count)))
-    }
-    if let balance = summary.creditBalanceMinorUnits, balance > 0 {
-      rows.append(Self.cell("Extra usage balance", DashboardFormat.money(Double(balance) / 100)))
-    }
-    if let spend = summary.includedSpend {
-      let value: String =
-        switch spend.limitState {
-        case .disabled: "Off"
-        case .unlimited:
-          "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) used · unlimited"
-        case .capped:
-          "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) of \(DashboardFormat.money(Double(spend.limitMinorUnits) / 100)) · \(DashboardFormat.money(Double(spend.remainingMinorUnits ?? 0) / 100)) left"
-        }
-      rows.append(Self.cell(spend.label, value))
-    }
-    // A renewal the provider does not report but the person entered a billing
-    // day for is still worth showing, and is named for where it came from.
-    if summary.billingRenewsAt == nil, let renewal = summary.nextRenewal, renewal > now {
-      rows.append(
-        Self.cell(
-          "Plan renews", DashboardFormat.moment(renewal, now: now),
-          identifier: "usage-renews-\(summary.provider.rawValue)"))
-    }
-    // Anything the status page reports right now, not only a provider-wide outage.
-    for notice in summary.serviceStatus?.notices ?? [] {
-      rows.append(Self.fact("Service", notice))
-    }
-    // The data source is deliberately not listed here: it names transports
-    // ("Codex app-server", "Claude OAuth") that mean nothing to most people.
-    // Settings > Providers still shows it for anyone who wants it.
-    if let checked = summary.checkedAt ?? summary.lastUpdated {
-      rows.append(
-        Self.cell(
-          "Last checked", Self.age(checked, now: now),
-          identifier: "usage-checked-\(summary.provider.rawValue)",
-          alternateValues: ["just now", "59 min ago", "999h ago"],
-          clockText: { date in Self.age(checked, now: date) }))
-    }
-    if summary.localHistorySupported, summary.localHistoryEnabled {
-      if let failure = summary.localHistoryError {
-        let note = ReserveLabel(
-          failure, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
-        ).flexible()
-        note.identifier = NSUserInterfaceItemIdentifier(
-          "usage-local-history-error-\(summary.provider.rawValue)")
-        note.toolTip = failure
-        rows.append(note)
-      }
-    }
-    // The detail view says what it is waiting for rather than showing nothing.
-    // Copilot has neither local logs nor account history, so it says nothing.
-    if usage == nil, summary.historyPossible {
-      let message: String
-      if !summary.localHistorySupported {
-        message = "Gathering account activity…"
-      } else if summary.localHistoryEnabled {
-        message = "Gathering activity from this Mac…"
-      } else {
-        message = "Activity from this Mac is off · turn it on in Settings"
-      }
-      let note = ReserveLabel(
-        message, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
-      ).flexible()
-      note.identifier = NSUserInterfaceItemIdentifier(
-        "usage-history-note-\(summary.provider.rawValue)")
-      note.toolTip = message
-      rows.append(note)
+    let specs = Self.specs(summary: summary, now: now)
+    self.renderedStructure = specs.map(\.structureKey)
+    var rows: [NSView] = []
+    for spec in specs {
+      let (view, binding) = Self.makeRow(spec)
+      rows.append(view)
+      self.bindings.append(binding)
     }
     let stack = NSStackView.column(rows, spacing: 8)
     stack.translatesAutoresizingMaskIntoConstraints = false
@@ -1877,17 +2452,235 @@ private final class UsageDetailGrid: NSView {
 
   required init?(coder: NSCoder) { nil }
 
+  /// Values and clocks change far more often than the set of rows. Keep every
+  /// existing control when the row anatomy is stable; a caller replaces this
+  /// region only when a row appears, disappears, or changes kind.
+  func apply(summary: ProviderSummary, now: Date) -> Bool {
+    let specs = Self.specs(summary: summary, now: now)
+    guard specs.map(\.structureKey) == self.renderedStructure,
+      specs.count == self.bindings.count
+    else { return false }
+    for (binding, spec) in zip(self.bindings, specs) {
+      switch binding {
+      case .value(let label, let width):
+        label.setDisplayedText(spec.value)
+        label.clockText = Self.clockText(spec.clock)
+        Self.resize(label, policy: width)
+      case .note(let label):
+        label.setDisplayedText(spec.value)
+        label.toolTip = spec.id.hasPrefix("chart-caption")
+          ? ReserveSparkline.scaleExplanation : spec.value
+      case .chart(let chart):
+        chart.apply(series: spec.series)
+      }
+    }
+    return true
+  }
+
+  private static func specs(summary: ProviderSummary, now: Date) -> [RowSpec] {
+    let provider = summary.provider.rawValue
+    let usage = summary.localUsage
+    let accountData = usage?.origin == .providerAccount
+    var rows = summary.details.enumerated().map { index, detail in
+      RowSpec(kind: .fact, id: "detail-\(index)", label: detail.label, value: detail.value)
+    }
+    if let usage {
+      rows.append(RowSpec(
+        kind: .cell, id: "tokens-today",
+        label: accountData ? "Tokens today" : "Local tokens today",
+        value: DashboardFormat.tokens(usage.todayTokens)))
+      rows.append(RowSpec(
+        kind: .cell, id: "tokens-period",
+        label: accountData ? "Tokens, last 30 days" : "Local tokens, last 30 days",
+        value: DashboardFormat.tokens(usage.totalTokens)))
+      rows.append(RowSpec(
+        kind: .cell, id: "usage-value",
+        label: accountData ? "Usage value" : "Estimated API value",
+        value: "≈ \(DashboardFormat.money(usage.apiEquivalentCostUSD))"))
+      if usage.inputTokens > 0 || usage.outputTokens > 0 {
+        rows.append(RowSpec(
+          kind: .fact, id: "input-output", label: "Input / output, 30 days",
+          value: "\(DashboardFormat.tokens(usage.inputTokens)) / \(DashboardFormat.tokens(usage.outputTokens))"))
+      }
+      if usage.cachedInputTokens > 0 {
+        rows.append(RowSpec(
+          kind: .fact, id: "cached-tokens", label: "Cached tokens, 30 days",
+          value: DashboardFormat.tokens(usage.cachedInputTokens)))
+      }
+      if !usage.modelCosts.isEmpty {
+        let value = usage.modelCosts.prefix(3).map {
+          "\($0.model) \(DashboardFormat.money($0.costUSD))"
+        }.joined(separator: " · ")
+        rows.append(RowSpec(kind: .cell, id: "models", label: "Models", value: value))
+      }
+      if usage.dailyTokens.contains(where: { $0.tokens > 0 }) {
+        rows.append(RowSpec(
+          kind: .chart, id: "usage-chart-\(provider)", label: "", value: "",
+          series: usage.dailyTokens))
+        rows.append(RowSpec(
+          kind: .note, id: "chart-caption-\(provider)", label: "", value:
+            "Daily tokens · last \(usage.dailyTokens.count) days · compressed scale"))
+      }
+    }
+    if let cost = summary.subscriptionCostUSD {
+      rows.append(RowSpec(
+        kind: .cell, id: "subscription-cost",
+        label: summary.subscriptionCostLabel ?? "Monthly cost",
+        value: DashboardFormat.money(cost)))
+    }
+    if let renewal = summary.billingRenewsAt, renewal > now {
+      rows.append(RowSpec(
+        kind: .cell, id: "billing-renewal", label: "Renews",
+        value: DashboardFormat.moment(renewal, now: now), clock: .moment(renewal)))
+    }
+    if let count = summary.availableResetCount, count > 0 {
+      rows.append(RowSpec(
+        kind: .cell, id: "available-resets", label: "Resets available", value: String(count)))
+    }
+    if let balance = summary.creditBalanceMinorUnits, balance > 0 {
+      rows.append(RowSpec(
+        kind: .cell, id: "extra-balance", label: "Extra usage balance",
+        value: DashboardFormat.money(Double(balance) / 100)))
+    }
+    if let spend = summary.includedSpend {
+      let value: String = switch spend.limitState {
+      case .disabled: "Off"
+      case .unlimited:
+        "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) used · unlimited"
+      case .capped:
+        "\(DashboardFormat.money(Double(spend.usedMinorUnits) / 100)) of \(DashboardFormat.money(Double(spend.limitMinorUnits) / 100)) · \(DashboardFormat.money(Double(spend.remainingMinorUnits ?? 0) / 100)) left"
+      }
+      rows.append(RowSpec(kind: .cell, id: "included-spend", label: spend.label, value: value))
+    }
+    if summary.billingRenewsAt == nil, let renewal = summary.nextRenewal, renewal > now {
+      rows.append(RowSpec(
+        kind: .cell, id: "usage-renews-\(provider)", label: "Plan renews",
+        value: DashboardFormat.moment(renewal, now: now), clock: .moment(renewal)))
+    }
+    for (index, notice) in (summary.serviceStatus?.notices ?? []).enumerated() {
+      rows.append(RowSpec(kind: .fact, id: "service-\(index)", label: "Service", value: notice))
+    }
+    if let checked = summary.checkedAt ?? summary.lastUpdated {
+      rows.append(RowSpec(
+        kind: .cell, id: "usage-checked-\(provider)", label: "Last checked",
+        value: Self.age(checked, now: now), clock: .age(checked),
+        alternateValues: ["just now", "59 min ago", "999h ago"]))
+    }
+    if summary.localHistorySupported, summary.localHistoryEnabled,
+      let failure = summary.localHistoryError
+    {
+      rows.append(RowSpec(
+        kind: .note, id: "usage-local-history-error-\(provider)", label: "", value: failure))
+    }
+    if usage == nil, summary.historyPossible {
+      let message = !summary.localHistorySupported
+        ? "Gathering account activity…"
+        : summary.localHistoryEnabled
+          ? "Gathering activity from this Mac…"
+          : "Activity from this Mac is off · turn it on in Settings"
+      rows.append(RowSpec(
+        kind: .note, id: "usage-history-note-\(provider)", label: "", value: message))
+    }
+    return rows
+  }
+
+  private static func makeRow(_ spec: RowSpec) -> (NSView, RowBinding) {
+    switch spec.kind {
+    case .fact:
+      let caption = ReserveLabel(
+        spec.label, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+      ).fitted()
+      caption.setContentCompressionResistancePriority(.required, for: .horizontal)
+      let value = ReserveLabel(
+        spec.value, font: ReserveFont.digits(ReserveType.metadata, .semibold),
+        color: ReserveColor.text)
+      value.lineBreakMode = .byTruncatingMiddle
+      value.toolTip = spec.value
+      let spacing: CGFloat = 12
+      let maximum = max(
+        40, DashboardMetrics.cardContentWidth
+          - ceil(caption.attributedStringValue.size().width) - 2 - spacing)
+      value.width(min(ceil(value.attributedStringValue.size().width) + 2, maximum))
+      let row = NSStackView.row([caption, NSStackView.spacer(), value], spacing: spacing)
+      row.identifier = NSUserInterfaceItemIdentifier("usage-fact")
+      row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+      return (row, .value(label: value, width: .capped(maximum)))
+    case .cell:
+      let caption = ReserveLabel(
+        spec.label, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
+      ).fitted()
+      let value = ReserveLabel(
+        spec.value, font: ReserveFont.digits(ReserveType.metadata, .semibold),
+        color: ReserveColor.text)
+      let width: RowBinding.WidthPolicy
+      if spec.alternateValues.isEmpty {
+        value.fitted()
+        width = .fitted
+      } else {
+        let candidates = spec.alternateValues + [spec.value]
+        let widest = candidates.map { candidate -> CGFloat in
+          value.setDisplayedText(candidate)
+          return ceil(value.attributedStringValue.size().width)
+        }.max() ?? 0
+        value.setDisplayedText(spec.value)
+        value.width(widest + 2)
+        width = .fixed(widest + 2)
+      }
+      value.clockText = Self.clockText(spec.clock)
+      let row = NSStackView.row([caption, NSStackView.spacer(), value], spacing: 7)
+      row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+      row.identifier = NSUserInterfaceItemIdentifier(spec.id)
+      return (row, .value(label: value, width: width))
+    case .note:
+      let color = spec.id.hasPrefix("chart-caption") ? ReserveColor.subtle : ReserveColor.muted
+      let label = ReserveLabel(
+        spec.value, font: ReserveFont.sans(ReserveType.metadata), color: color
+      ).flexible()
+      label.identifier = NSUserInterfaceItemIdentifier(spec.id)
+      label.toolTip = spec.id.hasPrefix("chart-caption")
+        ? ReserveSparkline.scaleExplanation : spec.value
+      return (label, .note(label))
+    case .chart:
+      let chart = ReserveSparkline(series: spec.series, color: ReserveColor.chartPrimary)
+      chart.identifier = NSUserInterfaceItemIdentifier(spec.id)
+      chart.translatesAutoresizingMaskIntoConstraints = false
+      chart.heightAnchor.constraint(equalToConstant: 26).isActive = true
+      chart.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
+      return (chart, .chart(chart))
+    }
+  }
+
+  private static func clockText(_ clock: ClockValue) -> ((Date) -> String)? {
+    switch clock {
+    case .none: nil
+    case .age(let date): { now in Self.age(date, now: now) }
+    case .moment(let date): { now in DashboardFormat.moment(date, now: now) }
+    }
+  }
+
+  private static func resize(_ label: ReserveLabel, policy: RowBinding.WidthPolicy) {
+    let desired: CGFloat
+    switch policy {
+    case .fitted:
+      // `setDisplayedText` updates labels created with `fitted()`.
+      return
+    case .capped(let maximum):
+      desired = min(ceil(label.attributedStringValue.size().width) + 2, maximum)
+    case .fixed(let width):
+      desired = width
+    }
+    guard let constraint = label.constraints.first(where: {
+      $0.firstAttribute == .width && $0.relation == .equal && $0.secondItem == nil && $0.isActive
+    }) else { return }
+    constraint.constant = desired
+  }
+
   /// "just now", "12 min ago", "3h ago" — the freshness phrase without the
   /// sentence the banner wraps it in.
   private static func age(_ date: Date, now: Date) -> String {
     DashboardFormat.updated(date, now: now).replacingOccurrences(of: "Updated ", with: "")
   }
 
-  /// A label and a value that may be long, such as an email address. The value
-  /// takes the remaining width and truncates in the middle, keeping both ends.
-  private static func fact(_ label: String, _ value: String) -> NSView {
-    DashboardFact.row(label, value, width: DashboardMetrics.cardContentWidth)
-  }
 }
 
 /// A label and a value that may be long, such as an email address or a model
@@ -1912,40 +2705,6 @@ enum DashboardFact {
     let row = NSStackView.row([caption, NSStackView.spacer(), valueLabel], spacing: spacing)
     row.identifier = NSUserInterfaceItemIdentifier("usage-fact")
     row.widthAnchor.constraint(equalToConstant: width).isActive = true
-    return row
-  }
-}
-
-extension UsageDetailGrid {
-
-  private static func cell(
-    _ label: String, _ value: String, identifier: String? = nil,
-    alternateValues: [String] = [], clockText: ((Date) -> String)? = nil
-  ) -> NSView {
-    let caption = ReserveLabel(
-      label, font: ReserveFont.sans(ReserveType.metadata), color: ReserveColor.muted
-    ).fitted()
-    let valueLabel = ReserveLabel(
-      value, font: ReserveFont.digits(ReserveType.metadata, .semibold), color: ReserveColor.text
-    )
-    // A single-line field reports no intrinsic width, so every value here is
-    // pinned to a measured one. A value the clock rewrites is measured against
-    // the widest wording it can take, not the one it happened to draw first.
-    if alternateValues.isEmpty {
-      valueLabel.fitted()
-    } else {
-      var widest = ceil(valueLabel.attributedStringValue.size().width)
-      for candidate in alternateValues {
-        valueLabel.stringValue = candidate
-        widest = max(widest, ceil(valueLabel.attributedStringValue.size().width))
-      }
-      valueLabel.stringValue = value
-      valueLabel.width(widest + 2)
-    }
-    valueLabel.clockText = clockText
-    let row = NSStackView.row([caption, NSStackView.spacer(), valueLabel], spacing: 7)
-    row.widthAnchor.constraint(equalToConstant: DashboardMetrics.cardContentWidth).isActive = true
-    if let identifier { row.identifier = NSUserInterfaceItemIdentifier(identifier) }
     return row
   }
 }

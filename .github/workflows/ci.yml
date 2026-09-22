@@ -76,6 +76,14 @@ jobs:
         timeout-minutes: 10
         run: make connection-test
 
+      - name: Run refresh recovery checks
+        timeout-minutes: 10
+        run: make reliability-test
+
+      - name: Run UI stress gate
+        timeout-minutes: 10
+        run: make stress-ui
+
       - name: Exercise Universal 2 package path without credentials
         timeout-minutes: 20
         run: make package-dry

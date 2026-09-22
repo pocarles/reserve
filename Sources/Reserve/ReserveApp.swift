@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import Network
 import ServiceManagement
 import ReserveCore
 
@@ -54,7 +55,8 @@ enum ReserveApp {
     }
     #if RESERVE_DEV_AUTOMATION
       let automatedArguments = [
-        "--self-test-ui", "--self-test-lifecycle", "--self-test-connections", "--stress-ui",
+        "--self-test-ui", "--self-test-lifecycle", "--self-test-connections",
+        "--self-test-reliability", "--stress-ui",
         "--render-dashboard", "--render-settings", "--render-appearance",
         "--render-about", "--render-alerts", "--render-insights",
         "--render-providers", "--render-api", "--render-menu-bar", "--render-provider-setup",
@@ -120,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var providerSetupCoordinator: ProviderSetupCoordinator?
   private var updater: ReserveUpdater?
   private var hotKeyController: DashboardHotKeyController?
+  private var pathMonitor: NWPathMonitor?
 
   private static let uiSelfTestDefaultsSuite = "Reserve.UISelfTest"
 
@@ -166,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let shareRenderIndex = CommandLine.arguments.firstIndex(of: "--render-share-card")
     let insightsOpaqueIndex = CommandLine.arguments.firstIndex(of: "--render-insights-opaque")
     let isUIStressTest = CommandLine.arguments.contains("--stress-ui")
+    let isReliabilitySelfTest = CommandLine.arguments.contains("--self-test-reliability")
     let isLifecycleSelfTest = CommandLine.arguments.contains("--self-test-lifecycle")
     let isClaudePromptPreview = CommandLine.arguments.contains("--show-claude-prompt")
     let isCursorPromptPreview = CommandLine.arguments.contains("--show-cursor-prompt")
@@ -178,7 +182,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       || providerSetupRenderIndex != nil
       || shareRenderIndex != nil
       || insightsOpaqueIndex != nil
-      || isUIStressTest || isLifecycleSelfTest || lifecycleCaptureIndex != nil
+      || isUIStressTest || isReliabilitySelfTest || isLifecycleSelfTest
+      || lifecycleCaptureIndex != nil
       || isNotificationVerification || isClaudePromptPreview || isCursorPromptPreview
     let store: UsageStore
     if isAutomatedRun {
@@ -239,6 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSWorkspace.shared.notificationCenter.addObserver(
       self, selector: #selector(self.computerDidWake),
       name: NSWorkspace.didWakeNotification, object: nil)
+    if !isAutomatedRun { self.observeRefreshEnvironment() }
     self.statusController = StatusItemController(
       store: store,
       openSettings: { [weak self] in self?.showSettings() },
@@ -313,6 +319,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       self.verifyNotifications()
     } else if isUIStressTest {
       self.runUIStressTest()
+    } else if isReliabilitySelfTest {
+      self.runReliabilitySelfTest()
     } else if let lifecycleCaptureIndex,
       CommandLine.arguments.indices.contains(lifecycleCaptureIndex + 1)
     {
@@ -694,6 +702,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     self.store?.refreshAfterResumeIfNeeded()
   }
 
+  /// Low Power Mode and offline reach the store through the hook it exposes.
+  /// Automated runs do not start this, so a self-test does not touch the network.
+  private func observeRefreshEnvironment() {
+    self.store?.noteRefreshEnvironment(
+      lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(self.powerStateChanged),
+      name: Notification.Name.NSProcessInfoPowerStateDidChange, object: nil)
+    let monitor = NWPathMonitor()
+    monitor.pathUpdateHandler = { [weak self] path in
+      let offline = path.status != .satisfied
+      Task { @MainActor in
+        self?.store?.noteRefreshEnvironment(offline: offline)
+      }
+    }
+    monitor.start(queue: DispatchQueue(label: "reserve.refresh-environment"))
+    self.pathMonitor = monitor
+  }
+
+  @objc private func powerStateChanged() {
+    self.store?.noteRefreshEnvironment(
+      lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled)
+  }
+
   /// Drives real state transitions through the live surfaces: appearance changes
   /// while both are open, and provider disclosure with the popover on screen.
   private func runLifecycleSelfTest() {
@@ -825,6 +857,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
 
       var failures: [String] = []
+      let liveIdentity = LifecycleSelfTest.checkLiveUpdateIdentity(
+        store: store, controller: statusController, settings: settingsController)
+      failures.append(contentsOf: liveIdentity.failures)
       if !settingsController.exerciseUpdatePresentationForSelfTest() {
         failures.append("Settings did not move aside and return around the update prompt")
       }
@@ -878,6 +913,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         failures.append("the status-item width remained locked after the popover closed")
       }
 
+      failures.append(contentsOf: LifecycleSelfTest.checkSettingsLiveValues().failures)
+      failures.append(contentsOf: await DashboardUpdateSelfTest.run())
       Self.finishUISelfTest(
         success: failures.isEmpty,
         details: failures.isEmpty
@@ -886,7 +923,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             + "anchored, opening keeps the status item fixed, provider navigation stays anchored "
             + "and never loses a tile, enabling a provider moves only that provider, and the "
             + "store notifies every observer; local activity stays distinct from plan limits"
-          : "\(failures.count) lifecycle failures: " + failures.prefix(12).joined(separator: " | "))
+          : "\(failures.count) lifecycle failures: " + failures.joined(separator: " | "))
     }
   }
 
@@ -1024,9 +1061,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       settingsController.window?.close()
       try? await Task.sleep(for: .seconds(3))
       let footprintBefore = Self.physicalFootprintBytes()
-      for _ in 0..<30 {
+      for _ in 0..<UIPerformanceBudget.openCloseCycles {
         statusController.showMenu()
         try? await Task.sleep(for: .milliseconds(100))
+        guard statusController.dashboardHasContentForTesting else {
+          Self.finishUISelfTest(success: false, details: "a reopened dashboard was empty")
+          return
+        }
         statusController.closeMenuForStressTest()
         try? await Task.sleep(for: .milliseconds(100))
         settingsController.showWindow(nil)
@@ -1046,10 +1087,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       } else {
         memoryDetails = ", physical footprint unavailable"
       }
-      Self.finishUISelfTest(
-        success: true, details: "30 popover/settings open-close cycles completed" + memoryDetails)
+      let growthBytes: UInt64?
+      if let footprintBefore, let footprintAfter, footprintAfter >= footprintBefore {
+        growthBytes = footprintAfter - footprintBefore
+      } else if footprintBefore == nil || footprintAfter == nil {
+        growthBytes = nil
+      } else {
+        growthBytes = 0
+      }
+      guard let growthBytes else {
+        Self.finishUISelfTest(
+          success: false,
+          details: "30 popover/settings cycles ran but physical footprint was unavailable"
+            + memoryDetails)
+        return
+      }
+      guard let store = self.store else {
+        Self.finishUISelfTest(success: false, details: "stress test lost its store")
+        return
+      }
+      statusController.showMenu()
+      try? await Task.sleep(for: .milliseconds(300))
+      guard statusController.isDashboardShownForTesting else {
+        Self.finishUISelfTest(
+          success: false, details: "the dashboard did not reopen for the cached update gate")
+        return
+      }
+      let fullBefore = statusController.dashboardFullRebuildsForTesting
+      let regionBefore = statusController.dashboardRegionRebuildsForTesting
+      let contentBefore = statusController.dashboardContentUpdatesForTesting
+      var slowestUpdate: TimeInterval = 0
+      for index in 0..<UIPerformanceBudget.cachedContentIterations {
+        let before = statusController.dashboardContentUpdatesForTesting
+        let clock = ContinuousClock()
+        let started = clock.now
+        store.installPreviewSnapshots(
+          scenario: index.isMultiple(of: 2) ? .exhausted : .deficit)
+        while statusController.dashboardContentUpdatesForTesting == before,
+          started.duration(to: clock.now) < .seconds(2) {
+          try? await Task.sleep(for: .milliseconds(5))
+        }
+        let elapsed = started.duration(to: clock.now).components
+        let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+        slowestUpdate = max(slowestUpdate, seconds)
+      }
+      let fullDelta = statusController.dashboardFullRebuildsForTesting - fullBefore
+      let regionDelta = statusController.dashboardRegionRebuildsForTesting - regionBefore
+      let contentDelta = statusController.dashboardContentUpdatesForTesting - contentBefore
+      let memoryOK = growthBytes <= UIPerformanceBudget.sustainedFootprintGrowthBytes
+      let rebuildsOK = fullDelta == 0 && regionDelta == 0 && contentDelta >= UIPerformanceBudget.cachedContentIterations
+      let hitchOK = slowestUpdate <= UIPerformanceBudget.cachedUpdateHitchSeconds
+      let growthMB = Double(growthBytes) / 1_048_576
+      let details = String(
+        format: "30 popover/settings cycles, footprint growth %.1f MB (budget 40 MB); "
+          + "cached updates full=%d region=%d content=%d slowest=%.2fs",
+        growthMB, fullDelta, regionDelta, contentDelta, slowestUpdate) + memoryDetails
+      Self.finishUISelfTest(success: memoryOK && rebuildsOK && hitchOK, details: details)
     }
   }
+
+  #if RESERVE_DEV_AUTOMATION
+  /// Slow, offline, and recovery checks live in RefreshReliabilitySelfTest.
+  /// This command only gives them an isolated defaults domain and no shared lock.
+  private func runReliabilitySelfTest() {
+    Task { @MainActor in
+      let failures = await RefreshReliabilitySelfTest.run()
+      Self.finishUISelfTest(
+        success: failures.isEmpty,
+        details: failures.isEmpty
+          ? "refresh reliability checks passed"
+          : failures.joined(separator: " | "))
+    }
+  }
+
+  #endif
 
   private static func physicalFootprintBytes() -> UInt64? {
     var info = task_vm_info_data_t()

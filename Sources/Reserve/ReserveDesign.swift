@@ -161,7 +161,7 @@ final class ReserveLabel: NSTextField, ReserveClockUpdating {
   func updateClock(_ now: Date) {
     guard let clockText else { return }
     let text = clockText(now)
-    if self.stringValue != text { self.stringValue = text; self.toolTip = text }
+    if self.stringValue != text { self.setDisplayedText(text) }
   }
 
   init(
@@ -233,12 +233,40 @@ final class ReserveLabel: NSTextField, ReserveClockUpdating {
     return self
   }
 
+  private var refitsToText = false
+  private var fittedExtra: CGFloat = 2
+
   /// Pins the label to the width the text actually draws at, measured from the
   /// attributed string. Both `intrinsicContentSize` and `sizeToFit()` ignore
   /// kerning, which silently clips the trailing characters of tracked text.
   @discardableResult
   func fitted(extra: CGFloat = 2) -> Self {
-    self.width(ceil(self.attributedStringValue.size().width) + extra)
+    self.refitsToText = true
+    self.fittedExtra = extra
+    return self.width(ceil(self.attributedStringValue.size().width) + extra)
+  }
+
+  /// Replaces the visible string. A label that was fitted to its text also
+  /// updates that width. Labels given a fixed width keep it.
+  func setDisplayedText(_ text: String, color: NSColor? = nil) {
+    let textChanged = self.stringValue != text
+    let colorChanged = color.map { !$0.isEqual(self.textColor) } ?? false
+    guard textChanged || colorChanged else { return }
+    let previous = self.attributedStringValue
+    var attributes = previous.length > 0 ? previous.attributes(at: 0, effectiveRange: nil) : [:]
+    if attributes[.font] == nil, let font = self.font { attributes[.font] = font }
+    if let color { attributes[.foregroundColor] = color; self.textColor = color }
+    else if attributes[.foregroundColor] == nil, let color = self.textColor {
+      attributes[.foregroundColor] = color
+    }
+    self.attributedStringValue = NSAttributedString(string: text, attributes: attributes)
+    if textChanged { self.toolTip = text }
+    guard self.refitsToText else { return }
+    let needed = ceil(self.attributedStringValue.size().width) + self.fittedExtra
+    guard let constraint = self.constraints.first(where: {
+      $0.firstAttribute == .width && $0.relation == .equal && $0.secondItem == nil && $0.isActive
+    }), abs(constraint.constant - needed) > 0.5 else { return }
+    constraint.constant = needed
   }
 }
 
@@ -303,11 +331,34 @@ class ReserveSurface: NSView {
 /// this point in the window. A fill left of the marker is therefore a deficit.
 @MainActor
 final class ReserveMeter: NSView, ReserveClockUpdating {
-  private let remainingPercent: Double
+  private var remainingPercent: Double
   private var paceRemainingPercent: Double?
-  private let color: NSColor
+  private var color: NSColor
   private var isStale: Bool
   var clockPresentation: ((Date) -> (paceRemainingPercent: Double?, isStale: Bool))?
+
+  /// Moves the fill, marker, and spoken value without building a new meter.
+  func applyReading(
+    remainingPercent: Double,
+    paceRemainingPercent: Double?,
+    color: NSColor,
+    isStale: Bool
+  ) {
+    let remaining = min(100, max(0, remainingPercent))
+    let pace = paceRemainingPercent.map { min(100, max(0, $0)) }
+    let changed = self.remainingPercent != remaining
+      || self.paceRemainingPercent != pace
+      || self.isStale != isStale
+      || self.color != color
+    self.remainingPercent = remaining
+    self.paceRemainingPercent = pace
+    self.color = color
+    self.isStale = isStale
+    if changed {
+      self.updateSpokenValue()
+      self.needsDisplay = true
+    }
+  }
 
   init(
     remainingPercent: Double,
@@ -406,9 +457,9 @@ final class ReserveSparkline: NSView {
     "Compressed square-root scale. It keeps ordinary days visible when one day is unusually "
     + "large; the order and zero-to-peak range are preserved."
 
-  private let series: [DailyUsage]
+  private var series: [DailyUsage]
   private let color: NSColor
-  private let peak: Int64
+  private var peak: Int64
 
   init(series: [DailyUsage], color: NSColor) {
     self.series = series
@@ -419,6 +470,14 @@ final class ReserveSparkline: NSView {
     self.setAccessibilityRole(.image)
     self.setAccessibilityLabel(Self.spoken(series: series))
     self.toolTip = Self.scaleExplanation
+  }
+
+  func apply(series: [DailyUsage]) {
+    guard self.series != series else { return }
+    self.series = series
+    self.peak = series.map(\.tokens).max() ?? 0
+    self.setAccessibilityLabel(Self.spoken(series: series))
+    self.needsDisplay = true
   }
 
   required init?(coder: NSCoder) { nil }
@@ -631,6 +690,23 @@ final class ReserveIconButton: NSButton {
 
   var isSpinning: Bool { self.layer?.animation(forKey: "reserve.refresh.spin") != nil }
 
+  /// Starts or stops the refresh turn. A spin that is already running keeps
+  /// its phase, so a later reading does not restart it.
+  func setSpinning(since phase: TimeInterval?) {
+    let wasSpinning = self.spinPhase != nil
+    self.spinPhase = phase
+    guard let phase else {
+      if wasSpinning {
+        self.layer?.removeAnimation(forKey: "reserve.refresh.spin")
+        self.spinBounds = .zero
+      }
+      return
+    }
+    if self.layer?.animation(forKey: "reserve.refresh.spin") == nil, self.bounds.width > 0 {
+      self.installSpin(phase: phase)
+    }
+  }
+
   override func viewDidChangeEffectiveAppearance() {
     super.viewDidChangeEffectiveAppearance()
     self.layer?.backgroundColor = self.resolvedCGColor(
@@ -751,6 +827,14 @@ extension NSStackView {
     stack.alignment = alignment
     stack.spacing = spacing
     return stack
+  }
+
+  @MainActor
+  func replaceArrangedSubview(_ old: NSView, with new: NSView) {
+    let index = self.arrangedSubviews.firstIndex(of: old) ?? self.arrangedSubviews.count
+    self.removeArrangedSubview(old)
+    old.removeFromSuperview()
+    self.insertArrangedSubview(new, at: min(index, self.arrangedSubviews.count))
   }
 
   @MainActor
