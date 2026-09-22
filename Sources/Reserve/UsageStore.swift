@@ -137,9 +137,11 @@ final class UsageStore {
   /// Mac's session roots.
   private let localUsageScanner: LocalUsageScanner?
   private let localUsageScan: @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
-  /// Cache-only daily history. Production reads the one scanner's archive.
-  /// Test and preview stores get an empty loader so they never open the
-  /// production index. Range changes do not call this.
+  /// Progress gates retries so a stalled checkpoint cannot create a busy loop.
+  private let localUsageProgress: @Sendable () async -> (incomplete: Bool, checkpoints: Int)
+  private let localScanContinuationDelay: Duration
+  private var localScanNeedsContinuation = false
+  /// Cache-only daily history; tests never open the production index.
   private let dailyHistoryLoad: @Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory]
   private let loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))?
   private let openLoginURL: (URL) -> Bool
@@ -213,6 +215,7 @@ final class UsageStore {
         self.localScanTask = nil
         self.isScanningLocalUsage = false
         self.localHistoryScanError = nil
+        self.localScanNeedsContinuation = false
         self.lastLocalUsageScanAt = nil
         self.publishedDailyHistory = [:]
       }
@@ -352,6 +355,8 @@ final class UsageStore {
     cache: SnapshotCache = SnapshotCache(),
     fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)? = nil,
     localUsageScan: (@Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary])? = nil,
+    localUsageProgress: (@Sendable () async -> (incomplete: Bool, checkpoints: Int))? = nil,
+    localScanContinuationDelay: Duration = .seconds(5),
     dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
     loginCommandOverride: ((ProviderID) -> (executable: String, arguments: [String]))? = nil,
     openLoginURL: @escaping (URL) -> Bool = { LoginBrowser.open($0) },
@@ -368,7 +373,7 @@ final class UsageStore {
     self.serviceStatusFetch = serviceStatusFetch
     self.now = now
     let productionStore = planKeys == nil && apiKeys == nil && fetchOverride == nil
-      && localUsageScan == nil && startAutomatically
+      && localUsageScan == nil && localUsageProgress == nil && startAutomatically
     self.usesProductionKeychain = productionStore
     self.honorsHostRefreshEnvironment = productionStore
     self.loginHandoffDeadline = loginHandoffDeadline
@@ -385,6 +390,16 @@ final class UsageStore {
       // A store built for tests or previews must not read this Mac's logs
       // or the production usage index, even when a refresh asks for history.
       self.localUsageScan = { _, _ in [:] }
+    }
+    self.localScanContinuationDelay = localScanContinuationDelay
+    if let localUsageProgress {
+      self.localUsageProgress = localUsageProgress
+    } else if let scanner = self.localUsageScanner {
+      self.localUsageProgress = {
+        (await scanner.scanIncomplete, await scanner.scanMetrics.checkpoints)
+      }
+    } else {
+      self.localUsageProgress = { (false, 0) }
     }
     if let dailyHistoryLoad {
       self.dailyHistoryLoad = dailyHistoryLoad
@@ -911,7 +926,8 @@ final class UsageStore {
     let now = self.now()
     if trigger != .manual, self.discretionaryRefreshIsSuppressed(now: now) { return }
     let manual = trigger == .manual
-    if (manual || self.insightsVisible) && self.beginLocalUsageRefresh(force: manual) {
+    if (manual || self.insightsVisible || self.localScanNeedsContinuation)
+      && self.beginLocalUsageRefresh(force: manual || self.localScanNeedsContinuation) {
       self.startDetachedLocalUsageScan()
     }
     self.retryLockedKeychainReads(trigger: trigger, now: now)
@@ -932,6 +948,7 @@ final class UsageStore {
   func shouldRefreshAfterResume(now: Date = Date()) -> Bool {
     guard !self.isRefreshingAll else { return false }
     guard !self.discretionaryRefreshIsSuppressed(now: now) else { return false }
+    if self.localScanNeedsContinuation && !self.isScanningLocalUsage { return true }
     if self.hasDueKeychainProbe(trigger: .activation, now: now) { return true }
     guard self.automaticRefreshEnabled else { return false }
     if !self.dueSubscriptionProviders(trigger: .activation, now: now).isEmpty { return true }
@@ -998,6 +1015,9 @@ final class UsageStore {
     if let lowPowerMode { self.lowPowerOverride = lowPowerMode }
     if let offline { self.offlineOverride = offline }
     if wasSuppressed, !self.discretionaryRefreshIsSuppressed() {
+      if self.localScanNeedsContinuation && self.beginLocalUsageRefresh(force: true) {
+        self.startDetachedLocalUsageScan()
+      }
       self.refreshDueProvidersAfterActivation()
     }
     if self.automaticRefreshEnabled { self.startScheduler() }
@@ -2291,7 +2311,9 @@ final class UsageStore {
 
   private func startDetachedLocalUsageScan() {
     let generation = self.localScanGeneration
-    self.localScanTask = Task { await self.performLocalUsageScan(generation: generation) }
+    self.localScanTask = Task(priority: .utility) {
+      await self.performLocalUsageScan(generation: generation)
+    }
   }
 
   private func updateLocalUsageWatches() {
@@ -2314,29 +2336,56 @@ final class UsageStore {
         if notify { self.changed() }
       }
     }
-    guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
-    let now = self.now()
-    let enabled = Set(ProviderID.allCases.filter { self.isEnabled($0) })
-    do {
-      let result = try await self.localUsageScan(enabled, now)
+    var continuing = false
+    while !Task.isCancelled {
       guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
-      for provider in ProviderID.allCases {
-        guard self.isEnabled(provider) else { continue }
-        let snapshot = self.states[provider]?.snapshot
-        self.states[provider]?.localUsage = Self.usageAfterLocalScan(
-          provider: provider,
-          snapshot: snapshot,
-          scanned: result[provider])
+      if continuing, self.discretionaryRefreshIsSuppressed() { return }
+      let now = self.now()
+      let enabled = Set(ProviderID.allCases.filter { self.isEnabled($0) })
+      let before = await self.localUsageProgress()
+      do {
+        try Task.checkCancellation()
+        let result = try await self.localUsageScan(enabled, now)
+        try Task.checkCancellation()
+        guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
+        for provider in ProviderID.allCases {
+          guard self.isEnabled(provider) else { continue }
+          let snapshot = self.states[provider]?.snapshot
+          self.states[provider]?.localUsage = Self.usageAfterLocalScan(
+            provider: provider,
+            snapshot: snapshot,
+            scanned: result[provider])
+        }
+        self.lastLocalUsageScanAt = now
+        self.localHistoryScanError = nil
+        self.localScanNeedsContinuation = false
+        await self.loadPublishedDailyHistory(now: now)
+        return
+      } catch is CancellationError {
+        return
+      } catch {
+        guard !Task.isCancelled, self.localHistoryEnabled,
+          self.localScanGeneration == generation else { return }
+        let after = await self.localUsageProgress()
+        guard !Task.isCancelled, self.localHistoryEnabled,
+          self.localScanGeneration == generation else { return }
+        if case UsageProviderError.timedOut = error,
+          after.incomplete, after.checkpoints > before.checkpoints {
+          // A bounded pass with a useful checkpoint is normal progress. Keep
+          // finalized totals visible and yield before resuming the same work.
+          self.localScanNeedsContinuation = true
+          continuing = true
+          self.localHistoryScanError = nil
+          if notify { self.changed() }
+          do { try await Task.sleep(for: self.localScanContinuationDelay) }
+          catch { return }
+          continue
+        }
+        // An unchanged checkpoint cannot justify an endless retry loop.
+        self.localScanNeedsContinuation = false
+        self.localHistoryScanError = Self.localHistoryFailureMessage(error)
+        return
       }
-      guard self.localScanGeneration == generation else { return }
-      self.lastLocalUsageScanAt = now
-      self.localHistoryScanError = nil
-      await self.loadPublishedDailyHistory(now: now)
-    } catch {
-      guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
-      // Keep the last successful totals. A failure must not look like a fresh
-      // scan, and must not start the 30-minute quiet period.
-      self.localHistoryScanError = Self.localHistoryFailureMessage(error)
     }
   }
 

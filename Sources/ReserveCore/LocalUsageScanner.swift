@@ -160,6 +160,7 @@ private final class ScanBudget {
   var parsed = 0
   var stopped = false
   var sharedBytes: Int?
+  var consumedBytes = 0
 
   init(
     limit: Duration, bytes: Int?, commits: Int?, cancelAfter: Int?,
@@ -180,6 +181,7 @@ private final class ScanBudget {
 
   func consume(_ count: Int, remaining: inout Int) {
     remaining -= count
+    self.consumedBytes += max(0, count)
     guard var shared = self.sharedBytes else { return }
     shared -= count
     self.sharedBytes = shared
@@ -258,6 +260,7 @@ public struct LocalUsageScanMetrics: Sendable, Equatable {
   public var checkpoints = 0
   public var resumes = 0
   public var overflowFallbacks = 0
+  public var bytesRead = 0
 
   public init() {}
 }
@@ -291,7 +294,8 @@ public actor LocalUsageScanner {
   private let maximumLineBytes = 1024 * 1024
   private let codexTailBytes = 2 * 1024 * 1024
   private let codexTailStepBytes = 256 * 1024
-  private let maximumBytesPerScan = 64 * 1024 * 1024
+  private var maximumBytesPerScan = 64 * 1024 * 1024
+  private let maximumResidentIndexBytes = 4 * 1024 * 1024
   private let maximumBytesPerFileScan = 8 * 1024 * 1024
   private let maximumLinesPerFile = 100_000
   private let maximumScanDuration: TimeInterval = 8
@@ -300,6 +304,7 @@ public actor LocalUsageScanner {
   private var fileKeys: [ProviderID: [String: String]] = [:]
   private var lastScanDates: [ProviderID: Date] = [:]
   private var residentAnchor: LocalHistoryFileAnchor?
+  private var hasObservedPublishedState = false
   private var residentIndex: UsageIndex?
   private var memoryCheckpoint: LocalHistoryCheckpoint?
   private var durationOverride: Duration?
@@ -308,6 +313,7 @@ public actor LocalUsageScanner {
   private var cancelAfterParsedFiles: Int?
   private var stopBeforePublish = false
   private var beforePublishHook: (@Sendable () -> Void)?
+  private var residentIndexByteLimitOverride: Int?
   /// Safety net for a dropped filesystem event. Longer than the app's usual
   /// history refresh so an unchanged tree is not walked on every pass.
   private var fullDiscoveryInterval: Duration = .seconds(6 * 60 * 60)
@@ -359,7 +365,11 @@ public actor LocalUsageScanner {
     let published = self.loadPublishedIndex()
     let box = IndexBox(published.index)
     let ledger = ScanLedger()
-    defer { self.fileKeys.removeAll(keepingCapacity: false) }
+    defer {
+      self.scanMetrics.bytesRead += budget.consumedBytes
+      self.fileKeys.removeAll(keepingCapacity: false)
+      self.releaseResidentPublishedIndexIfLarge()
+    }
     do {
       return try self.performScan(
         box: box, ledger: ledger, anchor: published.anchor, budget: budget,
@@ -397,8 +407,19 @@ public actor LocalUsageScanner {
   private func releaseResidentIndex() {
     self.residentIndex = nil
     self.residentAnchor = nil
+    self.hasObservedPublishedState = false
     self.memoryCheckpoint = nil
     self.fileKeys.removeAll(keepingCapacity: false)
+  }
+
+  /// Large decoded indexes expand far beyond their JSON size because every
+  /// cached row and key becomes a Swift collection entry. Keep the small warm
+  /// path resident, but let a large finalized index fall out of memory after
+  /// the operation that needed it. Checkpoint state is deliberately separate.
+  private func releaseResidentPublishedIndexIfLarge() {
+    let limit = self.residentIndexByteLimitOverride ?? self.maximumResidentIndexBytes
+    guard let size = self.residentAnchor?.size, size > Int64(limit) else { return }
+    self.residentIndex = nil
   }
 
   /// Reads the on-disk index only. Does not open session roots, enumerate files,
@@ -413,6 +434,7 @@ public actor LocalUsageScanner {
     let selected = providers.intersection([.openAI, .anthropic, .grok])
     guard !selected.isEmpty else { return [:] }
     let index = self.loadIndex()
+    defer { self.releaseResidentPublishedIndexIfLarge() }
     let count = min(CachedUsageHistory.retentionDays, max(1, periodDays))
     // Sum every file's totals for a day. Dictionary order must not drop a file.
     var merged = Self.observedDays(index: index, providers: selected, now: index.updatedAt)
@@ -1101,7 +1123,7 @@ public actor LocalUsageScanner {
       self.scanMetrics.indexReuses += 1
       return (residentIndex, anchor)
     }
-    let externallyInvalidated = self.residentIndex != nil && self.residentAnchor != anchor
+    let externallyInvalidated = self.hasObservedPublishedState && self.residentAnchor != anchor
     if externallyInvalidated, self.watchChanges {
       // The cache may have been deleted, corrupted, or atomically replaced by
       // another process. A clean watcher only describes session-tree changes;
@@ -1118,6 +1140,7 @@ public actor LocalUsageScanner {
     else {
       let empty = UsageIndex()
       self.residentAnchor = nil
+      self.hasObservedPublishedState = true
       self.residentIndex = empty
       return (empty, nil)
     }
@@ -1128,10 +1151,12 @@ public actor LocalUsageScanner {
       if self.watchChanges { self.changeTracker.invalidateAll(.ambiguous) }
       let empty = UsageIndex()
       self.residentAnchor = read.anchor
+      self.hasObservedPublishedState = true
       self.residentIndex = empty
       return (empty, read.anchor)
     }
     self.residentAnchor = read.anchor
+    self.hasObservedPublishedState = true
     self.residentIndex = index
     return (index, read.anchor)
   }
@@ -1183,9 +1208,11 @@ public actor LocalUsageScanner {
       url: self.cacheURL, maximumBytes: self.maximumCacheBytes)
     {
       self.residentAnchor = anchor
+      self.hasObservedPublishedState = true
       self.residentIndex = index
     } else {
       self.residentAnchor = nil
+      self.hasObservedPublishedState = true
       self.residentIndex = index
     }
   }
@@ -1615,13 +1642,18 @@ public actor LocalUsageScanner {
   }
 
   private func preserveCheckpoint(_ ledger: ScanLedger, anchor: LocalHistoryFileAnchor?) {
-    self.scanIncomplete = true
     let hasProgress = !ledger.parsedRecords.isEmpty || !ledger.removedKeys.isEmpty
       || ledger.needsFinalize
-    guard hasProgress else { return }
+    guard hasProgress else {
+      self.scanIncomplete = self.memoryCheckpoint.map { $0.anchor == anchor } ?? false
+      return
+    }
     guard let recordsJSON = try? self.encodeRecords(ledger.parsedRecords),
       recordsJSON.count <= self.maximumCacheBytes
-    else { return }
+    else {
+      self.scanIncomplete = self.memoryCheckpoint.map { $0.anchor == anchor } ?? false
+      return
+    }
     let checkpoint = LocalHistoryCheckpoint(
       version: 1,
       anchor: anchor,
@@ -1632,12 +1664,28 @@ public actor LocalUsageScanner {
       pruneProviders: ledger.needsFinalize ? ledger.pruneProviders.map(\.rawValue).sorted() : [],
       tokens: ledger.tokens,
       recordsJSON: recordsJSON)
-    if checkpoint == self.memoryCheckpoint { return }
+    let advanced = self.memoryCheckpoint.map { !Self.sameCheckpointProgress(checkpoint, $0) } ?? true
     self.memoryCheckpoint = checkpoint
-    self.scanMetrics.checkpoints += 1
+    self.scanIncomplete = true
+    if advanced { self.scanMetrics.checkpoints += 1 }
     _ = try? LocalHistoryCheckpointStore.save(
       checkpoint, cacheURL: self.cacheURL, maximumBytes: self.maximumCacheBytes,
       fileManager: self.fileManager)
+  }
+
+  /// Watch generations and dirty-provider bookkeeping keep a checkpoint safe,
+  /// but changing only those fields does not mean a bounded pass parsed or
+  /// finalized anything new. The store uses the monotonic checkpoint counter
+  /// to decide whether an automatic continuation is making real progress.
+  private static func sameCheckpointProgress(
+    _ lhs: LocalHistoryCheckpoint, _ rhs: LocalHistoryCheckpoint
+  ) -> Bool {
+    lhs.anchor == rhs.anchor
+      && lhs.recordsJSON == rhs.recordsJSON
+      && lhs.removedKeys == rhs.removedKeys
+      && lhs.needsFinalize == rhs.needsFinalize
+      && lhs.retainedKeys == rhs.retainedKeys
+      && lhs.pruneProviders == rhs.pruneProviders
   }
 
   private func apply(
@@ -1680,7 +1728,7 @@ public actor LocalUsageScanner {
   private func makeBudget() -> ScanBudget {
     let budget = ScanBudget(
       limit: self.durationOverride ?? .seconds(self.maximumScanDuration),
-      bytes: self.byteOverride,
+      bytes: self.byteOverride ?? self.maximumBytesPerScan,
       commits: self.commitLimit,
       cancelAfter: self.cancelAfterParsedFiles,
       stopBeforePublish: self.stopBeforePublish)
@@ -1761,6 +1809,18 @@ public actor LocalUsageScanner {
     self.commitLimit = commitLimit
     self.cancelAfterParsedFiles = cancelAfterParsedFiles
     self.stopBeforePublish = stopBeforePublish
+  }
+
+  func testingSetDefaultByteBudget(_ maximumBytes: Int) {
+    self.maximumBytesPerScan = max(0, maximumBytes)
+  }
+
+  func testingSetResidentIndexByteLimit(_ maximumBytes: Int?) {
+    self.residentIndexByteLimitOverride = maximumBytes.map { max(0, $0) }
+  }
+
+  func testingHasResidentIndex() -> Bool {
+    self.residentIndex != nil
   }
 
   func testingSetFullDiscoveryInterval(_ interval: Duration) {

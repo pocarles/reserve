@@ -596,6 +596,165 @@ struct IncrementalHistoryTests {
     #expect(await restarted.testingCheckpointExists() == false)
   }
 
+  @Test func watcherTokenOnlyCheckpointUpdateDoesNotClaimProgress() async throws {
+    let fixture = try HistoryBench()
+    defer { fixture.remove() }
+    let now = Date()
+    let file = try fixture.writeCodex("one.jsonl", input: 4, output: 0, at: now)
+    let scanner = fixture.scanner(watchChanges: true)
+    await scanner.testingSimulateWatch()
+    _ = try await scanner.scan(now: now, providers: [.openAI])
+
+    try fixture.writeCodex("one.jsonl", input: 9, output: 0, at: now, url: file)
+    await scanner.testingInject(provider: .openAI, changed: [file])
+    await scanner.testingSetBudget(stopBeforePublish: true)
+    await #expect(throws: UsageProviderError.timedOut("local usage scan")) {
+      try await scanner.scan(now: now.addingTimeInterval(1), providers: [.openAI])
+    }
+    let progressed = await scanner.scanMetrics.checkpoints
+    #expect(progressed > 0)
+    #expect(await scanner.scanIncomplete)
+
+    // A duplicate event changes the watch generation but not any parsed or
+    // finalization state. It must not keep an automatic retry loop alive.
+    await scanner.testingInject(provider: .openAI, changed: [file])
+    await scanner.testingSetBudget(stopBeforePublish: true)
+    await #expect(throws: UsageProviderError.timedOut("local usage scan")) {
+      try await scanner.scan(now: now.addingTimeInterval(2), providers: [.openAI])
+    }
+    #expect(await scanner.scanMetrics.checkpoints == progressed)
+    #expect(await scanner.scanIncomplete)
+
+    let finished = try await scanner.scan(
+      now: now.addingTimeInterval(3), providers: [.openAI])
+    #expect(finished[.openAI]?.totalTokens == 9)
+    #expect(await scanner.scanIncomplete == false)
+  }
+
+  @Test func defaultByteBudgetIsSharedAcrossProvidersAndKeepsPublishedTotals() async throws {
+    let fixture = try HistoryBench()
+    defer { fixture.remove() }
+    let now = Date()
+    let codex = try fixture.writeCodex("one.jsonl", input: 10, output: 0, at: now)
+    let claude = try fixture.writeClaude("one.jsonl", input: 20, output: 0, at: now)
+    let scanner = fixture.scanner(watchChanges: false)
+    _ = try await scanner.scan(now: now, providers: [.openAI, .anthropic])
+    let published = try Data(contentsOf: fixture.cache)
+
+    let codexData = fixture.codexData(input: 11, output: 0, at: now)
+    try codexData.write(to: codex)
+    let claudeData = Data((fixture.claudeLine(
+      input: 21, output: 0, at: now, message: "m2", request: "r2") + "\n").utf8)
+    try claudeData.write(to: claude)
+    let sharedLimit = codexData.count + 1
+    await scanner.testingSetDefaultByteBudget(sharedLimit)
+    let bytesBefore = await scanner.scanMetrics.bytesRead
+    await #expect(throws: UsageProviderError.timedOut("local usage scan")) {
+      try await scanner.scan(
+        now: now.addingTimeInterval(1), providers: [.openAI, .anthropic])
+    }
+    let bytesRead = await scanner.scanMetrics.bytesRead - bytesBefore
+    #expect(bytesRead > 0 && bytesRead <= sharedLimit)
+    #expect(await scanner.scanIncomplete)
+    #expect(try Data(contentsOf: fixture.cache) == published)
+    let old = await scanner.cachedHistory(
+      periodDays: 90, now: now, providers: [.openAI, .anthropic])
+    #expect(old[.openAI]?.days.contains { $0.tokens == 10 } == true)
+    #expect(old[.anthropic]?.days.contains { $0.tokens == 20 } == true)
+
+    await scanner.testingSetDefaultByteBudget(64 * 1024 * 1024)
+    let finished = try await scanner.scan(
+      now: now.addingTimeInterval(2), providers: [.openAI, .anthropic])
+    #expect(finished[.openAI]?.totalTokens == 11)
+    #expect(finished[.anthropic]?.totalTokens == 21)
+    #expect(await scanner.scanIncomplete == false)
+  }
+
+  @Test func largeResidentIndexIsEvictedWithoutDiscardingCheckpoint() async throws {
+    let fixture = try HistoryBench()
+    defer { fixture.remove() }
+    let now = Date()
+    let file = try fixture.writeCodex("one.jsonl", input: 7, output: 0, at: now)
+    let scanner = fixture.scanner(watchChanges: true)
+    await scanner.testingSimulateWatch()
+    await scanner.testingSetResidentIndexByteLimit(1)
+
+    let initial = try await scanner.scan(now: now, providers: [.openAI])
+    #expect(initial[.openAI]?.totalTokens == 7)
+    #expect(await scanner.testingHasResidentIndex() == false)
+    let decodes = await scanner.scanMetrics.indexDecodes
+    let history = await scanner.cachedHistory(
+      periodDays: 90, now: now, providers: [.openAI])
+    #expect(history[.openAI]?.days.contains { $0.tokens == 7 } == true)
+    #expect(await scanner.scanMetrics.indexDecodes == decodes + 1)
+    #expect(await scanner.testingHasResidentIndex() == false)
+
+    try fixture.writeCodex("one.jsonl", input: 13, output: 0, at: now, url: file)
+    await scanner.testingInject(provider: .openAI, changed: [file])
+    await scanner.testingSetBudget(commitLimit: 1)
+    await #expect(throws: UsageProviderError.timedOut("local usage scan")) {
+      try await scanner.scan(now: now.addingTimeInterval(1), providers: [.openAI])
+    }
+    #expect(await scanner.scanIncomplete)
+    #expect(await scanner.testingCheckpointExists())
+    #expect(await scanner.testingHasResidentIndex() == false)
+
+    let recovered = try await scanner.scan(
+      now: now.addingTimeInterval(2), providers: [.openAI])
+    #expect(recovered[.openAI]?.totalTokens == 13)
+    #expect(await scanner.scanIncomplete == false)
+    #expect(await scanner.testingCheckpointExists() == false)
+    #expect(await scanner.testingHasResidentIndex() == false)
+  }
+
+  @Test func evictedLargeIndexStillDetectsExternalDeletionAndReplacement() async throws {
+    let fixture = try HistoryBench()
+    defer { fixture.remove() }
+    let now = Date()
+    try fixture.writeCodex("one.jsonl", input: 7, output: 0, at: now)
+    let scanner = fixture.scanner(watchChanges: true)
+    await scanner.testingSimulateWatch()
+    await scanner.testingSetResidentIndexByteLimit(1)
+
+    let initial = try await scanner.scan(now: now, providers: [.openAI])
+    #expect(initial[.openAI]?.totalTokens == 7)
+    #expect(await scanner.testingHasResidentIndex() == false)
+    let walks = await scanner.scanMetrics.treeWalks
+
+    // No session event accompanies either cache mutation. The retained file
+    // anchor must invalidate the otherwise-clean watcher plan after eviction.
+    try FileManager.default.removeItem(at: fixture.cache)
+    let afterDeletion = try await scanner.scan(
+      now: now.addingTimeInterval(1), providers: [.openAI])
+    #expect(afterDeletion[.openAI]?.totalTokens == 7)
+    #expect(await scanner.scanMetrics.treeWalks == walks + 1)
+    #expect(await scanner.testingHasResidentIndex() == false)
+
+    let day = CachedUsageHistory.dayKey(for: now, calendar: .current)
+    let replacement: [String: Any] = [
+      "version": 1,
+      "updatedAt": 1,
+      "records": [
+        "external": [
+          "provider": "openAI", "size": 0, "modifiedAt": 0, "offset": 0,
+          "recentRows": [:], "recentOrder": [],
+          "days": [
+            day: [
+              "input": 99, "cached": 0, "cacheWrite": 0, "output": 0,
+              "costUSD": 0, "estimated": false,
+            ]
+          ],
+        ]
+      ],
+    ]
+    try JSONSerialization.data(withJSONObject: replacement).write(to: fixture.cache)
+    let afterReplacement = try await scanner.scan(
+      now: now.addingTimeInterval(2), providers: [.openAI])
+    #expect(afterReplacement[.openAI]?.totalTokens == 7)
+    #expect(await scanner.scanMetrics.treeWalks == walks + 2)
+    #expect(await scanner.testingHasResidentIndex() == false)
+  }
+
   @Test func zeroDurationAndTinyByteBudgetDoNotPublishPartialTotals() async throws {
     let fixture = try HistoryBench()
     defer { fixture.remove() }
@@ -604,11 +763,13 @@ struct IncrementalHistoryTests {
     let scanner = fixture.scanner(watchChanges: false)
     _ = try await scanner.scan(now: now, providers: [.openAI])
     let saved = try Data(contentsOf: fixture.cache)
+    let checkpoints = await scanner.scanMetrics.checkpoints
     await scanner.testingSetBudget(maximumDuration: .zero)
     await #expect(throws: UsageProviderError.timedOut("local usage scan")) {
       try await scanner.scan(now: now, providers: [.openAI])
     }
-    #expect(await scanner.scanIncomplete)
+    #expect(await scanner.scanIncomplete == false)
+    #expect(await scanner.scanMetrics.checkpoints == checkpoints)
     #expect(try Data(contentsOf: fixture.cache) == saved)
     try fixture.writeCodex("two.jsonl", input: 3, output: 0, at: now)
     await scanner.testingSetBudget(maximumBytes: 1)
@@ -620,6 +781,23 @@ struct IncrementalHistoryTests {
     let finished = try await scanner.scan(now: now, providers: [.openAI])
     #expect(finished[.openAI]?.totalTokens == 9)
     #expect(await scanner.scanIncomplete == false)
+  }
+
+  @Test func emptyCacheWithoutProgressDoesNotClaimAUsableCheckpoint() async throws {
+    let fixture = try HistoryBench()
+    defer { fixture.remove() }
+    let now = Date()
+    try fixture.writeCodex("one.jsonl", input: 6, output: 0, at: now)
+    let scanner = fixture.scanner(watchChanges: false)
+    await scanner.testingSetBudget(maximumDuration: .zero)
+
+    await #expect(throws: UsageProviderError.timedOut("local usage scan")) {
+      try await scanner.scan(now: now, providers: [.openAI])
+    }
+    #expect(await scanner.scanIncomplete == false)
+    #expect(await scanner.scanMetrics.checkpoints == 0)
+    #expect(await scanner.testingCheckpointExists() == false)
+    #expect(FileManager.default.fileExists(atPath: fixture.cache.path) == false)
   }
 
   @Test func missingWatchedRootDoesNotDeleteSavedHistory() async throws {

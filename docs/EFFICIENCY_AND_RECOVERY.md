@@ -6,9 +6,9 @@ Background Keychain reads are silent and run on a serial utility queue. Only an 
 
 Low Power Mode and an unavailable network pause scheduled work. Returning to a usable state starts the providers that are due. An explicit refresh remains available. Existing sign-in consent requirements still apply.
 
-Local history watches only enabled providers' session roots. File events mark changed paths; ordinary scans reuse the decoded index and visit those paths. Dropped events, root replacement, renames, and ambiguous changes trigger a full walk. A periodic full walk remains as a fallback. Disabling history stops the watches and releases the resident index.
+Local history watches only enabled providers' session roots. File events mark changed paths; ordinary scans visit those paths and reuse small decoded indexes. Published indexes larger than 4 MiB are released after each operation to reduce idle memory. Dropped events, root replacement, renames, and ambiguous changes trigger a full walk. A periodic full walk remains as a fallback. Disabling history stops the watches and releases the resident index.
 
-The index is reloaded when its validated file identity changes. Deletion or corruption triggers rediscovery. A scan that reaches its time or byte budget saves bounded progress separately, keeps the last published totals, and revalidates files before publishing a resumed result. Partial work never marks the old totals as freshly measured.
+The index is reloaded when its validated file identity changes. Deletion or corruption triggers rediscovery. A scan that reaches its time or byte budget saves bounded progress separately, keeps the last published totals, and revalidates files before publishing a resumed result. Partial work never marks the old totals as freshly measured. The 64 MiB read budget is shared across providers. A pass that saves useful progress resumes automatically after a five-second pause at utility priority; an unchanged checkpoint stops retries. Continuations pause while offline or in Low Power Mode and resume when conditions recover. Disabling history cancels the pending work.
 
 The dashboard and Settings apply ordinary reading changes to existing controls. Details and charts update with their values; privacy changes update expanded content. See [UI update checks](UI_UPDATE_CHECKS.md) for the lifecycle and performance gates.
 

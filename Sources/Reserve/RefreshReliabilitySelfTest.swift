@@ -18,6 +18,9 @@ enum RefreshReliabilitySelfTest {
     await self.checkCanceledPlanProbeCanRestart(expect: expect)
     await self.checkPerProviderSchedulingAndRetryAfter(expect: expect)
     await self.checkOptionalWorkIsIndependent(expect: expect)
+    await self.checkHistoryContinuation(expect: expect)
+    await self.checkHistoryContinuationStops(expect: expect)
+    await self.checkHistoryContinuationRespectsPowerMode(expect: expect)
     await self.checkCanceledLimiterWaiter(expect: expect)
     return failures
   }
@@ -371,6 +374,125 @@ enum RefreshReliabilitySelfTest {
     await statusRelease.signal()
     await historyRelease.signal()
     _ = await self.eventually { !store.isScanningLocalUsage }
+  }
+
+  private static func checkHistoryContinuation(expect: (Bool, String) -> Void) async {
+    let fixture = Fixture("history-continuation")
+    fixture.defaults.set(true, forKey: "provider.openAI.enabled")
+    fixture.defaults.set(true, forKey: "history.localEnabled")
+    let calls = LockedValue(0)
+    let progress = LockedValue(0)
+    let continued = AsyncSignal()
+    let release = AsyncSignal()
+    let summary = LocalUsageSummary(
+      provider: .openAI, periodDays: 30, inputTokens: 123, outputTokens: 4,
+      apiEquivalentCostUSD: 0.01)
+    let store = UsageStore(
+      defaults: fixture.defaults, startAutomatically: false, cache: fixture.cache,
+      fetchOverride: { provider, _ in self.usageSnapshot(provider) },
+      localUsageScan: { _, _ in
+        calls.value += 1
+        if calls.value == 1 {
+          progress.value += 1
+          throw UsageProviderError.timedOut("fixture budget")
+        }
+        await continued.signal()
+        await release.wait()
+        return [.openAI: summary]
+      },
+      localUsageProgress: { (progress.value > 0, progress.value) },
+      localScanContinuationDelay: .zero)
+    store.refreshAll(manual: true)
+    await continued.wait()
+    _ = await self.eventually { !store.isRefreshingAll }
+    expect(store.states[.openAI]?.snapshot != nil && store.isScanningLocalUsage,
+      "history continuation held the quota refresh open")
+    expect(store.orderedStates.first { $0.provider == .openAI }?.localHistoryError == nil,
+      "useful checkpoint progress was shown as a scan failure")
+    expect(store.states[.openAI]?.localUsage == nil,
+      "unfinished history published partial totals")
+    await release.signal()
+    _ = await self.eventually { !store.isScanningLocalUsage }
+    expect(calls.value == 2 && store.states[.openAI]?.localUsage == summary,
+      "history did not finish automatically from its useful checkpoint")
+  }
+
+  private static func checkHistoryContinuationStops(expect: (Bool, String) -> Void) async {
+    let fixture = Fixture("history-no-progress")
+    fixture.defaults.set(true, forKey: "provider.openAI.enabled")
+    fixture.defaults.set(true, forKey: "history.localEnabled")
+    let calls = LockedValue(0)
+    let stalled = UsageStore(
+      defaults: fixture.defaults, startAutomatically: false, cache: fixture.cache,
+      fetchOverride: { provider, _ in self.usageSnapshot(provider) },
+      localUsageScan: { _, _ in calls.value += 1; throw UsageProviderError.timedOut("fixture budget") },
+      localUsageProgress: { (true, 1) }, localScanContinuationDelay: .zero)
+    stalled.refreshAll(manual: true)
+    _ = await self.eventually { !stalled.isScanningLocalUsage }
+    expect(calls.value == 1,
+      "an unchanged checkpoint caused history retry churn")
+    expect(stalled.orderedStates.first { $0.provider == .openAI }?.localHistoryError != nil,
+      "a stalled history scan did not report its recoverable failure")
+
+    let cancelFixture = Fixture("history-continuation-disabled")
+    cancelFixture.defaults.set(true, forKey: "provider.openAI.enabled")
+    cancelFixture.defaults.set(true, forKey: "history.localEnabled")
+    let cancelCalls = LockedValue(0)
+    let progress = LockedValue(0)
+    let disabled = UsageStore(
+      defaults: cancelFixture.defaults, startAutomatically: false, cache: cancelFixture.cache,
+      fetchOverride: { provider, _ in self.usageSnapshot(provider) },
+      localUsageScan: { _, _ in
+        cancelCalls.value += 1
+        progress.value += 1
+        throw UsageProviderError.timedOut("fixture budget")
+      },
+      localUsageProgress: { (true, progress.value) },
+      localScanContinuationDelay: .seconds(60))
+    disabled.refreshAll(manual: true)
+    _ = await self.eventually { progress.value == 1 }
+    disabled.localHistoryEnabled = false
+    for _ in 0..<100 { await Task.yield() }
+    expect(cancelCalls.value == 1 && !disabled.isScanningLocalUsage,
+      "disabling local history did not cancel continuation")
+    expect(disabled.states[.openAI]?.localUsage == nil,
+      "disabled history published a late scan result")
+  }
+
+  private static func checkHistoryContinuationRespectsPowerMode(
+    expect: (Bool, String) -> Void
+  ) async {
+    let fixture = Fixture("history-continuation-power")
+    fixture.defaults.set(true, forKey: "provider.openAI.enabled")
+    fixture.defaults.set(true, forKey: "history.localEnabled")
+    let calls = LockedValue(0)
+    let progress = LockedValue(0)
+    let started = AsyncSignal()
+    let release = AsyncSignal()
+    let store = UsageStore(
+      defaults: fixture.defaults, startAutomatically: false, cache: fixture.cache,
+      fetchOverride: { provider, _ in self.usageSnapshot(provider) },
+      localUsageScan: { _, _ in
+        calls.value += 1
+        if calls.value == 1 {
+          await started.signal()
+          await release.wait()
+          progress.value += 1
+          throw UsageProviderError.timedOut("fixture budget")
+        }
+        return [:]
+      },
+      localUsageProgress: { (true, progress.value) }, localScanContinuationDelay: .zero)
+    store.refreshAll(manual: true)
+    await started.wait()
+    store.noteRefreshEnvironment(lowPowerMode: true)
+    await release.signal()
+    _ = await self.eventually { !store.isScanningLocalUsage }
+    expect(calls.value == 1, "history continuation ignored Low Power Mode")
+    store.noteRefreshEnvironment(lowPowerMode: false)
+    _ = await self.eventually { calls.value == 2 && !store.isScanningLocalUsage }
+    expect(calls.value == 2,
+      "history continuation did not resume when Low Power Mode ended")
   }
 
   private static func checkCanceledLimiterWaiter(expect: (Bool, String) -> Void) async {

@@ -4,8 +4,8 @@ Reserve does less repeated work and recovers from temporary failures with less i
 
 ## Less background work
 
-- Local history reuses its decoded index and watches enabled session folders for changes. Unchanged history no longer needs a full directory walk on each scan.
-- Long scans save bounded progress and resume without presenting partial totals as freshly measured.
+- Local history reuses small decoded indexes and releases larger ones after use. It watches enabled session folders for changes. Unchanged history no longer needs a full directory walk on each scan.
+- Long scans save bounded progress and resume automatically without presenting partial totals as freshly measured.
 - Each provider follows its own refresh schedule. A failing provider backs off without making healthy providers refresh early.
 - Automatic refresh pauses while offline or in Low Power Mode and resumes due providers when conditions recover. Manual refresh remains available.
 
