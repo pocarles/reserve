@@ -47,7 +47,9 @@ struct APIConsumptionReading {
 final class DashboardViewController: NSViewController {
   private let store: UsageStore
   private let actions: DashboardActions
+  private let maximumHeight: () -> CGFloat
   private var lastSignature: String?
+  private var lastMaximumHeight: CGFloat?
   /// Whole-tree replacements. Routine readings should not move this.
   private(set) var fullRebuildCount = 0
   /// In-place reading updates. Clock-only ticks are not counted.
@@ -62,11 +64,19 @@ final class DashboardViewController: NSViewController {
     guard self.isViewLoaded else { return }
     self.view = NSView(frame: NSRect(origin: .zero, size: DashboardMetrics.size))
     self.lastSignature = nil
+    self.lastMaximumHeight = nil
   }
 
-  init(store: UsageStore, actions: DashboardActions) {
+  init(
+    store: UsageStore,
+    maximumHeight: @escaping () -> CGFloat = {
+      DashboardMetrics.availableHeight(on: NSScreen.main)
+    },
+    actions: DashboardActions
+  ) {
     self.store = store
     self.actions = actions
+    self.maximumHeight = maximumHeight
     super.init(nibName: nil, bundle: nil)
     self.preferredContentSize = NSSize(
       width: DashboardMetrics.width, height: DashboardMetrics.minimumHeight)
@@ -157,9 +167,7 @@ final class DashboardViewController: NSViewController {
   }
 
   func update() {
-    // `self.view` would load the view and recurse back into this method, so the
-    // screen is only consulted once there is a view to ask.
-    let screen = (self.isViewLoaded ? self.view.window?.screen : nil) ?? NSScreen.main
+    let maximumHeight = self.maximumHeight()
     let now = Date()
     let visibleStates = self.store.orderedStates.filter { self.store.isEnabled($0.provider) }
     let refreshing = self.store.isRefreshingAll
@@ -171,13 +179,14 @@ final class DashboardViewController: NSViewController {
       hidesPersonal: self.store.hidesPersonalInfo,
       apiReadings: self.actions.apiConsumptionReadings(),
       now: now)
-    if self.isViewLoaded, self.view is UsageDashboardView, signature == self.lastSignature {
+    if self.isViewLoaded, self.view is UsageDashboardView,
+      signature == self.lastSignature, maximumHeight == self.lastMaximumHeight
+    {
       for clock in Self.descendants(of: self.view).compactMap({ $0 as? any ReserveClockUpdating }) {
         clock.updateClock(now)
       }
       return
     }
-    let maximumHeight = DashboardMetrics.availableHeight(on: screen)
     if self.isViewLoaded, let dashboard = self.view as? UsageDashboardView,
       dashboard.apply(
         states: visibleStates,
@@ -190,12 +199,17 @@ final class DashboardViewController: NSViewController {
         actions: self.actions)
     {
       self.lastSignature = signature
-      self.preferredContentSize = dashboard.frame.size
+      self.lastMaximumHeight = maximumHeight
+      // The frame is still the popover's current size here; the new height is
+      // what the dashboard was laid out for.
+      self.preferredContentSize = NSSize(
+        width: DashboardMetrics.width, height: dashboard.intendedHeight)
       self.contentUpdateCount += 1
       return
     }
     self.fullRebuildCount += 1
     self.lastSignature = signature
+    self.lastMaximumHeight = maximumHeight
     let dashboard = UsageDashboardView(
       states: visibleStates,
       selectedMenuBarProvider: self.store.menuBarProvider,
@@ -203,7 +217,7 @@ final class DashboardViewController: NSViewController {
       isRefreshing: self.store.isRefreshingAll,
       refreshStartedAt: self.store.refreshStartedAt,
       now: now,
-      maximumHeight: DashboardMetrics.availableHeight(on: screen),
+      maximumHeight: maximumHeight,
       actions: self.actions)
     // The size has to be read before the view is installed. Assigning `view`
     // hands it to the popover, which immediately resizes it to the size the
@@ -239,18 +253,20 @@ final class UsageDashboardView: NSView {
   /// Replacements of one provider tile, the detail card, or the API block.
   private(set) var regionRebuildCount = 0
   private var column: NSStackView?
+  private var detailColumn: NSStackView?
   private var headerView: DashboardHeaderView?
   private var overviewGrid: ProviderOverviewGrid?
   private var detailCard: ProviderDashboardCard?
   private var emptyState: NSView?
   private var apiSection: APIConsumptionSection?
   private var footerView: DashboardFooterView?
-  private var viewBeforeFooter: NSView?
   private var appliedAppearance = ""
   private var showsEmpty = false
   private var providerIDs: [ProviderID] = []
   private var isScrollable = false
+  private var scrollsDetailsOnly = false
   private var scrollDocument: FlippedView?
+  private var scrollHeightConstraint: NSLayoutConstraint?
 
   init(
     states: [ProviderViewState],
@@ -295,7 +311,10 @@ final class UsageDashboardView: NSView {
     stack.addArrangedSubview(header)
     stack.setCustomSpacing(DashboardMetrics.headerGap, after: header)
 
-    var last: NSView = header
+    let details = NSStackView.column([], spacing: DashboardMetrics.rowGap)
+    details.translatesAutoresizingMaskIntoConstraints = false
+    details.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth).isActive = true
+    self.detailColumn = details
     let selectedSummary = expandedProvider.flatMap { selected in
       summaries.first(where: { $0.provider == selected })
     } ?? summaries.first
@@ -307,7 +326,6 @@ final class UsageDashboardView: NSView {
       self.overviewGrid = overview
       self.providerIDs = summaries.map(\.provider)
       stack.addArrangedSubview(overview)
-      last = overview
 
       if let summary = selectedSummary {
         let detail = ProviderDashboardCard(
@@ -320,43 +338,49 @@ final class UsageDashboardView: NSView {
         detail.identifier = NSUserInterfaceItemIdentifier(
           "provider-card-\(summary.provider.rawValue)")
         self.detailCard = detail
-        stack.addArrangedSubview(detail)
-        last = detail
+        details.addArrangedSubview(detail)
       }
     }
     self.showsEmpty = summaries.isEmpty
     if summaries.isEmpty {
       let empty = EmptyProvidersView(openSettings: actions.openSettings)
       self.emptyState = empty
-      stack.addArrangedSubview(empty)
-      last = empty
+      details.addArrangedSubview(empty)
     }
     if let consumption = APIConsumptionSection(
       readings: actions.apiConsumptionReadings(), now: now, toggle: actions.toggleAPIDetail)
     {
       self.apiSection = consumption
-      stack.addArrangedSubview(consumption)
-      last = consumption
+      details.addArrangedSubview(consumption)
     }
 
+    stack.addArrangedSubview(details)
     let footer = DashboardFooterView(actions: actions)
     self.footerView = footer
-    self.viewBeforeFooter = last
     stack.addArrangedSubview(footer)
-    stack.setCustomSpacing(DashboardMetrics.footerGap, after: last)
+    stack.setCustomSpacing(DashboardMetrics.footerGap, after: details)
 
     // Content-sized, with a ceiling that keeps the popover clear of the menu bar
     // and inside the screen it opens on.
-    self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: ceiling)
     self.layoutSubtreeIfNeeded()
-    let content = ceil(stack.frame.height) + 2 * DashboardMetrics.inset
+    let content = ceil(stack.fittingSize.height) + 2 * DashboardMetrics.inset
     let height = min(ceiling, max(DashboardMetrics.minimumHeight, content))
     self.intendedHeight = height
-    self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: height)
     if Self.requiresScrolling(contentHeight: content, ceiling: ceiling) {
-      self.makeScrollable(stack: stack, contentHeight: content)
+      let detailHeight = ceil(details.fittingSize.height)
+      let fixedHeight = content - detailHeight
+      if fixedHeight + DashboardMetrics.minimumDetailsViewport < ceiling {
+        self.makeScrollable(
+          stack: stack, details: details, contentHeight: detailHeight,
+          viewportHeight: ceiling - fixedHeight)
+      } else {
+        // A large provider grid can leave too little room for a useful detail
+        // viewport. Keep every tile reachable on unusually short screens.
+        self.makeWholeDashboardScrollable(stack: stack, contentHeight: content)
+      }
       self.isScrollable = true
     }
+    self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: height)
     self.appliedAppearance = Self.appearanceKey()
     self.layoutSubtreeIfNeeded()
   }
@@ -377,7 +401,8 @@ final class UsageDashboardView: NSView {
     if Self.appearanceKey() != self.appliedAppearance { return false }
     let summaries = states.map { AllowanceBuilder.summary(for: $0, now: now) }
     if summaries.isEmpty != self.showsEmpty { return false }
-    guard let column = self.column, let header = self.headerView else { return false }
+    guard let column = self.column, let details = self.detailColumn,
+      let header = self.headerView else { return false }
     header.apply(
       summaries: summaries, isRefreshing: isRefreshing, refreshStartedAt: refreshStartedAt,
       now: now)
@@ -410,7 +435,7 @@ final class UsageDashboardView: NSView {
         if !keptDetail {
           self.replaceDetail(
             summary: selected, now: now, selectedMenuBarProvider: selectedMenuBarProvider,
-            actions: actions, column: column)
+            actions: actions, column: details)
         }
       }
     }
@@ -419,12 +444,11 @@ final class UsageDashboardView: NSView {
       if self.apiSection != nil { return false }
     } else if let section = self.apiSection {
       if !section.apply(readings: readings, now: now, toggle: actions.toggleAPIDetail) {
-        self.replaceAPI(readings: readings, now: now, actions: actions, column: column)
+        self.replaceAPI(readings: readings, now: now, actions: actions, column: details)
       }
     } else {
       return false
     }
-    self.viewBeforeFooter.map { column.setCustomSpacing(DashboardMetrics.footerGap, after: $0) }
     guard self.relayout(maximumHeight: maximumHeight) else { return false }
     return true
   }
@@ -469,7 +493,6 @@ final class UsageDashboardView: NSView {
     detail.identifier = NSUserInterfaceItemIdentifier("provider-card-\(summary.provider.rawValue)")
     if let existing = self.detailCard {
       column.replaceArrangedSubview(existing, with: detail)
-      if self.viewBeforeFooter === existing { self.viewBeforeFooter = detail }
     }
     self.detailCard = detail
     self.regionRebuildCount += 1
@@ -486,7 +509,6 @@ final class UsageDashboardView: NSView {
     else { return }
     if let existing = self.apiSection {
       column.replaceArrangedSubview(existing, with: section)
-      if self.viewBeforeFooter === existing { self.viewBeforeFooter = section }
     }
     self.apiSection = section
     self.regionRebuildCount += 1
@@ -494,19 +516,49 @@ final class UsageDashboardView: NSView {
 
   private func relayout(maximumHeight: CGFloat) -> Bool {
     let ceiling = max(DashboardMetrics.minimumHeight, maximumHeight)
-    self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: ceiling)
+    let scroll = self.scrollDocument?.enclosingScrollView
+    let previousScrollOrigin = scroll?.contentView.bounds.origin
     self.layoutSubtreeIfNeeded()
-    guard let column = self.column else { return false }
-    let content = ceil(column.frame.height) + 2 * DashboardMetrics.inset
+    guard let column = self.column, let details = self.detailColumn else { return false }
+    let detailHeight = ceil(details.fittingSize.height)
+    // A detail-only scroll view has a fixed viewport. Replace that viewport
+    // with the detail's natural height when deciding whether scrolling is
+    // needed after a reading or display change.
+    let viewportHeight = self.scrollHeightConstraint?.constant ?? 0
+    let content = ceil(column.fittingSize.height) + 2 * DashboardMetrics.inset
+      - viewportHeight + (self.scrollsDetailsOnly ? detailHeight : 0)
     let height = min(ceiling, max(DashboardMetrics.minimumHeight, content))
     let needsScroll = Self.requiresScrolling(contentHeight: content, ceiling: ceiling)
     if needsScroll != self.isScrollable { return false }
+    let fixedHeight = content - detailHeight
+    if needsScroll && self.scrollsDetailsOnly
+      != (fixedHeight + DashboardMetrics.minimumDetailsViewport < ceiling)
+    {
+      return false
+    }
     self.intendedHeight = height
-    self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: height)
+    if self.scrollsDetailsOnly {
+      self.scrollHeightConstraint?.constant = max(1, ceiling - fixedHeight)
+    }
+    // In the popover this view is the window's content view, and the window
+    // owns its frame: it sits inside the popover border, not at the frame
+    // view's origin. Setting it here dropped the dashboard 13pt down and left,
+    // and made NSPopover resize around the moved view, leaving a gray band.
+    // The controller publishes `intendedHeight` and the popover resizes to it.
+    if self.window == nil {
+      self.frame = NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: height)
+    }
     if needsScroll, let document = self.scrollDocument {
-      document.frame.size.height = content
+      document.frame.size.height = self.scrollsDetailsOnly ? detailHeight : content
     }
     self.layoutSubtreeIfNeeded()
+    if let scroll, let previousScrollOrigin, let document = self.scrollDocument {
+      let maximumOffset = max(0, document.frame.height - scroll.contentView.bounds.height)
+      scroll.contentView.scroll(to: NSPoint(
+        x: previousScrollOrigin.x,
+        y: min(max(0, previousScrollOrigin.y), maximumOffset)))
+      scroll.reflectScrolledClipView(scroll.contentView)
+    }
     return true
   }
 
@@ -518,11 +570,35 @@ final class UsageDashboardView: NSView {
     contentHeight > ceiling + 0.5
   }
 
-  /// Opening a provider can push the column past the ceiling. Only then does the
-  /// dashboard scroll; the everyday view never does.
-  private func makeScrollable(stack: NSStackView, contentHeight: CGFloat) {
+  /// Keep the glance and footer stable while a long provider card scrolls.
+  private func makeScrollable(
+    stack: NSStackView, details: NSStackView, contentHeight: CGFloat,
+    viewportHeight: CGFloat
+  ) {
+    let document = FlippedView(frame: NSRect(
+      x: 0, y: 0, width: DashboardMetrics.contentWidth, height: contentHeight))
+    let scroll = NSScrollView(frame: NSRect(
+      x: 0, y: 0, width: DashboardMetrics.contentWidth, height: viewportHeight))
+    stack.replaceArrangedSubview(details, with: scroll)
+    document.addSubview(details)
+    NSLayoutConstraint.activate([
+      details.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+      details.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+      details.topAnchor.constraint(equalTo: document.topAnchor),
+      details.bottomAnchor.constraint(equalTo: document.bottomAnchor),
+      scroll.widthAnchor.constraint(equalToConstant: DashboardMetrics.contentWidth),
+    ])
+    let heightConstraint = scroll.heightAnchor.constraint(equalToConstant: viewportHeight)
+    heightConstraint.isActive = true
+    self.scrollHeightConstraint = heightConstraint
+    self.scrollsDetailsOnly = true
+    self.configureScroll(scroll, document: document)
+  }
+
+  /// If the provider grid itself is exceptionally tall, the whole dashboard
+  /// remains scrollable so none of its tiles become unreachable.
+  private func makeWholeDashboardScrollable(stack: NSStackView, contentHeight: CGFloat) {
     stack.removeFromSuperview()
-    // Flipped so the column starts at the top and the view opens there.
     let document = FlippedView(
       frame: NSRect(x: 0, y: 0, width: DashboardMetrics.width, height: contentHeight))
     stack.translatesAutoresizingMaskIntoConstraints = false
@@ -537,6 +613,12 @@ final class UsageDashboardView: NSView {
         equalTo: document.bottomAnchor, constant: -DashboardMetrics.inset),
     ])
     let scroll = NSScrollView(frame: self.bounds)
+    scroll.autoresizingMask = [.width, .height]
+    self.addSubview(scroll)
+    self.configureScroll(scroll, document: document)
+  }
+
+  private func configureScroll(_ scroll: NSScrollView, document: FlippedView) {
     self.scrollDocument = document
     scroll.documentView = document
     scroll.hasVerticalScroller = true
@@ -547,8 +629,6 @@ final class UsageDashboardView: NSView {
     // below the fold read as missing rather than as scrolled out of view.
     scroll.autohidesScrollers = false
     scroll.automaticallyAdjustsContentInsets = false
-    scroll.autoresizingMask = [.width, .height]
-    self.addSubview(scroll)
     scroll.contentView.scroll(to: .zero)
   }
 
@@ -2844,6 +2924,8 @@ enum DashboardMetrics {
 
   /// The popover's own frame and arrow, on top of the content.
   static let popoverChrome: CGFloat = 26
+  /// Below this, a pinned overview leaves too little detail to read at once.
+  static let minimumDetailsViewport: CGFloat = 360
 
   /// The ceiling the dashboard may actually use on a given screen.
   ///
