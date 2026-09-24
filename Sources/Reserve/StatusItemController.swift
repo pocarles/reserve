@@ -1023,7 +1023,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   /// animation expands around its own frame and visibly slides a menu-bar
   /// popover sideways, so disclosure changes height without that animation.
   private func expandDashboard() {
-    guard let controller = self.dashboardController else { return }
+    guard self.dashboardController != nil else { return }
     self.dashboardIsDirty = true
     let wasShown = self.popover.isShown
     if wasShown { self.popover.animates = false }
@@ -1032,7 +1032,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       self.popover.animates = self.animatesPopover
       return
     }
-    self.popover.contentSize = controller.preferredContentSize
     self.popover.animates = self.animatesPopover
   }
 
@@ -1083,6 +1082,60 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // NSPopover finishes its own ordering after `show(relativeTo:)` returns.
     // Reapply the active-window ordering once that animation has completed.
     self.bringDashboardToFront()
+    self.traceDashboardLayout("didShow")
+  }
+
+  /// Diagnostic only: `RESERVE_LAYOUT_TRACE=<file>` appends the popover and
+  /// dashboard geometry after each dashboard update, then again once AppKit
+  /// has finished the run-loop turn.
+  private static let layoutTracePath = ProcessInfo.processInfo.environment["RESERVE_LAYOUT_TRACE"]
+
+  private func traceDashboardLayout(_ event: String) {
+    guard let path = Self.layoutTracePath else { return }
+    let write: (String) -> Void = { [weak self] suffix in
+      guard let self else { return }
+      let line = "\(Date().timeIntervalSince1970) \(event)\(suffix) " + self.dashboardGeometry() + "\n"
+      if let handle = FileHandle(forWritingAtPath: path) {
+        handle.seekToEndOfFile()
+        handle.write(Data(line.utf8))
+        try? handle.close()
+      } else {
+        FileManager.default.createFile(atPath: path, contents: Data(line.utf8))
+      }
+    }
+    write("")
+    DispatchQueue.main.async { write("+async") }
+  }
+
+  private func dashboardGeometry() -> String {
+    func r(_ rect: NSRect) -> String {
+      "(\(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))x\(Int(rect.height)))"
+    }
+    guard let controller = self.dashboardController, controller.isViewLoaded else {
+      return "no-dashboard"
+    }
+    let view = controller.view
+    let intended = (view as? UsageDashboardView).map { Int($0.intendedHeight) } ?? -1
+    var parts = [
+      "shown=\(self.popover.isShown)",
+      "popoverContent=\(Int(self.popover.contentSize.width))x\(Int(self.popover.contentSize.height))",
+      "preferred=\(Int(controller.preferredContentSize.width))x\(Int(controller.preferredContentSize.height))",
+      "view=\(r(view.frame)) intended=\(intended)",
+      "rebuilds=\(controller.fullRebuildCount) updates=\(controller.contentUpdateCount)",
+    ]
+    if let window = view.window {
+      let content = window.contentRect(forFrameRect: window.frame)
+      let expected = NSRect(
+        x: content.minX - window.frame.minX, y: content.minY - window.frame.minY,
+        width: content.width, height: content.height)
+      parts.append("window=\(r(window.frame)) expectedContent=\(r(expected))")
+      parts.append("isContentView=\(window.contentView === view)")
+      parts.append("superview=\(view.superview.map { String(describing: type(of: $0)) } ?? "nil")")
+      parts.append("screenVisible=\(window.screen.map { r($0.visibleFrame) } ?? "nil")")
+    } else {
+      parts.append("window=nil")
+    }
+    return parts.joined(separator: " ")
   }
 
   func shouldDismissDashboard(forClickedWindow window: NSWindow?) -> Bool {
@@ -1320,7 +1373,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       controller.loadViewIfNeeded()
     }
     let after = controller.preferredContentSize
-    if self.popover.isShown, before != after {
+    // Compare with the popover itself, not the previous preference: a popover
+    // left at a stale size must still be brought back to the dashboard's.
+    if self.popover.isShown, self.popover.contentSize != after {
       let animates = self.popover.animates
       self.popover.animates = false
       self.popover.contentSize = after
@@ -1328,6 +1383,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
     self.dashboardIsDirty = false
     self.lastDashboardMinute = minute
+    self.traceDashboardLayout("update(\(Int(before.height))->\(Int(after.height)))")
   }
 
   private func showSettings() {
@@ -1389,6 +1445,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     if let dashboardController { return dashboardController }
     let controller = DashboardViewController(
       store: self.store,
+      maximumHeight: { [weak self] in
+        DashboardMetrics.availableHeight(on: self?.dashboardScreen())
+      },
       actions: DashboardActions(
         refreshAll: { [weak self] in self?.store.refreshAll() },
         connectProvider: { [weak self] provider in self?.connectProvider(provider) },
@@ -1425,6 +1484,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     self.dashboardController = controller
     self.popover.contentViewController = controller
     return controller
+  }
+
+  private func dashboardScreen() -> NSScreen? {
+    if let dashboardController, dashboardController.isViewLoaded,
+      let screen = dashboardController.view.window?.screen
+    {
+      return screen
+    }
+    // The first layout runs before the popover has a window. Its menu-bar
+    // anchor already knows the display, which need not be NSScreen.main.
+    return self.statusItem.button?.window?.screen ?? NSScreen.main
   }
 
   /// The last detail destination survives a new store, falls back while that

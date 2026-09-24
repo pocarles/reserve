@@ -914,7 +914,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       }
 
       failures.append(contentsOf: LifecycleSelfTest.checkSettingsLiveValues().failures)
-      failures.append(contentsOf: await DashboardUpdateSelfTest.run())
+      failures.append(contentsOf: await DashboardUpdateSelfTest.run(store: store))
       Self.finishUISelfTest(
         success: failures.isEmpty,
         details: failures.isEmpty

@@ -33,6 +33,25 @@ enum LifecycleSelfTest {
     view.subviews + view.subviews.flatMap { self.descendants(of: $0) }
   }
 
+  /// The dashboard is the popover window's content view, so it has to sit
+  /// exactly in the window's content rect. A dashboard that sets its own frame
+  /// drops to the frame view's origin: the popover's gray border shows above it
+  /// and at its trailing edge, and the footer runs into the bottom border.
+  static func contentRectMismatch(_ root: NSView, in window: NSWindow) -> String? {
+    let content = window.contentRect(forFrameRect: window.frame)
+    let expected = NSRect(
+      x: content.minX - window.frame.minX, y: content.minY - window.frame.minY,
+      width: content.width, height: content.height)
+    let actual = root.frame
+    let matches = abs(actual.minX - expected.minX) < 1 && abs(actual.minY - expected.minY) < 1
+      && abs(actual.width - expected.width) < 1 && abs(actual.height - expected.height) < 1
+    if matches { return nil }
+    func r(_ rect: NSRect) -> String {
+      "(\(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))×\(Int(rect.height)))"
+    }
+    return "dashboard frame \(r(actual)) is not the popover content rect \(r(expected))"
+  }
+
   /// The provider cards the popover window is actually drawing.
   static func visibleCards(in window: NSWindow?) -> [ProviderDashboardCard] {
     guard let root = window?.contentView else { return [] }
@@ -173,6 +192,14 @@ enum LifecycleSelfTest {
       if let root = window.contentView {
         let screen = window.screen ?? NSScreen.main
         let visible = screen?.visibleFrame.height ?? 0
+        let chrome = window.frame.height - root.frame.height
+        if let mismatch = self.contentRectMismatch(root, in: window) {
+          result.failures.append("\(step): \(mismatch)")
+        }
+        result.expect(
+          abs(chrome - DashboardMetrics.popoverChrome) < 2,
+          "\(step): popover window is \(Int(window.frame.height))pt but its dashboard is "
+            + "\(Int(root.frame.height))pt (chrome \(Int(chrome))pt)")
         result.notes.append(
           "\(step): content=\(Int(root.frame.height)) window=\(Int(window.frame.height)) "
             + "screenVisible=\(Int(visible))")
@@ -605,6 +632,9 @@ enum LifecycleSelfTest {
       $0.identifier?.rawValue == "settings-updated-grok"
     }
     result.expect(sameRoot, "a usage reading replaced the dashboard view")
+    if let mismatch = self.contentRectMismatch(root, in: window) {
+      result.failures.append("after a usage reading, \(mismatch)")
+    }
     result.expect(
       openAIAfter.map(ObjectIdentifier.init) == tileID,
       "a usage reading replaced the OpenAI tile")

@@ -5,19 +5,29 @@ import ReserveCore
 /// Fixtures only: no preferences, credentials, network, or local history.
 @MainActor
 enum DashboardUpdateSelfTest {
-  static func run() async -> [String] {
+  private final class FrameRecorder: NSObject {
+    var heights: [CGFloat] = []
+
+    @MainActor @objc func frameDidChange(_ notification: Notification) {
+      if let view = notification.object as? NSView {
+        self.heights.append(view.frame.height)
+      }
+    }
+  }
+
+  static func run(store: UsageStore) async -> [String] {
     var failures: [String] = []
     let now = Date()
     let reset = now.addingTimeInterval(3_600)
 
     func state(
       weeklyUsed: Double, shareUsed: Double, todayTokens: Int64 = 120,
-      fetchedAt: Date? = nil
+      fetchedAt: Date? = nil, provider: ProviderID = .openAI
     ) -> ProviderViewState {
       var result = ProviderViewState(
-        provider: .openAI,
+        provider: provider,
         snapshot: UsageSnapshot(
-          provider: .openAI,
+          provider: provider,
           planName: "Test",
           windows: [
             UsageWindow(
@@ -30,7 +40,7 @@ enum DashboardUpdateSelfTest {
           fetchedAt: fetchedAt ?? now.addingTimeInterval(-30), source: "Fixture",
           details: [UsageDetail("Account", "person@example.com", isPersonal: true)]))
       result.localUsage = LocalUsageSummary(
-        provider: .openAI, periodDays: 30, inputTokens: todayTokens * 10,
+        provider: provider, periodDays: 30, inputTokens: todayTokens * 10,
         cachedInputTokens: todayTokens * 3, outputTokens: todayTokens,
         apiEquivalentCostUSD: Double(todayTokens) / 100, todayTokens: todayTokens,
         fetchedAt: fetchedAt ?? now.addingTimeInterval(-30),
@@ -81,11 +91,23 @@ enum DashboardUpdateSelfTest {
       return failures
     }
 
+    // An in-place update must not expose the screen ceiling as a temporary
+    // popover height while Auto Layout measures a shorter dashboard.
+    dashboard.postsFrameChangedNotifications = true
+    let frameRecorder = FrameRecorder()
+    NotificationCenter.default.addObserver(
+      frameRecorder, selector: #selector(FrameRecorder.frameDidChange(_:)),
+      name: NSView.frameDidChangeNotification, object: dashboard)
+    let beforePrivacyHeight = dashboard.frame.height
     readings[0].hidesPersonalInfo = true
     let privacyApplied = dashboard.apply(
       states: [initialState], selectedMenuBarProvider: .openAI,
       expandedProvider: .openAI, isRefreshing: false, refreshStartedAt: nil,
       now: now, maximumHeight: 2_000, actions: actions)
+    NotificationCenter.default.removeObserver(frameRecorder)
+    if frameRecorder.heights.max() ?? 0 > max(beforePrivacyHeight, dashboard.frame.height) + 1 {
+      failures.append("retained update exposed a temporary oversized popover frame")
+    }
     if !privacyApplied || text().contains("api-person@example.com") {
       failures.append("privacy toggle left an expanded API personal value visible")
     }
@@ -114,6 +136,133 @@ enum DashboardUpdateSelfTest {
     }
     if !text().contains(DashboardFormat.tokens(222)) {
       failures.append("retained provider details did not publish changed local totals")
+    }
+
+    // A tall card scrolls on a short display. Reading updates and a change in
+    // available display height must not silently move the user's viewport.
+    let shortDashboard = UsageDashboardView(
+      states: [initialState], selectedMenuBarProvider: .openAI,
+      expandedProvider: .openAI, isRefreshing: false, now: now,
+      maximumHeight: 420, actions: actions)
+    shortDashboard.layoutSubtreeIfNeeded()
+    if let scroll = descendants(shortDashboard).compactMap({ $0 as? NSScrollView }).first,
+      let document = scroll.documentView
+    {
+      func offset() -> CGFloat { scroll.contentView.bounds.minY }
+      let topApplied = shortDashboard.apply(
+        states: [updatedState], selectedMenuBarProvider: .openAI,
+        expandedProvider: .openAI, isRefreshing: false, refreshStartedAt: nil,
+        now: now, maximumHeight: 380, actions: actions)
+      if !topApplied || abs(offset()) > 1 {
+        failures.append("short-screen update scrolled the dashboard away from its header")
+      }
+      let maximumOffset = max(0, document.frame.height - scroll.contentView.bounds.height)
+      let targetOffset = min(80, maximumOffset / 2)
+      scroll.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
+      scroll.reflectScrolledClipView(scroll.contentView)
+      let before = offset()
+      let scrolledApplied = shortDashboard.apply(
+        states: [state(weeklyUsed: 26, shareUsed: 56, todayTokens: 223)],
+        selectedMenuBarProvider: .openAI, expandedProvider: .openAI,
+        isRefreshing: false, refreshStartedAt: nil,
+        now: now, maximumHeight: 380, actions: actions)
+      if !scrolledApplied || abs(offset() - before) > 1 {
+        failures.append("retained reading update moved a scrolled dashboard")
+      }
+    } else {
+      failures.append("short-screen dashboard had no scrollable content")
+    }
+
+    // Choosing another provider replaces the card in place. The new card has
+    // to open at its top, not at the previous card's scroll offset.
+    let claudeState = state(weeklyUsed: 30, shareUsed: 40, provider: .anthropic)
+    let switchingDashboard = UsageDashboardView(
+      states: [initialState, claudeState], selectedMenuBarProvider: .openAI,
+      expandedProvider: .openAI, isRefreshing: false, now: now,
+      maximumHeight: 380, actions: actions)
+    switchingDashboard.layoutSubtreeIfNeeded()
+    if let scroll = descendants(switchingDashboard).compactMap({ $0 as? NSScrollView }).first,
+      let document = scroll.documentView
+    {
+      let maximumOffset = max(0, document.frame.height - scroll.contentView.bounds.height)
+      scroll.contentView.scroll(to: NSPoint(x: 0, y: min(80, maximumOffset)))
+      scroll.reflectScrolledClipView(scroll.contentView)
+      let scrolledBefore = scroll.contentView.bounds.minY
+      let switched = switchingDashboard.apply(
+        states: [initialState, claudeState], selectedMenuBarProvider: .openAI,
+        expandedProvider: .anthropic, isRefreshing: false, refreshStartedAt: nil,
+        now: now, maximumHeight: 380, actions: actions)
+      let switchedScroll = descendants(switchingDashboard).compactMap { $0 as? NSScrollView }.first
+      if scrolledBefore < 1 || !switched
+        || abs(switchedScroll?.contentView.bounds.minY ?? 0) > 1
+      {
+        failures.append(
+          "switching providers kept the previous card's scroll offset "
+            + "(before=\(Int(scrolledBefore)), applied=\(switched), "
+            + "after=\(Int(switchedScroll?.contentView.bounds.minY ?? -1)))")
+      }
+    } else {
+      failures.append("short-screen provider switch had no scrollable content")
+    }
+
+    let pinnedDashboard = UsageDashboardView(
+      states: [initialState], selectedMenuBarProvider: .openAI,
+      expandedProvider: .openAI, isRefreshing: false, now: now,
+      maximumHeight: 700, actions: actions)
+    let pinnedViews = descendants(pinnedDashboard)
+    let overview = pinnedViews.first { $0.identifier?.rawValue == "provider-overview" }
+    let detail = pinnedViews.first { $0.identifier?.rawValue == "provider-card-openAI" }
+    let settings = pinnedViews.first { $0.identifier?.rawValue == "open-settings" }
+    if let scroll = pinnedViews.compactMap({ $0 as? NSScrollView }).first {
+      let overviewPinned = overview != nil && overview?.enclosingScrollView == nil
+      let detailScrolls = detail != nil && detail?.enclosingScrollView === scroll
+      let footerPinned = settings != nil && settings?.enclosingScrollView == nil
+      if !overviewPinned || !detailScrolls || !footerPinned {
+        failures.append(
+          "short-screen pinned layout overview=\(overviewPinned), "
+            + "detailScrolls=\(detailScrolls), footer=\(footerPinned), "
+            + "natural=\(Int(dashboard.frame.height)), viewport=\(Int(pinnedDashboard.frame.height))")
+      }
+    } else {
+      failures.append("short-screen pinned layout did not scroll its detail")
+    }
+
+    let fourProviderDashboard = UsageDashboardView(
+      states: [initialState, ProviderViewState(provider: .anthropic),
+               ProviderViewState(provider: .grok), ProviderViewState(provider: .cursor)],
+      selectedMenuBarProvider: .openAI, expandedProvider: .openAI,
+      isRefreshing: false, now: now, maximumHeight: 900, actions: actions)
+    let fourViews = descendants(fourProviderDashboard)
+    let fourScroll = fourViews.compactMap { $0 as? NSScrollView }.first
+    let fourOverview = fourViews.first { $0.identifier?.rawValue == "provider-overview" }
+    let fourDetail = fourViews.first { $0.identifier?.rawValue == "provider-card-openAI" }
+    let fourSettings = fourViews.first { $0.identifier?.rawValue == "open-settings" }
+    if fourScroll == nil || fourOverview?.enclosingScrollView != nil
+      || fourDetail?.enclosingScrollView !== fourScroll
+      || fourSettings?.enclosingScrollView != nil
+      || (fourScroll?.frame.height ?? 0) < DashboardMetrics.minimumDetailsViewport
+    {
+      failures.append(
+        "four-provider short-screen layout scroll=\(fourScroll != nil), "
+          + "overview=\(fourOverview?.enclosingScrollView == nil), "
+          + "detail=\(fourDetail?.enclosingScrollView === fourScroll), "
+          + "footer=\(fourSettings?.enclosingScrollView == nil), "
+          + "viewport=\(Int(fourScroll?.frame.height ?? 0))")
+    }
+
+    var availableHeight: CGFloat = 1_200
+    let sizingController = DashboardViewController(
+      store: store, maximumHeight: { availableHeight }, actions: actions)
+    sizingController.loadViewIfNeeded()
+    let updatesBeforeResize = sizingController.fullRebuildCount
+      + sizingController.contentUpdateCount
+    availableHeight = 380
+    sizingController.update()
+    if sizingController.preferredContentSize.height > availableHeight + 1
+      || sizingController.fullRebuildCount + sizingController.contentUpdateCount
+        <= updatesBeforeResize
+    {
+      failures.append("dashboard ignored a display-height change with unchanged readings")
     }
 
     var permissionState = ProviderViewState(provider: .openAI)
