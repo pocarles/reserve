@@ -407,6 +407,9 @@ final class UsageDashboardView: NSView {
       summaries: summaries, isRefreshing: isRefreshing, refreshStartedAt: refreshStartedAt,
       now: now)
     let ids = summaries.map(\.provider)
+    // A different provider's card opens at its top; a reading update keeps
+    // the viewport where the user left it.
+    var showsNewProvider = false
     if !summaries.isEmpty {
       if let overview = self.overviewGrid, ids == self.providerIDs {
         let previousTileRebuilds = overview.tileRebuildCount
@@ -425,6 +428,7 @@ final class UsageDashboardView: NSView {
         ?? summaries.first
       if let selected {
         var keptDetail = false
+        showsNewProvider = self.detailCard.map { $0.providerID != selected.provider } ?? false
         if let detail = self.detailCard, detail.providerID == selected.provider {
           let previousRegionRebuilds = detail.regionRebuildCount
           keptDetail = detail.apply(
@@ -449,7 +453,8 @@ final class UsageDashboardView: NSView {
     } else {
       return false
     }
-    guard self.relayout(maximumHeight: maximumHeight) else { return false }
+    guard self.relayout(maximumHeight: maximumHeight, keepsScrollOffset: !showsNewProvider)
+    else { return false }
     return true
   }
 
@@ -514,10 +519,10 @@ final class UsageDashboardView: NSView {
     self.regionRebuildCount += 1
   }
 
-  private func relayout(maximumHeight: CGFloat) -> Bool {
+  private func relayout(maximumHeight: CGFloat, keepsScrollOffset: Bool) -> Bool {
     let ceiling = max(DashboardMetrics.minimumHeight, maximumHeight)
     let scroll = self.scrollDocument?.enclosingScrollView
-    let previousScrollOrigin = scroll?.contentView.bounds.origin
+    let previousScrollOrigin = keepsScrollOffset ? scroll?.contentView.bounds.origin : .zero
     self.layoutSubtreeIfNeeded()
     guard let column = self.column, let details = self.detailColumn else { return false }
     let detailHeight = ceil(details.fittingSize.height)
