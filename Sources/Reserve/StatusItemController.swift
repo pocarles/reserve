@@ -58,6 +58,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     DistributedNotificationCenter.default.addObserver(
       self, selector: #selector(self.systemAppearanceChanged),
       name: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(self.screenParametersChanged),
+      name: NSApplication.didChangeScreenParametersNotification, object: nil)
     self.applyAppearance()
     let now = Date()
     self.updateStatusIcon(now: now)
@@ -66,7 +69,22 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
   deinit {
     DistributedNotificationCenter.default.removeObserver(self)
+    NotificationCenter.default.removeObserver(self)
   }
+
+  /// A display change can shrink or grow the space the open popover was sized
+  /// for: a monitor unplugged, a resolution change, the menu bar or Dock
+  /// resized. Nothing else re-measures the open dashboard until the next
+  /// reading or minute tick. A closed popover measures again when it opens.
+  @objc private func screenParametersChanged() {
+    guard self.popover.isShown else { return }
+    self.dashboardIsDirty = true
+    self.updateDashboardIfNeeded(force: true)
+  }
+
+  /// Stands in for the screen's available height, so the lifecycle self-test
+  /// can change it without changing the display.
+  var availableHeightOverrideForTesting: CGFloat?
 
   private func applyObservedStoreChange() {
     let now = Date()
@@ -1446,7 +1464,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let controller = DashboardViewController(
       store: self.store,
       maximumHeight: { [weak self] in
-        DashboardMetrics.availableHeight(on: self?.dashboardScreen())
+        self?.availableHeightOverrideForTesting
+          ?? DashboardMetrics.availableHeight(on: self?.dashboardScreen())
       },
       actions: DashboardActions(
         refreshAll: { [weak self] in self?.store.refreshAll() },
