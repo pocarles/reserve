@@ -895,6 +895,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggle: { statusController.toggleProviderDetailForTesting($0) })
       failures.append(contentsOf: disclosure.failures)
 
+      let screenChange = LifecycleSelfTest.checkScreenChangeResize(
+        store: store, controller: statusController,
+        toggle: { statusController.toggleProviderDetailForTesting($0) })
+      failures.append(contentsOf: screenChange.failures)
+
       let enablement = LifecycleSelfTest.checkEnablement(
         store: store, controller: statusController)
       failures.append(contentsOf: enablement.failures)

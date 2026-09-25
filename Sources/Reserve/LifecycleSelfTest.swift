@@ -149,6 +149,59 @@ enum LifecycleSelfTest {
     }
   }
 
+  // MARK: - Display changes
+
+  /// A display change while the popover is open has to re-measure it: a
+  /// shorter screen must not leave the popover taller than the space it has,
+  /// and a taller one must give the scrolled rows back.
+  static func checkScreenChangeResize(
+    store: UsageStore,
+    controller: StatusItemController,
+    toggle: (ProviderID) -> Void
+  ) -> Result {
+    var result = Result()
+    guard let window = controller.dashboardWindowForTesting else {
+      result.failures.append("screen change check needs the open dashboard")
+      return result
+    }
+    let originalSelection = store.expandedProvider
+    defer {
+      controller.availableHeightOverrideForTesting = nil
+      NotificationCenter.default.post(
+        name: NSApplication.didChangeScreenParametersNotification, object: NSApp)
+      store.expandedProvider = originalSelection
+      self.settle()
+    }
+    // The tallest fixture card makes the height change visible.
+    if store.expandedProvider != .openAI { toggle(.openAI) }
+    self.settle()
+    let natural = controller.popoverContentSizeForTesting.height
+    let shorter = max(DashboardMetrics.minimumHeight + 20, natural - 160)
+
+    func check(_ step: String, ceiling: CGFloat?) {
+      controller.availableHeightOverrideForTesting = ceiling
+      NotificationCenter.default.post(
+        name: NSApplication.didChangeScreenParametersNotification, object: NSApp)
+      self.settle()
+      let height = controller.popoverContentSizeForTesting.height
+      if let ceiling {
+        result.expect(
+          height <= ceiling + 1,
+          "\(step): the open popover stayed \(Int(height))pt for \(Int(ceiling))pt of screen")
+      } else {
+        result.expect(
+          abs(height - natural) < 1,
+          "\(step): the open popover is \(Int(height))pt, not its natural \(Int(natural))pt")
+      }
+      if let root = window.contentView, let mismatch = self.contentRectMismatch(root, in: window) {
+        result.failures.append("\(step): \(mismatch)")
+      }
+    }
+    check("shorter display", ceiling: shorter)
+    check("display restored", ceiling: nil)
+    return result
+  }
+
   // MARK: - Provider disclosure
 
   /// Selects every provider, repeats a selection, and confirms the complete tile
