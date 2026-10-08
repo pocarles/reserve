@@ -2617,11 +2617,22 @@ private final class UsageDetailGrid: NSView {
         appendTokens("cached-input", "Cached input, 30 days", mix.cachedInput)
         appendTokens("cache-writes", "Cache writes, 30 days", mix.cacheWrite)
         appendTokens("output-tokens", "Output, 30 days", mix.output)
-        if let savings = usage.cacheSavingsUSD,
-          DashboardFormat.money(savings) != DashboardFormat.money(0) {
+        if mix.cachedInput > 0, let savings = usage.cacheSavingsUSD {
+          let partial = usage.cacheSavingsUnpricedReads > 0
           rows.append(RowSpec(
-            kind: .cell, id: "cache-savings", label: "Cache savings, 30 days",
-            value: "≈ \(DashboardFormat.money(savings))"))
+            kind: .cell, id: "cache-savings", label: "API cache savings, 30 days",
+            value: "≈ \(DashboardFormat.money(savings))\(partial ? " · partial" : "")"))
+          if partial {
+            // Round down so a nearly complete estimate never claims 100%.
+            let coverage = min(99, Int((usage.cacheSavingsCoverage * 100).rounded(.down)))
+            rows.append(RowSpec(
+              kind: .fact, id: "cache-pricing-coverage", label: "Cache pricing coverage",
+              value: "\(coverage == 0 ? "<1" : String(coverage))% of cached input"))
+          }
+        } else if mix.cachedInput > 0, usage.origin == .localDevice {
+          rows.append(RowSpec(
+            kind: .cell, id: "cache-savings", label: "API cache savings, 30 days",
+            value: "Price unavailable"))
         }
       } else if usage.inputTokens > 0 || usage.outputTokens > 0 {
         rows.append(RowSpec(

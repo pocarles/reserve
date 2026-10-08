@@ -732,7 +732,7 @@ enum ConnectionFlowSelfTest {
     expect(manualText.contains("Uncached input, 30 days")
       && manualText.contains("Cached input, 30 days")
       && manualText.contains("Output, 30 days")
-      && manualText.contains("Cache savings, 30 days")
+      && manualText.contains("API cache savings, 30 days")
       && !manualText.contains("Cache writes, 30 days")
       && !manualText.contains("Cache read / write, 30 days")
       && !manualText.contains("Input / output, 30 days")
@@ -740,6 +740,40 @@ enum ConnectionFlowSelfTest {
       "expanded detail did not show the cache mix and its savings")
     expect(!manualText.contains { $0.contains("synthetic") || $0.contains("/Users") || $0.contains(".jsonl") },
       "local history detail exposed a scanner source or path")
+
+    for (name, savings, unknown, expected) in [
+      ("partial", Optional(123.45), Int64(10), "≈ $123 · partial"),
+      ("unpriced", nil, Int64(25), "Price unavailable"),
+      ("complete", Optional(123.45), Int64(0), "≈ $123"),
+    ] {
+      var state = ProviderViewState(provider: .openAI, snapshot: manual.states[.openAI]?.snapshot)
+      state.localUsage = LocalUsageSummary(
+        provider: .openAI, periodDays: 30, inputTokens: 40, cachedInputTokens: 25,
+        outputTokens: 10, apiEquivalentCostUSD: 1.25, cacheSavingsUSD: savings,
+        unpricedCachedInputTokens: unknown)
+      let card = ProviderDashboardCard(
+        summary: AllowanceBuilder.summary(for: state), now: Date(),
+        isSelectedForMenuBar: false, isExpanded: true,
+        connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+      card.frame.size = card.fittingSize
+      card.layoutSubtreeIfNeeded()
+      let text = LifecycleSelfTest.descendants(of: card).compactMap { ($0 as? NSTextField)?.stringValue }
+      expect(text.contains("API cache savings, 30 days") && text.contains(expected),
+        "\(name) cache savings did not explain their pricing state")
+      expect(text.contains("Cache pricing coverage") == (name == "partial"),
+        "cache pricing coverage appeared for a complete or unpriced estimate")
+      if name == "partial" {
+        expect(text.contains("60% of cached input"), "partial savings hid their token coverage")
+      }
+      let evidence = FileManager.default.temporaryDirectory.appendingPathComponent("reserve-connection-review")
+      if let bitmap = card.bitmapImageRepForCachingDisplay(in: card.bounds) {
+        card.cacheDisplay(in: card.bounds, to: bitmap)
+        do {
+          try bitmap.representation(using: .png, properties: [:])?.write(
+            to: evidence.appendingPathComponent("cache-savings-\(name).png"))
+        } catch { failures.append("cache savings review image could not be saved") }
+      } else { failures.append("cache savings review view did not render") }
+    }
 
     let automatic = Self.historyRefreshStore(
       directory: directory, name: "automatic", planKeys: planKeys,

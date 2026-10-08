@@ -69,9 +69,12 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
   public let outputTokens: Int64
   public let apiEquivalentCostUSD: Double
   /// What cache reads would have cost at the full input rate, minus what they
-  /// cost at the cache rate. Nil when a read could not be priced. Zero when
-  /// there were no priced cache reads.
+  /// cost at the cache rate, for the reads whose price is known. Nil when none
+  /// could be priced. Check the coverage before presenting a complete total.
   public let cacheSavingsUSD: Double?
+  /// Missing on older summaries. Infer full coverage only when they supplied
+  /// a savings value, otherwise keep their cache reads unpriced.
+  public let unpricedCachedInputTokens: Int64?
   public let isCostEstimate: Bool
   public let todayTokens: Int64
   public let cycleTokens: Int64
@@ -94,6 +97,7 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     outputTokens: Int64,
     apiEquivalentCostUSD: Double,
     cacheSavingsUSD: Double? = nil,
+    unpricedCachedInputTokens: Int64? = nil,
     isCostEstimate: Bool = false,
     todayTokens: Int64? = nil,
     cycleTokens: Int64? = nil,
@@ -124,6 +128,9 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
       self.cacheSavingsUSD = max(0, cacheSavingsUSD)
     } else {
       self.cacheSavingsUSD = nil
+    }
+    self.unpricedCachedInputTokens = unpricedCachedInputTokens.map {
+      min(normalizedCached, max(0, $0))
     }
     self.isCostEstimate = isCostEstimate
     self.todayTokens = max(0, todayTokens ?? fallbackTokens)
@@ -159,6 +166,17 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
 
   public var totalTokens: Int64 {
     self.totalTokensValue
+  }
+
+  public var cacheSavingsCoverage: Double {
+    let reads = self.tokenMix.cachedInput
+    guard reads > 0 else { return 1 }
+    return Double(reads - self.cacheSavingsUnpricedReads) / Double(reads)
+  }
+
+  public var cacheSavingsUnpricedReads: Int64 {
+    let reads = self.tokenMix.cachedInput
+    return min(reads, self.unpricedCachedInputTokens ?? (self.cacheSavingsUSD == nil ? reads : 0))
   }
 
   private var totalTokensValue: Int64 {
@@ -351,7 +369,7 @@ public actor LocalUsageScanner {
   /// bounded; the published index still has its original 12 MB limit.
   private var maximumCheckpointBytes: Int { self.maximumCacheBytes * 2 }
   private let maximumLineBytes = 1024 * 1024
-  private let codexTailBytes = 2 * 1024 * 1024
+  private let codexTailBytes = 8 * 1024 * 1024
   private let codexTailStepBytes = 256 * 1024
   private var maximumBytesPerScan = 64 * 1024 * 1024
   private let maximumResidentIndexBytes = 4 * 1024 * 1024
@@ -688,7 +706,7 @@ public actor LocalUsageScanner {
           device: metadata.device,
           inode: metadata.inode,
           changedAt: metadata.changedAt,
-          savingsPriced: true)
+          savingsPriced: true, codexPricingVersion: 1)
         try self.storeParsed(record!, key: key, box: box, ledger: ledger, budget: budget)
       }
     }
@@ -1028,6 +1046,7 @@ public actor LocalUsageScanner {
     // the next scan because the stamp will no longer match.
     var start = UInt64(max(0, file.metadata.size))
     var data = Data()
+    var parsed: (timestamp: Date, totals: UsageTotals, model: String?)?
     while start > 0, data.count < self.codexTailBytes, remainingBytes > 0 {
       try Self.checkDeadline(deadline, budget: budget)
       let step = min(UInt64(self.codexTailStepBytes), start, UInt64(remainingBytes))
@@ -1042,27 +1061,34 @@ public actor LocalUsageScanner {
       expanded.append(data)
       data = expanded
 
-      let hasUsage = data.range(of: Data(#""token_count""#.utf8)) != nil
-      let hasModel = data.range(of: Data(#""turn_context""#.utf8)) != nil
-      if hasUsage, hasModel { break }
+      // A model name in a partial line or in tool output is not a context.
+      // Keep searching until a complete context precedes the latest usage.
+      var completeLines = data
+      if start > 0, let newline = completeLines.firstIndex(of: 0x0A) {
+        completeLines.removeSubrange(completeLines.startIndex...newline)
+      }
+      parsed = try Self.parseCodexTailData(completeLines, deadline: deadline, budget: budget)
+      if parsed?.model != nil { break }
     }
-    if start > 0, let newline = data.firstIndex(of: 0x0A) {
-      data.removeSubrange(data.startIndex...newline)
+    if start > 0, data.count < self.codexTailBytes, remainingBytes <= 0 {
+      budget?.markStarved()
+      try Self.checkDeadline(deadline, budget: budget)
     }
-    return try Self.parseCodexTailData(data, deadline: deadline, budget: budget)
+    return parsed.map { ($0.timestamp, $0.totals) }
   }
 
   static func parseCodexTailData(_ data: Data) -> (timestamp: Date, totals: UsageTotals)? {
-    try? Self.parseCodexTailData(data, deadline: nil, budget: nil)
+    let parsed = try? Self.parseCodexTailData(data, deadline: nil, budget: nil)
+    return parsed.map { ($0.timestamp, $0.totals) }
   }
 
   private static func parseCodexTailData(
     _ data: Data,
     deadline: Date?,
     budget: ScanBudget?
-  ) throws -> (timestamp: Date, totals: UsageTotals)? {
+  ) throws -> (timestamp: Date, totals: UsageTotals, model: String?)? {
     var currentModel: String?
-    var latest: (Date, UsageTotals)?
+    var latest: (Date, UsageTotals, String?)?
     for (lineIndex, line) in data.split(separator: 0x0A).prefix(100_000).enumerated()
     where line.count <= 1024 * 1024
     {
@@ -1091,13 +1117,14 @@ public actor LocalUsageScanner {
         let cached = Self.int64(usage["cached_input_tokens"])
         let cacheWrite = Self.int64(usage["cache_write_input_tokens"])
         let output = Self.int64(usage["output_tokens"])
-        let model = currentModel ?? "gpt-5.6-sol"
+        let model = currentModel ?? ""
         latest = (
           timestamp,
           Pricing.totals(
             provider: .openAI, model: model, input: input, cached: cached,
             cacheWrite: cacheWrite, output: output,
-            estimated: currentModel == nil)
+            estimated: currentModel == nil),
+          currentModel
         )
       }
     }
@@ -2308,6 +2335,9 @@ private struct CachedFile: Codable {
   /// a Claude reparse is still short of the end of the file. Nil on indexes
   /// written before savings existed.
   var savingsPriced: Bool? = nil
+  /// Reprice old Codex tails once to remove the assumed model and publish
+  /// cache-read pricing coverage. Other providers keep their existing index.
+  var codexPricingVersion: Int? = nil
   /// Missing on Claude indexes whose day keys used the timestamp's UTC date.
   var dayTimeZone: String? = nil
   /// Bounded source-day totals carried only until a day migration is published.
@@ -2317,6 +2347,7 @@ private struct CachedFile: Codable {
   /// Legacy rows with cache reads, and an unfinished reparse, need another pass.
   /// A finished pass stays put even when the model has no rate.
   var needsSavingsRefresh: Bool {
+    if self.provider == .openAI, self.codexPricingVersion != 1 { return true }
     if self.savingsPriced == true { return false }
     if self.savingsPriced == false { return true }
     return self.days.values.contains { $0.pricedSavings == nil }
@@ -2324,9 +2355,17 @@ private struct CachedFile: Codable {
   }
 
   func totals(since cutoffKey: String) -> UsageTotals {
-    self.days.filter { $0.key >= cutoffKey }.values.reduce(into: UsageTotals()) { result, value in
+    var totals = self.days.filter { $0.key >= cutoffKey }.values.reduce(into: UsageTotals()) { result, value in
       result.add(value)
     }
+    // An old Codex price may have come from the assumed model. Keep the token
+    // history available, but do not call that discount verified coverage.
+    if self.provider == .openAI, self.codexPricingVersion != 1, totals.cached > 0 {
+      totals.cacheSavingsUSD = 0
+      totals.cacheSavingsKnown = false
+      totals.cacheSavingsUnpricedTokens = totals.cached
+    }
+    return totals
   }
 }
 
@@ -2357,21 +2396,22 @@ struct UsageTotals: Codable, Equatable {
   var output: Int64 = 0
   var costUSD: Double = 0
   var estimated = false
-  /// Cache-read discount against the full input rate. Meaningful only when
-  /// `cacheSavingsKnown` is true. Rows written before this field existed leave
-  /// it nil; a cache read on those rows is unknown, not zero.
+  /// Discount for priced reads. Unpriced reads keep their token count so a
+  /// sibling row can contribute a partial discount without claiming coverage.
   var cacheSavingsUSD: Double = 0
   var cacheSavingsKnown: Bool? = nil
+  var cacheSavingsUnpricedTokens: Int64? = nil
 
   private enum CodingKeys: String, CodingKey {
     case input, cached, cacheWrite, output, costUSD, estimated
-    case cacheSavingsUSD, cacheSavingsKnown
+    case cacheSavingsUSD, cacheSavingsKnown, cacheSavingsUnpricedTokens
   }
 
   init(
     input: Int64 = 0, cached: Int64 = 0, cacheWrite: Int64 = 0, output: Int64 = 0,
     costUSD: Double = 0, estimated: Bool = false,
-    cacheSavingsUSD: Double = 0, cacheSavingsKnown: Bool? = nil
+    cacheSavingsUSD: Double = 0, cacheSavingsKnown: Bool? = nil,
+    cacheSavingsUnpricedTokens: Int64? = nil
   ) {
     self.input = input
     self.cached = cached
@@ -2381,6 +2421,7 @@ struct UsageTotals: Codable, Equatable {
     self.estimated = estimated
     self.cacheSavingsUSD = cacheSavingsUSD
     self.cacheSavingsKnown = cacheSavingsKnown
+    self.cacheSavingsUnpricedTokens = cacheSavingsUnpricedTokens
   }
 
   init(from decoder: Decoder) throws {
@@ -2391,8 +2432,12 @@ struct UsageTotals: Codable, Equatable {
     self.output = try container.decodeIfPresent(Int64.self, forKey: .output) ?? 0
     self.costUSD = try container.decodeIfPresent(Double.self, forKey: .costUSD) ?? 0
     self.estimated = try container.decodeIfPresent(Bool.self, forKey: .estimated) ?? false
+    self.cacheSavingsUnpricedTokens = try container.decodeIfPresent(
+      Int64.self, forKey: .cacheSavingsUnpricedTokens)
     if try container.decodeIfPresent(Bool.self, forKey: .cacheSavingsKnown) == false {
-      self.cacheSavingsUSD = 0
+      let value = try container.decodeIfPresent(Double.self, forKey: .cacheSavingsUSD) ?? 0
+      self.cacheSavingsUSD = self.cacheSavingsUnpricedTokens != nil && value.isFinite && value >= 0
+        ? value : 0
       self.cacheSavingsKnown = false
     } else if container.contains(.cacheSavingsUSD) {
       let value = try container.decode(Double.self, forKey: .cacheSavingsUSD)
@@ -2402,6 +2447,7 @@ struct UsageTotals: Codable, Equatable {
       } else {
         self.cacheSavingsUSD = 0
         self.cacheSavingsKnown = false
+        self.cacheSavingsUnpricedTokens = max(0, self.cached)
       }
     } else {
       self.cacheSavingsUSD = 0
@@ -2423,19 +2469,30 @@ struct UsageTotals: Codable, Equatable {
       try container.encode(self.cacheSavingsUSD, forKey: .cacheSavingsUSD)
     } else if self.cacheSavingsKnown == false {
       try container.encode(false, forKey: .cacheSavingsKnown)
+      if self.cacheSavingsUnpricedTokens != nil, self.cacheSavingsUSD > 0 {
+        try container.encode(self.cacheSavingsUSD, forKey: .cacheSavingsUSD)
+      }
     }
+    try container.encodeIfPresent(self.cacheSavingsUnpricedTokens, forKey: .cacheSavingsUnpricedTokens)
   }
 
-  /// Priced discount, or zero when this row has no cache reads. Nil when a
-  /// cache read was stored before it could be priced, or the model has no rate.
+  var unpricedCacheReads: Int64 {
+    if let count = self.cacheSavingsUnpricedTokens {
+      return min(max(0, self.cached), max(0, count))
+    }
+    return self.cacheSavingsKnown == true ? 0 : max(0, self.cached)
+  }
+
+  /// A partial discount survives aggregation. Completely unpriced reads stay
+  /// nil, and legacy unknown totals contribute no invented discount.
   var pricedSavings: Double? {
-    if self.cacheSavingsKnown == true { return max(0, self.cacheSavingsUSD) }
-    if self.cacheSavingsKnown == false { return nil }
-    return self.cached == 0 ? 0 : nil
+    guard self.cached == 0 || self.unpricedCacheReads < self.cached else { return nil }
+    return self.cacheSavingsUSD.isFinite ? max(0, self.cacheSavingsUSD) : nil
   }
 
   mutating func add(_ other: UsageTotals) {
-    let savings = Self.combine(self.pricedSavings, other.pricedSavings, minus: false)
+    let unpriced = saturatingNonnegativeSum(self.unpricedCacheReads, other.unpricedCacheReads)
+    let savings = (self.pricedSavings ?? 0) + (other.pricedSavings ?? 0)
     self.input = saturatingNonnegativeSum(self.input, other.input)
     self.cached = saturatingNonnegativeSum(self.cached, other.cached)
     self.cacheWrite = saturatingNonnegativeSum(self.cacheWrite, other.cacheWrite)
@@ -2443,38 +2500,24 @@ struct UsageTotals: Codable, Equatable {
     let nextCost = self.costUSD + max(0, other.costUSD)
     self.costUSD = nextCost.isFinite ? nextCost : Double.greatestFiniteMagnitude
     self.estimated = self.estimated || other.estimated
-    self.apply(savings)
+    self.apply(savings, unpriced: unpriced)
   }
 
   mutating func subtract(_ other: UsageTotals) {
-    let savings = Self.combine(self.pricedSavings, other.pricedSavings, minus: true)
+    let unpriced = saturatingNonnegativeSubtract(self.unpricedCacheReads, other.unpricedCacheReads)
+    let savings = max(0, (self.pricedSavings ?? 0) - (other.pricedSavings ?? 0))
     self.input = saturatingNonnegativeSubtract(self.input, other.input)
     self.cached = saturatingNonnegativeSubtract(self.cached, other.cached)
     self.cacheWrite = saturatingNonnegativeSubtract(self.cacheWrite, other.cacheWrite)
     self.output = saturatingNonnegativeSubtract(self.output, other.output)
     self.costUSD = max(0, self.costUSD - other.costUSD)
-    self.apply(savings)
-    // An unknown row poisons the whole day. With no cache reads left the
-    // discount is zero, so a priced replacement can be added on this day.
-    // Other reads that are still present stay unknown until a full reparse.
-    if self.cacheSavingsKnown == false, self.cached == 0 {
-      self.cacheSavingsUSD = 0
-      self.cacheSavingsKnown = true
-    }
+    self.apply(savings, unpriced: unpriced)
   }
 
-  private static func combine(
-    _ left: Double?, _ right: Double?, minus: Bool
-  ) -> (value: Double, known: Bool) {
-    guard let left, let right else { return (0, false) }
-    let next = minus ? left - right : left + right
-    guard next.isFinite else { return (0, false) }
-    return (max(0, next), true)
-  }
-
-  private mutating func apply(_ savings: (value: Double, known: Bool)) {
-    self.cacheSavingsUSD = savings.known ? savings.value : 0
-    self.cacheSavingsKnown = savings.known
+  private mutating func apply(_ savings: Double, unpriced: Int64) {
+    self.cacheSavingsUSD = savings.isFinite ? max(0, savings) : 0
+    self.cacheSavingsUnpricedTokens = savings.isFinite ? min(max(0, self.cached), unpriced) : max(0, self.cached)
+    self.cacheSavingsKnown = self.cacheSavingsUnpricedTokens == 0
   }
 
   func totalTokens(provider: ProviderID) -> Int64 {
@@ -2501,6 +2544,7 @@ struct UsageTotals: Codable, Equatable {
       outputTokens: self.output,
       apiEquivalentCostUSD: self.costUSD,
       cacheSavingsUSD: self.pricedSavings,
+      unpricedCachedInputTokens: self.unpricedCacheReads,
       isCostEstimate: self.estimated,
       todayTokens: today.totalTokens(provider: provider),
       cycleTokens: cycle.totalTokens(provider: provider),
