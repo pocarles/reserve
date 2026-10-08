@@ -207,7 +207,8 @@ until at least 10% of a known window has elapsed, and stop when observations
 are stale. Grok’s Build and Chat contributions appear only in details as
 percentages of its shared pool used.
 
-The dashboard shows every enabled provider in a compact overview. Select a tile
+The dashboard shows every enabled provider in a compact overview, including
+the reset time for the allowance shown by its percentage and meter. Select a tile
 to show that provider's details below it: every allowance window and its reset,
 activity from this Mac when that is turned on, provider-reported account
 activity where it exists, the plan's cost and renewal, where the numbers came
@@ -271,6 +272,10 @@ key is sent only to the provider that issued it.
 The optional comparable-value view is an API-equivalent estimate, not a provider bill.
 OpenAI and Anthropic use the observed input/cache/output mix when available;
 Grok exposes an aggregate token count, so its comparison is approximate.
+Expanded details show uncached input, cached input, cache writes, and output
+separately when cache data is available. Estimated cache savings compare cached
+reads with the full API input rate and are omitted when a read cannot be priced.
+They do not represent savings on a subscription bill.
 Subscription prices remain user-editable. Details distinguish reported, typical,
 and manually entered prices. Empty detail rows are omitted.
 

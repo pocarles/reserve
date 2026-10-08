@@ -1150,6 +1150,7 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
   private var hoverTrackingArea: NSTrackingArea?
   private var spokenClock: ((Date) -> String)?
   private var valueLabel: ReserveLabel?
+  private var resetLabel: ReserveLabel?
   private var meter: ReserveMeter?
   private var stateIcon: NSImageView?
   private var stateLabel: ReserveLabel?
@@ -1268,7 +1269,17 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
       .isActive = true
     content.append(stateRow)
 
-    let stack = NSStackView.column(content, spacing: 7)
+    let reset = ReserveLabel(
+      "", font: ReserveFont.sans(ReserveType.support), color: ReserveColor.muted
+    ).flexible()
+    reset.identifier = NSUserInterfaceItemIdentifier("tile-reset-\(summary.provider.rawValue)")
+    reset.widthAnchor.constraint(equalToConstant: DashboardMetrics.overviewTileContentWidth)
+      .isActive = true
+    self.resetLabel = reset
+    self.applyReset(summary: summary, now: now)
+    content.append(reset)
+
+    let stack = NSStackView.column(content, spacing: 3)
     stack.translatesAutoresizingMaskIntoConstraints = false
     self.addSubview(stack)
     NSLayoutConstraint.activate([
@@ -1313,6 +1324,7 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
       valueColor = ReserveColor.muted
     }
     self.valueLabel?.setDisplayedText(valueText, color: valueColor)
+    self.applyReset(summary: summary, now: now)
     let stateColor: NSColor = summary.setupAction == nil ? summary.paceState.color : ReserveColor.muted
     let stateText = summary.setupAction == nil ? summary.paceState.label : "Setup needed"
     self.stateLabel?.setDisplayedText(stateText, color: stateColor)
@@ -1330,6 +1342,16 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
     }
     self.needsDisplay = true
     return true
+  }
+
+  private func applyReset(summary: ProviderSummary, now: Date) {
+    // Pair the reset with the allowance shown by the tile's percentage and meter.
+    let primary = summary.primary
+    self.resetLabel?.clockText = { date in
+      primary.map { DashboardFormat.resetLine($0, now: date) } ?? "Next reset unknown"
+    }
+    self.resetLabel?.toolTip = primary?.title
+    self.resetLabel?.updateClock(now)
   }
 
   func updateClock(_ now: Date) {
@@ -2582,15 +2604,27 @@ private final class UsageDetailGrid: NSView {
         kind: .cell, id: "usage-value",
         label: accountData ? "Usage value" : "Estimated API value",
         value: "≈ \(DashboardFormat.money(usage.apiEquivalentCostUSD))"))
-      if usage.inputTokens > 0 || usage.outputTokens > 0 {
+      let mix = usage.tokenMix
+      if mix.hasCacheSplit {
+        func appendTokens(_ id: String, _ label: String, _ value: Int64) {
+          guard value > 0 else { return }
+          rows.append(RowSpec(
+            kind: .fact, id: id, label: label, value: DashboardFormat.tokens(value)))
+        }
+        appendTokens("uncached-input", "Uncached input, 30 days", mix.uncachedInput)
+        appendTokens("cached-input", "Cached input, 30 days", mix.cachedInput)
+        appendTokens("cache-writes", "Cache writes, 30 days", mix.cacheWrite)
+        appendTokens("output-tokens", "Output, 30 days", mix.output)
+        if let savings = usage.cacheSavingsUSD,
+          DashboardFormat.money(savings) != DashboardFormat.money(0) {
+          rows.append(RowSpec(
+            kind: .cell, id: "cache-savings", label: "Cache savings, 30 days",
+            value: "≈ \(DashboardFormat.money(savings))"))
+        }
+      } else if usage.inputTokens > 0 || usage.outputTokens > 0 {
         rows.append(RowSpec(
           kind: .fact, id: "input-output", label: "Input / output, 30 days",
           value: "\(DashboardFormat.tokens(usage.inputTokens)) / \(DashboardFormat.tokens(usage.outputTokens))"))
-      }
-      if usage.cachedInputTokens > 0 {
-        rows.append(RowSpec(
-          kind: .fact, id: "cached-tokens", label: "Cached tokens, 30 days",
-          value: DashboardFormat.tokens(usage.cachedInputTokens)))
       }
       if !usage.modelCosts.isEmpty {
         let value = usage.modelCosts.prefix(3).map {
