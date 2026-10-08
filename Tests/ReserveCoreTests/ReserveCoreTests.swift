@@ -1487,9 +1487,12 @@ struct ReserveCoreTests {
       input: 20, cached: 180, output: 6,
       cacheSavingsUSD: 0.00036, cacheSavingsKnown: true)
     mixed.add(unknown)
+    XCTAssertClose(mixed.pricedSavings ?? -1, 0.00036)
+    XCTAssertEqual(mixed.unpricedCacheReads, 80)
     mixed.subtract(unknown)
     XCTAssertEqual(mixed.cached, 180)
-    XCTAssertNil(mixed.pricedSavings)
+    XCTAssertClose(mixed.pricedSavings ?? -1, 0.00036)
+    XCTAssertEqual(mixed.unpricedCacheReads, 0)
   }
 
   private static func stripSavings(from data: Data) throws -> Data {
@@ -1502,6 +1505,7 @@ struct ReserveCoreTests {
     if var dictionary = value as? [String: Any] {
       dictionary.removeValue(forKey: "cacheSavingsUSD")
       dictionary.removeValue(forKey: "cacheSavingsKnown")
+      dictionary.removeValue(forKey: "cacheSavingsUnpricedTokens")
       dictionary.removeValue(forKey: "savingsPriced")
       for (key, entry) in dictionary {
         dictionary[key] = Self.removingSavingsKeys(entry)
