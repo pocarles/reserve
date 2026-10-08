@@ -15,6 +15,7 @@ struct ProviderViewState: Identifiable {
   /// A failed scan leaves the previous totals in place and says so here.
   /// Cleared by the next successful scan. Never a path or log excerpt.
   var localHistoryError: String?
+  var localHistoryUpdating = false
   var subscriptionCostUSD: Double?
   var subscriptionCostLabel: String? = nil
   var renewalStart: Date?
@@ -137,6 +138,7 @@ final class UsageStore {
   /// Mac's session roots.
   private let localUsageScanner: LocalUsageScanner?
   private let localUsageScan: @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
+  private let cachedLocalUsageLoad: @Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary]
   /// Progress gates retries so a stalled checkpoint cannot create a busy loop.
   private let localUsageProgress: @Sendable () async -> (incomplete: Bool, checkpoints: Int)
   private let localScanContinuationDelay: Duration
@@ -355,6 +357,7 @@ final class UsageStore {
     cache: SnapshotCache = SnapshotCache(),
     fetchOverride: (@Sendable (ProviderID, Bool) async throws -> UsageSnapshot)? = nil,
     localUsageScan: (@Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary])? = nil,
+    cachedLocalUsageLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary])? = nil,
     localUsageProgress: (@Sendable () async -> (incomplete: Bool, checkpoints: Int))? = nil,
     localScanContinuationDelay: Duration = .seconds(5),
     dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil,
@@ -373,7 +376,7 @@ final class UsageStore {
     self.serviceStatusFetch = serviceStatusFetch
     self.now = now
     let productionStore = planKeys == nil && apiKeys == nil && fetchOverride == nil
-      && localUsageScan == nil && localUsageProgress == nil && startAutomatically
+      && localUsageScan == nil && cachedLocalUsageLoad == nil && localUsageProgress == nil && startAutomatically
     self.usesProductionKeychain = productionStore
     self.honorsHostRefreshEnvironment = productionStore
     self.loginHandoffDeadline = loginHandoffDeadline
@@ -390,6 +393,15 @@ final class UsageStore {
       // A store built for tests or previews must not read this Mac's logs
       // or the production usage index, even when a refresh asks for history.
       self.localUsageScan = { _, _ in [:] }
+    }
+    if let cachedLocalUsageLoad {
+      self.cachedLocalUsageLoad = cachedLocalUsageLoad
+    } else if let scanner = self.localUsageScanner {
+      self.cachedLocalUsageLoad = { providers, now in
+        (try? await scanner.cachedUsage(now: now, providers: providers)) ?? [:]
+      }
+    } else {
+      self.cachedLocalUsageLoad = { _, _ in [:] }
     }
     self.localScanContinuationDelay = localScanContinuationDelay
     if let localUsageProgress {
@@ -471,6 +483,7 @@ final class UsageStore {
       state.localHistoryEnabled = self.localHistoryEnabled
       state.localHistoryCheckedAt = self.localHistoryEnabled ? self.lastLocalUsageScanAt : nil
       state.localHistoryError = self.localHistoryEnabled ? self.localHistoryScanError : nil
+      state.localHistoryUpdating = self.localHistoryEnabled && self.isScanningLocalUsage
       state.hidesPersonalInfo = self.hidesPersonalInfo
       return state
     }
@@ -2184,10 +2197,32 @@ final class UsageStore {
       }
     }
     self.changed()
+    await self.loadCachedLocalUsage()
     await self.loadPublishedDailyHistory()
     self.startScheduler()
     self.refreshAll(manual: false)
     self.refreshEnabledAPIConsumption()
+  }
+
+  /// Start with the last complete totals while a source scan works. Account
+  /// history and an already visible local summary keep their own authority.
+  func loadCachedLocalUsage(now: Date = Date()) async {
+    guard self.localHistoryEnabled else { return }
+    let generation = self.localScanGeneration
+    let providers = Set(
+      ProviderID.allCases.filter {
+        self.isEnabled($0) && self.states[$0]?.localUsage == nil
+          && ProviderDescriptor.forProvider($0).capabilities.contains(.localHistory)
+      })
+    guard !providers.isEmpty else { return }
+    let loaded = await self.cachedLocalUsageLoad(providers, now)
+    guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }
+    for (provider, usage) in loaded where providers.contains(provider) && self.isEnabled(provider) {
+      guard self.states[provider]?.localUsage == nil else { continue }
+      let retained = self.states[provider]?.snapshot?.accountUsage ?? usage
+      self.states[provider]?.localUsage = retained
+    }
+    self.changed()
   }
 
   /// `force` waives the scan interval. Whether a surface should scan at all is
@@ -2336,6 +2371,7 @@ final class UsageStore {
         if notify { self.changed() }
       }
     }
+    await self.loadCachedLocalUsage(now: self.now())
     var continuing = false
     while !Task.isCancelled {
       guard self.localHistoryEnabled, self.localScanGeneration == generation else { return }

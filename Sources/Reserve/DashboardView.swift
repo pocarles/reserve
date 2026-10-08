@@ -128,6 +128,7 @@ final class DashboardViewController: NSViewController {
       parts.append(summary.historyPossible ? "history-possible" : "-")
       parts.append(String(reflecting: summary.localHistoryCheckedAt))
       parts.append(summary.localHistoryError ?? "-")
+      parts.append(summary.localHistoryUpdating ? "history-updating" : "-")
       parts.append(summary.error ?? "-")
       parts.append(summary.needsConnection ? "connect" : "-")
       parts.append(summary.requiresKeychainAccess ? "keychain" : "-")
@@ -1668,6 +1669,7 @@ final class ProviderDashboardCard: NSView, ReserveClockUpdating {
       parts.append(summary.localUsage?.dailyTokens.contains { $0.tokens > 0 } == true ? "chart" : "-")
       parts.append(summary.historyPossible ? "hist" : "-")
       parts.append(summary.localHistoryError == nil ? "-" : "hist-err")
+      parts.append(summary.localHistoryUpdating ? "hist-updating" : "-")
     }
     return parts.joined(separator: "\u{1}")
   }
@@ -2699,6 +2701,11 @@ private final class UsageDetailGrid: NSView {
           : "Activity from this Mac is off · turn it on in Settings"
       rows.append(RowSpec(
         kind: .note, id: "usage-history-note-\(provider)", label: "", value: message))
+    }
+    if summary.localHistoryUpdating, let usage, usage.origin != .providerAccount {
+      rows.append(RowSpec(
+        kind: .note, id: "usage-history-updating-\(provider)", label: "",
+        value: "Updating activity · showing saved totals"))
     }
     return rows
   }

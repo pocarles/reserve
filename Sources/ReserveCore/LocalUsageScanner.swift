@@ -516,6 +516,39 @@ public actor LocalUsageScanner {
     }
   }
 
+  /// Published totals only. A pending migration never replaces these with its
+  /// partially parsed records. This read does not visit session roots or write.
+  public func cachedUsage(
+    periodDays: Int = 30,
+    now: Date = Date(),
+    providers: Set<ProviderID> = [.openAI, .anthropic, .grok]
+  ) throws -> [ProviderID: LocalUsageSummary] {
+    let selected = providers.intersection([.openAI, .anthropic, .grok])
+    guard !selected.isEmpty else { return [:] }
+    var index = self.loadIndex()
+    defer { self.releaseResidentPublishedIndexIfLarge() }
+    index.records = index.records.filter { selected.contains($0.value.provider) }
+    guard !index.records.isEmpty else { return [:] }
+    let days = min(90, max(1, periodDays))
+    let cutoff = self.calendar.date(byAdding: .day, value: -days + 1, to: now) ?? now
+    let series = try Self.dailySeries(
+      index: index, days: days, now: now, calendar: self.calendar, deadline: .distantFuture)
+    var summaries: [ProviderID: LocalUsageSummary] = [:]
+    for provider in selected where index.records.values.contains(where: { $0.provider == provider })
+    {
+      let totals = try Self.aggregate(
+        provider: provider, since: Self.dayKey(cutoff, timeZone: self.timeZone),
+        index: index, deadline: .distantFuture)
+      let today = try Self.aggregate(
+        provider: provider, since: Self.dayKey(now, timeZone: self.timeZone),
+        index: index, deadline: .distantFuture)
+      summaries[provider] = totals.summary(
+        provider: provider, periodDays: days, today: today, cycle: totals,
+        cycleStartedAt: cutoff, now: index.updatedAt, dailyTokens: series[provider] ?? [])
+    }
+    return summaries
+  }
+
   /// Continuous daily series for every provider, quiet days included so a chart
   /// has an even axis. One pass over the index, bounded to the period.
   private static func dailySeries(
@@ -1084,27 +1117,35 @@ public actor LocalUsageScanner {
     var fileBytesRemaining = min(self.maximumBytesPerFileScan, remainingBytes)
     var consumedBytes = 0
     var lineCount = 0
-    while fileBytesRemaining > 0, remainingBytes > 0,
-      lineCount < self.maximumLinesPerFile
-    {
+    do {
+      while fileBytesRemaining > 0, remainingBytes > 0,
+        lineCount < self.maximumLinesPerFile
+      {
+        try Self.checkDeadline(deadline, budget: budget)
+        let allowance = min(64 * 1_024, remainingBytes, fileBytesRemaining)
+        guard let chunk = try handle.read(upToCount: allowance), !chunk.isEmpty else { break }
+        if let budget {
+          budget.consume(chunk.count, remaining: &remainingBytes)
+        } else {
+          remainingBytes -= chunk.count
+        }
+        fileBytesRemaining -= chunk.count
+        let result = buffer.append(
+          chunk, maximumLines: self.maximumLinesPerFile - lineCount)
+        consumedBytes += result.consumedBytes
+        for data in result.lines {
+          lineCount += 1
+          autoreleasepool { visit(data) }
+        }
+      }
       try Self.checkDeadline(deadline, budget: budget)
-      let allowance = min(64 * 1_024, remainingBytes, fileBytesRemaining)
-      guard let chunk = try handle.read(upToCount: allowance), !chunk.isEmpty else { break }
-      if let budget {
-        budget.consume(chunk.count, remaining: &remainingBytes)
-      } else {
-        remainingBytes -= chunk.count
-      }
-      fileBytesRemaining -= chunk.count
-      let result = buffer.append(
-        chunk, maximumLines: self.maximumLinesPerFile - lineCount)
-      consumedBytes += result.consumedBytes
-      for data in result.lines {
-        lineCount += 1
-        autoreleasepool { visit(data) }
-      }
+    } catch let error as UsageProviderError {
+      guard case .timedOut = error, consumedBytes > 0 else { throw error }
+      // Commit complete lines before the caller reports its exhausted budget.
+      // Otherwise each timed pass would discard this prefix and start again.
+      budget?.markStarved()
     }
-    try Self.checkDeadline(deadline, budget: budget)
+    try Task.checkCancellation()
     let nextOffset = max(0, offset) + Int64(consumedBytes)
     let bufferState = buffer.append(Data(), maximumLines: 0)
     return (nextOffset, bufferState.discardingOversizedLine)
