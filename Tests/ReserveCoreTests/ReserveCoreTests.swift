@@ -18,6 +18,12 @@ private func XCTAssertLessThanOrEqual<T: Comparable>(_ lhs: T, _ rhs: T) {
 private func XCTAssertLessThan<T: Comparable>(_ lhs: T, _ rhs: T) {
   #expect(lhs < rhs)
 }
+private func XCTAssertGreaterThan<T: Comparable>(_ lhs: T, _ rhs: T) {
+  #expect(lhs > rhs)
+}
+private func XCTAssertClose(_ lhs: Double, _ rhs: Double) {
+  #expect(abs(lhs - rhs) < 0.0000001)
+}
 private struct TestFailure: Error, CustomStringConvertible {
   let description: String
 }
@@ -1243,6 +1249,269 @@ struct ReserveCoreTests {
     XCTAssertEqual(usage[.openAI]?.todayTokens, 1_020)
     XCTAssertEqual(usage[.anthropic]?.totalTokens, 135)
     XCTAssertEqual(repeatedUsage, usage)
+    // gpt-5.6-sol cache reads are $0.50/M against a $5/M input rate.
+    XCTAssertEqual(usage[.openAI]?.tokenMix.uncachedInput, 400)
+    XCTAssertEqual(usage[.openAI]?.tokenMix.cachedInput, 600)
+    XCTAssertClose(usage[.openAI]?.cacheSavingsUSD ?? -1, 0.0027)
+    // claude-opus-5 cache reads are $0.50/M against a $5/M input rate.
+    XCTAssertEqual(usage[.anthropic]?.tokenMix.uncachedInput, 10)
+    XCTAssertEqual(usage[.anthropic]?.tokenMix.cachedInput, 100)
+    XCTAssertEqual(usage[.anthropic]?.tokenMix.cacheWrite, 20)
+    XCTAssertClose(usage[.anthropic]?.cacheSavingsUSD ?? -1, 0.00045)
+  }
+
+  @Test
+  func testUnpricedCacheReadsStayBlankAndLegacyRowsAreRepricedOnce() async throws {
+    let root = try TemporaryRoot()
+    defer { root.remove() }
+    let codex = root.url.appendingPathComponent("codex")
+    let claude = root.url.appendingPathComponent("claude")
+    let grok = root.url.appendingPathComponent("grok")
+    for directory in [codex, claude, grok] {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+    let now = Date()
+    let timestamp = ISO8601DateFormatter().string(from: now)
+    let unknown =
+      #"{"timestamp":"\#(timestamp)","type":"assistant","requestId":"r-unknown","message":{"id":"m-unknown","model":"claude-mystery","usage":{"input_tokens":4,"cache_read_input_tokens":80,"cache_creation_input_tokens":0,"output_tokens":2}}}"#
+    try Data((unknown + "\n").utf8).write(to: claude.appendingPathComponent("unknown.jsonl"))
+    let cacheURL = root.url.appendingPathComponent("index.json")
+    let unknownScanner = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok), cacheURL: cacheURL)
+    let unknownUsage = try await unknownScanner.scan(now: now)
+    XCTAssertEqual(unknownUsage[.anthropic]?.cachedInputTokens, 80)
+    XCTAssertNil(unknownUsage[.anthropic]?.cacheSavingsUSD)
+    XCTAssertTrue(unknownUsage[.anthropic]?.isCostEstimate == true)
+    let unknownAgain = try await unknownScanner.scan(now: now)
+    XCTAssertEqual(unknownAgain, unknownUsage)
+    XCTAssertEqual(await unknownScanner.scanMetrics.filesParsed, 1)
+
+    try FileManager.default.removeItem(at: claude.appendingPathComponent("unknown.jsonl"))
+    let priced =
+      #"{"timestamp":"\#(timestamp)","type":"assistant","requestId":"r-priced","message":{"id":"m-priced","model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":1000000,"cache_creation_input_tokens":0,"output_tokens":1}}}"#
+    try Data((priced + "\n").utf8).write(to: claude.appendingPathComponent("priced.jsonl"))
+    let pricedScanner = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok),
+      cacheURL: root.url.appendingPathComponent("priced-index.json"))
+    let pricedUsage = try await pricedScanner.scan(now: now)
+    XCTAssertClose(pricedUsage[.anthropic]?.cacheSavingsUSD ?? -1, 4.5)
+
+    let pricedIndex = root.url.appendingPathComponent("priced-index.json")
+    let stripped = try Self.stripSavings(from: Data(contentsOf: pricedIndex))
+    try stripped.write(to: pricedIndex)
+    let legacy = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok), cacheURL: pricedIndex)
+    let repriced = try await legacy.scan(now: now)
+    XCTAssertClose(repriced[.anthropic]?.cacheSavingsUSD ?? -1, 4.5)
+    XCTAssertGreaterThan(await legacy.scanMetrics.filesParsed, 0)
+    let settled = try await legacy.scan(now: now)
+    XCTAssertEqual(settled[.anthropic]?.cacheSavingsUSD, repriced[.anthropic]?.cacheSavingsUSD)
+    XCTAssertEqual(await legacy.scanMetrics.filesParsed, 1)
+  }
+
+  @Test
+  func testLegacyCacheReparseKeepsPublishedHistoryUntilTheFileIsFinished() async throws {
+    let root = try TemporaryRoot()
+    defer { root.remove() }
+    let codex = root.url.appendingPathComponent("codex")
+    let claude = root.url.appendingPathComponent("claude")
+    let grok = root.url.appendingPathComponent("grok")
+    for directory in [codex, claude, grok] {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+    let now = Date()
+    let timestamp = ISO8601DateFormatter().string(from: now)
+    let priced =
+      #"{"timestamp":"\#(timestamp)","type":"assistant","requestId":"r-priced","message":{"id":"m-priced","model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":1000000,"cache_creation_input_tokens":0,"output_tokens":1}}}"#
+    try Data((priced + "\n").utf8).write(to: claude.appendingPathComponent("priced.jsonl"))
+    let cacheURL = root.url.appendingPathComponent("index.json")
+    let scanner = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok), cacheURL: cacheURL)
+    _ = try await scanner.scan(now: now)
+    let stripped = try Self.stripSavings(from: Data(contentsOf: cacheURL))
+    try stripped.write(to: cacheURL)
+
+    let legacy = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok), cacheURL: cacheURL)
+    await legacy.testingSetMaximumBytesPerFile(1)
+    await #expect(throws: UsageProviderError.timedOut("local usage scan")) {
+      try await legacy.scan(now: now)
+    }
+    XCTAssertEqual(try Data(contentsOf: cacheURL), stripped)
+    XCTAssertTrue(await legacy.scanIncomplete)
+
+    await legacy.testingSetMaximumBytesPerFile(8 * 1024 * 1024)
+    let finished = try await legacy.scan(now: now)
+    XCTAssertEqual(finished[.anthropic]?.cachedInputTokens, 1_000_000)
+    XCTAssertEqual(finished[.anthropic]?.totalTokens, 1_000_011)
+    XCTAssertClose(finished[.anthropic]?.cacheSavingsUSD ?? -1, 4.5)
+    XCTAssertFalse(await legacy.scanIncomplete)
+  }
+
+  @Test
+  func testOpenAITokenTotalDoesNotAddNestedCacheWrites() {
+    let summary = LocalUsageSummary(
+      provider: .openAI, periodDays: 30,
+      inputTokens: 1_000, cachedInputTokens: 600, cacheWriteInputTokens: 100,
+      outputTokens: 20, apiEquivalentCostUSD: 1)
+    XCTAssertEqual(summary.totalTokens, 1_020)
+    XCTAssertEqual(summary.tokenMix.uncachedInput, 300)
+    XCTAssertEqual(summary.tokenMix.cachedInput, 600)
+    XCTAssertEqual(summary.tokenMix.cacheWrite, 100)
+    let separate = LocalUsageSummary(
+      provider: .anthropic, periodDays: 30,
+      inputTokens: 10, cachedInputTokens: 100, cacheWriteInputTokens: 20,
+      outputTokens: 5, apiEquivalentCostUSD: 1)
+    XCTAssertEqual(separate.totalTokens, 135)
+  }
+
+  @Test
+  func testMissingClaudeRootDoesNotPublishAnUnfinishedSavingsReparse() async throws {
+    let root = try TemporaryRoot()
+    defer { root.remove() }
+    let codex = root.url.appendingPathComponent("codex")
+    let claude = root.url.appendingPathComponent("claude")
+    let grok = root.url.appendingPathComponent("grok")
+    for directory in [codex, claude, grok] {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+    let now = Date()
+    let timestamp = ISO8601DateFormatter().string(from: now)
+    let priced =
+      #"{"timestamp":"\#(timestamp)","type":"assistant","requestId":"r-priced","message":{"id":"m-priced","model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":1000000,"cache_creation_input_tokens":0,"output_tokens":1}}}"#
+    try Data((priced + "\n").utf8).write(to: claude.appendingPathComponent("priced.jsonl"))
+    let cacheURL = root.url.appendingPathComponent("index.json")
+    let scanner = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok), cacheURL: cacheURL)
+    _ = try await scanner.scan(now: now)
+    let stripped = try Self.stripSavings(from: Data(contentsOf: cacheURL))
+    try stripped.write(to: cacheURL)
+
+    let legacy = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok),
+      cacheURL: cacheURL, watchChanges: true)
+    await legacy.testingSimulateWatch()
+    await legacy.testingSetMaximumBytesPerFile(1)
+    await #expect(throws: UsageProviderError.timedOut("local usage scan")) {
+      try await legacy.scan(now: now)
+    }
+    XCTAssertEqual(try Data(contentsOf: cacheURL), stripped)
+
+    let parked = LocalUsageScanner(
+      roots: .init(
+        codex: codex, claude: root.url.appendingPathComponent("missing-claude"), grok: grok),
+      cacheURL: cacheURL, watchChanges: true)
+    await parked.testingSimulateWatch()
+    let kept = try await parked.scan(now: now)
+    XCTAssertEqual(kept[.anthropic]?.cachedInputTokens, 1_000_000)
+    XCTAssertEqual(kept[.anthropic]?.totalTokens, 1_000_011)
+    let saved = String(decoding: try Data(contentsOf: cacheURL), as: UTF8.self)
+    XCTAssertTrue(saved.contains("1000000"))
+    XCTAssertTrue(await parked.testingCheckpointExists())
+  }
+
+  @Test
+  func testUnreadableClaudeFileDoesNotPublishAnUnfinishedSavingsReparse() async throws {
+    let root = try TemporaryRoot()
+    defer { root.remove() }
+    let codex = root.url.appendingPathComponent("codex")
+    let claude = root.url.appendingPathComponent("claude")
+    let grok = root.url.appendingPathComponent("grok")
+    for directory in [codex, claude, grok] {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+    let now = Date()
+    let timestamp = ISO8601DateFormatter().string(from: now)
+    let session = claude.appendingPathComponent("priced.jsonl")
+    defer {
+      try? FileManager.default.setAttributes(
+        [.posixPermissions: 0o644], ofItemAtPath: session.path)
+    }
+    let priced =
+      #"{"timestamp":"\#(timestamp)","type":"assistant","requestId":"r-priced","message":{"id":"m-priced","model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":1000000,"cache_creation_input_tokens":0,"output_tokens":1}}}"#
+    try Data((priced + "\n").utf8).write(to: session)
+    let cacheURL = root.url.appendingPathComponent("index.json")
+    let scanner = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok), cacheURL: cacheURL)
+    _ = try await scanner.scan(now: now)
+    let stripped = try Self.stripSavings(from: Data(contentsOf: cacheURL))
+    try stripped.write(to: cacheURL)
+
+    let legacy = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok), cacheURL: cacheURL)
+    await legacy.testingSetMaximumBytesPerFile(1)
+    await #expect(throws: UsageProviderError.timedOut("local usage scan")) {
+      try await legacy.scan(now: now)
+    }
+    XCTAssertEqual(try Data(contentsOf: cacheURL), stripped)
+
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: session.path)
+    XCTAssertFalse(FileManager.default.isReadableFile(atPath: session.path))
+    let blocked = LocalUsageScanner(
+      roots: .init(codex: codex, claude: claude, grok: grok), cacheURL: cacheURL)
+    let kept = try await blocked.scan(now: now)
+    XCTAssertEqual(kept[.anthropic]?.cachedInputTokens, 1_000_000)
+    XCTAssertEqual(kept[.anthropic]?.totalTokens, 1_000_011)
+    XCTAssertNil(kept[.anthropic]?.cacheSavingsUSD)
+    let saved = String(decoding: try Data(contentsOf: cacheURL), as: UTF8.self)
+    XCTAssertTrue(saved.contains("1000000"))
+    XCTAssertTrue(await blocked.testingCheckpointExists())
+
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o644], ofItemAtPath: session.path)
+    let finished = try await blocked.scan(now: now)
+    XCTAssertEqual(finished[.anthropic]?.cachedInputTokens, 1_000_000)
+    XCTAssertClose(finished[.anthropic]?.cacheSavingsUSD ?? -1, 4.5)
+    XCTAssertFalse(await blocked.scanIncomplete)
+  }
+
+  @Test
+  func testSubtractingTheLastUnknownCacheReadRestoresKnownSavings() {
+    let unknown = UsageTotals(
+      input: 10, cached: 80, output: 5,
+      cacheSavingsUSD: 0, cacheSavingsKnown: false)
+    var replaced = UsageTotals()
+    replaced.add(unknown)
+    XCTAssertNil(replaced.pricedSavings)
+    replaced.subtract(unknown)
+    XCTAssertEqual(replaced.cached, 0)
+    XCTAssertEqual(replaced.pricedSavings, Optional(0.0))
+    let known = UsageTotals(
+      input: 10, cached: 80, output: 5,
+      cacheSavingsUSD: 0.00036, cacheSavingsKnown: true)
+    replaced.add(known)
+    XCTAssertEqual(replaced.cached, 80)
+    XCTAssertClose(replaced.pricedSavings ?? -1, 0.00036)
+
+    var mixed = UsageTotals(
+      input: 20, cached: 180, output: 6,
+      cacheSavingsUSD: 0.00036, cacheSavingsKnown: true)
+    mixed.add(unknown)
+    mixed.subtract(unknown)
+    XCTAssertEqual(mixed.cached, 180)
+    XCTAssertNil(mixed.pricedSavings)
+  }
+
+  private static func stripSavings(from data: Data) throws -> Data {
+    let object = try JSONSerialization.jsonObject(with: data)
+    let stripped = Self.removingSavingsKeys(object)
+    return try JSONSerialization.data(withJSONObject: stripped)
+  }
+
+  private static func removingSavingsKeys(_ value: Any) -> Any {
+    if var dictionary = value as? [String: Any] {
+      dictionary.removeValue(forKey: "cacheSavingsUSD")
+      dictionary.removeValue(forKey: "cacheSavingsKnown")
+      dictionary.removeValue(forKey: "savingsPriced")
+      for (key, entry) in dictionary {
+        dictionary[key] = Self.removingSavingsKeys(entry)
+      }
+      return dictionary
+    }
+    if let list = value as? [Any] {
+      return list.map(Self.removingSavingsKeys)
+    }
+    return value
   }
 
   @Test

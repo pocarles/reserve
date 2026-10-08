@@ -626,7 +626,7 @@ enum ConnectionFlowSelfTest {
     let previous = LocalUsageSummary(
       provider: .openAI, periodDays: 30, inputTokens: 40, cachedInputTokens: 25,
       cacheWriteInputTokens: 0, outputTokens: 10,
-      apiEquivalentCostUSD: 1.25, todayTokens: 7, cycleTokens: 50,
+      apiEquivalentCostUSD: 1.25, cacheSavingsUSD: 0.11, todayTokens: 7, cycleTokens: 50,
       fetchedAt: Date(timeIntervalSince1970: 1_700_000_000),
       source: "synthetic previous scan")
     let replacement = LocalUsageSummary(
@@ -681,10 +681,15 @@ enum ConnectionFlowSelfTest {
       "expanded detail showed a redundant local-history timestamp or hid quota freshness")
     expect(manualText.contains("Last checked") && !manualText.contains("Local history"),
       "expanded detail did not keep only the useful freshness label")
-    expect(manualText.contains("Cached tokens, 30 days")
+    expect(manualText.contains("Uncached input, 30 days")
+      && manualText.contains("Cached input, 30 days")
+      && manualText.contains("Output, 30 days")
+      && manualText.contains("Cache savings, 30 days")
+      && !manualText.contains("Cache writes, 30 days")
       && !manualText.contains("Cache read / write, 30 days")
+      && !manualText.contains("Input / output, 30 days")
       && !manualText.contains("This billing cycle"),
-      "expanded detail did not apply the compact token-row contract")
+      "expanded detail did not show the cache mix and its savings")
     expect(!manualText.contains { $0.contains("synthetic") || $0.contains("/Users") || $0.contains(".jsonl") },
       "local history detail exposed a scanner source or path")
 

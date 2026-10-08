@@ -634,7 +634,13 @@ struct IncrementalHistoryTests {
   @Test func defaultByteBudgetIsSharedAcrossProvidersAndKeepsPublishedTotals() async throws {
     let fixture = try HistoryBench()
     defer { fixture.remove() }
-    let now = Date()
+    // Keep the budget fixture at a stable point in the local day; midnight
+    // boundaries are exercised separately by the history-accounting tests.
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = .current
+    let parts = calendar.dateComponents([.year, .month, .day], from: Date())
+    let now = try #require(calendar.date(from: DateComponents(
+      year: parts.year, month: parts.month, day: parts.day, hour: 12)))
     let codex = try fixture.writeCodex("one.jsonl", input: 10, output: 0, at: now)
     let claude = try fixture.writeClaude("one.jsonl", input: 20, output: 0, at: now)
     let scanner = fixture.scanner(watchChanges: false)

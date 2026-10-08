@@ -49,6 +49,17 @@ public struct ModelUsageCost: Codable, Equatable, Sendable, Identifiable {
   }
 }
 
+/// The four token kinds a bill is made of. OpenAI logs nest cache reads and
+/// writes inside `input_tokens`; the other providers report them separately.
+public struct TokenMix: Equatable, Sendable {
+  public let uncachedInput: Int64
+  public let cachedInput: Int64
+  public let cacheWrite: Int64
+  public let output: Int64
+
+  public var hasCacheSplit: Bool { self.cachedInput > 0 || self.cacheWrite > 0 }
+}
+
 public struct LocalUsageSummary: Codable, Equatable, Sendable {
   public let provider: ProviderID
   public let periodDays: Int
@@ -57,6 +68,10 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
   public let cacheWriteInputTokens: Int64
   public let outputTokens: Int64
   public let apiEquivalentCostUSD: Double
+  /// What cache reads would have cost at the full input rate, minus what they
+  /// cost at the cache rate. Nil when a read could not be priced. Zero when
+  /// there were no priced cache reads.
+  public let cacheSavingsUSD: Double?
   public let isCostEstimate: Bool
   public let todayTokens: Int64
   public let cycleTokens: Int64
@@ -78,6 +93,7 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     cacheWriteInputTokens: Int64 = 0,
     outputTokens: Int64,
     apiEquivalentCostUSD: Double,
+    cacheSavingsUSD: Double? = nil,
     isCostEstimate: Bool = false,
     todayTokens: Int64? = nil,
     cycleTokens: Int64? = nil,
@@ -96,7 +112,7 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     let normalizedOutput = max(0, outputTokens)
     let fallbackTokens = saturatingNonnegativeSum(
       normalizedInput, provider == .anthropic || provider == .cursor ? normalizedCached : 0,
-      normalizedCacheWrite, normalizedOutput)
+      provider == .openAI ? 0 : normalizedCacheWrite, normalizedOutput)
     self.provider = provider
     self.periodDays = periodDays
     self.inputTokens = normalizedInput
@@ -104,6 +120,11 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     self.cacheWriteInputTokens = normalizedCacheWrite
     self.outputTokens = normalizedOutput
     self.apiEquivalentCostUSD = max(0, apiEquivalentCostUSD)
+    if let cacheSavingsUSD, cacheSavingsUSD.isFinite {
+      self.cacheSavingsUSD = max(0, cacheSavingsUSD)
+    } else {
+      self.cacheSavingsUSD = nil
+    }
     self.isCostEstimate = isCostEstimate
     self.todayTokens = max(0, todayTokens ?? fallbackTokens)
     self.cycleTokens = max(0, cycleTokens ?? fallbackTokens)
@@ -117,15 +138,36 @@ public struct LocalUsageSummary: Codable, Equatable, Sendable {
     self.modelCosts = Array(modelCosts.prefix(128))
   }
 
+  public var tokenMix: TokenMix {
+    let output = max(0, self.outputTokens)
+    let input = max(0, self.inputTokens)
+    let cached = max(0, self.cachedInputTokens)
+    let writes = max(0, self.cacheWriteInputTokens)
+    if self.provider == .openAI {
+      let cachedSubset = min(cached, input)
+      let remaining = saturatingNonnegativeSubtract(input, cachedSubset)
+      let writeSubset = min(writes, remaining)
+      return TokenMix(
+        uncachedInput: saturatingNonnegativeSubtract(remaining, writeSubset),
+        cachedInput: cachedSubset,
+        cacheWrite: writeSubset,
+        output: output)
+    }
+    return TokenMix(
+      uncachedInput: input, cachedInput: cached, cacheWrite: writes, output: output)
+  }
+
   public var totalTokens: Int64 {
     self.totalTokensValue
   }
 
   private var totalTokensValue: Int64 {
+    // OpenAI logs nest cache reads and writes inside input. Adding either
+    // again counts those tokens twice. Anthropic and Cursor report them apart.
     saturatingNonnegativeSum(
       self.inputTokens,
       self.provider == .anthropic || self.provider == .cursor ? self.cachedInputTokens : 0,
-      self.cacheWriteInputTokens, self.outputTokens)
+      self.provider == .openAI ? 0 : self.cacheWriteInputTokens, self.outputTokens)
   }
 }
 
@@ -149,6 +191,11 @@ private final class ScanLedger {
   var needsFinalize = false
   var retainedReady = false
   var indexChanged = false
+  var historyChanged = false
+  /// Records as published before a checkpoint overlay. An unfinished savings
+  /// reparse must not replace these when its provider cannot be visited.
+  var publishedRecords: [String: CachedFile] = [:]
+  var heldProviders: Set<ProviderID> = []
 }
 
 private final class ScanBudget {
@@ -290,13 +337,21 @@ public actor LocalUsageScanner {
   private let roots: Roots
   private let cacheURL: URL
   private let fileManager: FileManager
+  private let timeZoneOverride: TimeZone?
+  private var scanNow = Date.distantPast
+  private var timeZone: TimeZone { self.timeZoneOverride ?? .current }
+  private var calendar: Calendar {
+    var calendar = Calendar.current
+    calendar.timeZone = self.timeZone
+    return calendar
+  }
   private let maximumCacheBytes = 12 * 1024 * 1024
   private let maximumLineBytes = 1024 * 1024
   private let codexTailBytes = 2 * 1024 * 1024
   private let codexTailStepBytes = 256 * 1024
   private var maximumBytesPerScan = 64 * 1024 * 1024
   private let maximumResidentIndexBytes = 4 * 1024 * 1024
-  private let maximumBytesPerFileScan = 8 * 1024 * 1024
+  private var maximumBytesPerFileScan = 8 * 1024 * 1024
   private let maximumLinesPerFile = 100_000
   private let maximumScanDuration: TimeInterval = 8
   private let watchChanges: Bool
@@ -330,11 +385,13 @@ public actor LocalUsageScanner {
     roots: Roots = .defaults(),
     cacheURL: URL? = nil,
     fileManager: FileManager = .default,
-    watchChanges: Bool = false
+    watchChanges: Bool = false,
+    timeZone: TimeZone? = nil
   ) {
     self.roots = roots
     self.fileManager = fileManager
     self.watchChanges = watchChanges
+    self.timeZoneOverride = timeZone
     let support =
       fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
       ?? fileManager.homeDirectoryForCurrentUser
@@ -433,7 +490,8 @@ public actor LocalUsageScanner {
   ) -> [ProviderID: CachedUsageHistory] {
     let selected = providers.intersection([.openAI, .anthropic, .grok])
     guard !selected.isEmpty else { return [:] }
-    let index = self.loadIndex()
+    var index = self.loadIndex()
+    if selected.contains(.openAI) { Self.repairOpenAIArchivedTotals(&index) }
     defer { self.releaseResidentPublishedIndexIfLarge() }
     let count = min(CachedUsageHistory.retentionDays, max(1, periodDays))
     // Sum every file's totals for a day. Dictionary order must not drop a file.
@@ -445,7 +503,7 @@ public actor LocalUsageScanner {
       }
       merged[provider] = byDay
     }
-    let calendar = CachedUsageHistory.civilCalendar(.current)
+    let calendar = CachedUsageHistory.civilCalendar(self.calendar)
     let today = CachedUsageHistory.dayKey(for: now, calendar: calendar)
     let oldest = CachedUsageHistory.dayKey(daysBefore: count - 1, from: now, calendar: calendar)
     return selected.reduce(into: [:]) { result, provider in
@@ -464,12 +522,14 @@ public actor LocalUsageScanner {
     index: UsageIndex,
     days: Int,
     now: Date,
+    calendar: Calendar,
     deadline: Date,
     budget: ScanBudget? = nil
   ) throws -> [ProviderID: [DailyUsage]] {
-    let calendar = Calendar.current
     let keys: [String] = (0..<days).reversed().compactMap { offset in
-      calendar.date(byAdding: .day, value: -offset, to: now).map(Self.dayKey)
+      calendar.date(byAdding: .day, value: -offset, to: now).map {
+        Self.dayKey($0, timeZone: calendar.timeZone)
+      }
     }
     guard let cutoffKey = keys.first else { return [:] }
 
@@ -563,7 +623,8 @@ public actor LocalUsageScanner {
     guard box.index.records[key] != nil || box.index.records.count < Self.maximumScannedFiles
     else { return UsageTotals() }
     var record = box.index.records[key]
-    if !metadata.matches(record) {
+    // A matching stamp still hides cache reads priced before savings existed.
+    if !metadata.matches(record) || record?.needsSavingsRefresh == true {
       let requiredBytes = min(self.codexTailBytes, max(0, Int(clamping: metadata.size)))
       if requiredBytes > remainingBytes {
         budget.markStarved()
@@ -584,12 +645,13 @@ public actor LocalUsageScanner {
           size: metadata.size,
           modifiedAt: metadata.modifiedAt,
           offset: metadata.size,
-          days: parsed.map { [Self.dayKey($0.timestamp): $0.totals] } ?? [:],
+          days: parsed.map { [Self.dayKey($0.timestamp, timeZone: self.timeZone): $0.totals] } ?? [:],
           recentRows: [:],
           recentOrder: [],
           device: metadata.device,
           inode: metadata.inode,
-          changedAt: metadata.changedAt)
+          changedAt: metadata.changedAt,
+          savingsPriced: true)
         try self.storeParsed(record!, key: key, box: box, ledger: ledger, budget: budget)
       }
     }
@@ -641,15 +703,28 @@ public actor LocalUsageScanner {
     guard box.index.records[key] != nil || box.index.records.count < Self.maximumScannedFiles
     else { return UsageTotals() }
     var record = box.index.records[key]
+    // savingsPriced == false means a previous pass already started at offset 0.
+    // Resetting again would throw away that partial read.
+    let previousTimeZone = (record?.rebucketedFromTimeZone ?? record?.dayTimeZone)
+      .flatMap(TimeZone.init(identifier:))
+      ?? TimeZone(secondsFromGMT: 0)!
+    let staleDays = record != nil && record?.dayTimeZone != self.timeZone.identifier
+    let continueSavingsMigration = record?.savingsPriced == false && !staleDays
+    let staleSavings = record?.needsSavingsRefresh == true && !continueSavingsMigration
     if record?.provider != .anthropic || !metadata.sameFile(as: record)
       || metadata.size < (record?.offset ?? 0)
       || (metadata.size == (record?.offset ?? 0) && !metadata.matches(record))
+      || staleSavings || staleDays
     {
       record = CachedFile(
         provider: .anthropic, size: 0, modifiedAt: 0, offset: 0,
-        days: [:], recentRows: [:], recentOrder: [])
+        days: [:], recentRows: [:], recentOrder: [],
+        dayTimeZone: self.timeZone.identifier,
+        rebucketedFromDays: staleDays ? [:] : nil,
+        rebucketedFromTimeZone: staleDays ? previousTimeZone.identifier : nil)
     }
     let needsUpdate = !metadata.matches(record) || (record?.offset ?? 0) < metadata.size
+      || staleSavings || staleDays || continueSavingsMigration
     if needsUpdate, remainingBytes <= 0 {
       budget.markStarved()
       try budget.ensureTime()
@@ -664,22 +739,38 @@ public actor LocalUsageScanner {
       defer { opened.close() }
       if !metadata.sameFile(as: record) || metadata.size < (record?.offset ?? 0)
         || (metadata.size == (record?.offset ?? 0) && !metadata.matches(record))
+        || staleSavings || staleDays
       {
         record = CachedFile(
           provider: .anthropic, size: 0, modifiedAt: 0, offset: 0,
-          days: [:], recentRows: [:], recentOrder: [])
+          days: [:], recentRows: [:], recentOrder: [],
+          dayTimeZone: self.timeZone.identifier,
+          rebucketedFromDays: staleDays ? [:] : nil,
+          rebucketedFromTimeZone: staleDays ? previousTimeZone.identifier : nil)
       }
       var updated = record!
+      let previousZone = updated.rebucketedFromTimeZone.flatMap(TimeZone.init(identifier:))
+      let retentionKey = previousZone == nil ? cutoffKey : Self.dayKey(
+        self.calendar.date(byAdding: .day, value: -CachedUsageHistory.retentionDays + 1,
+          to: self.scanNow) ?? self.scanNow, timeZone: self.timeZone)
       let scanResult = try self.scanLines(
         opened, from: updated.offset,
         discardingOversizedLine: updated.discardingOversizedLine ?? false,
         deadline: .distantFuture, budget: budget, remainingBytes: &remainingBytes
       ) { data in
-        guard let row = Self.parseClaudeLine(data), row.dayKey >= cutoffKey else { return }
+        guard let row = Self.parseClaudeLine(
+          data, timeZone: self.timeZone, previousTimeZone: previousZone),
+          row.dayKey >= retentionKey else { return }
         if let rowKey = row.key, let previous = updated.recentRows[rowKey] {
           updated.days[previous.dayKey, default: UsageTotals()].subtract(previous.totals)
+          if let previousDay = previous.previousDayKey {
+            updated.rebucketedFromDays?[previousDay, default: UsageTotals()].subtract(previous.totals)
+          }
         }
         updated.days[row.dayKey, default: UsageTotals()].add(row.totals)
+        if let previousDay = row.previousDayKey {
+          updated.rebucketedFromDays?[previousDay, default: UsageTotals()].add(row.totals)
+        }
         if let rowKey = row.key {
           updated.recentRows[rowKey] = row
           updated.recentOrder.removeAll { $0 == rowKey }
@@ -697,9 +788,19 @@ public actor LocalUsageScanner {
       updated.device = metadata.device
       updated.inode = metadata.inode
       updated.changedAt = metadata.changedAt
-      updated.days = updated.days.filter { $0.key >= cutoffKey }
+      updated.days = updated.days.filter { $0.key >= retentionKey }
+      let migrating = staleSavings || staleDays || continueSavingsMigration
+      // Only a from-scratch reparse stays unmarked until EOF. A normal append
+      // keeps the priced flag, so a trailing partial line does not turn the
+      // next scan into a migration that refuses to publish.
+      updated.savingsPriced = migrating ? updated.offset >= metadata.size : true
       record = updated
-      let incomplete = remainingBytes <= 0 && updated.offset < metadata.size
+      // A savings reparse starts again at byte 0, so a per-file cap would
+      // publish a prefix and drop the rest of the file. Time out instead and
+      // leave the previous index in place until this file is read through.
+      let migrationStillOpen = migrating && updated.offset < metadata.size
+      let incomplete = migrationStillOpen
+        || (remainingBytes <= 0 && updated.offset < metadata.size)
       try self.storeParsed(updated, key: key, box: box, ledger: ledger, budget: budget)
       if incomplete {
         budget.markStarved()
@@ -756,7 +857,7 @@ public actor LocalUsageScanner {
             size: metadata.size,
             modifiedAt: metadata.modifiedAt,
             offset: metadata.size,
-            days: parsed.map { [Self.dayKey(metadata.date): $0] } ?? [:],
+            days: parsed.map { [Self.dayKey(metadata.date, timeZone: self.timeZone): $0] } ?? [:],
             recentRows: [:],
             recentOrder: [],
             device: metadata.device,
@@ -954,14 +1055,12 @@ public actor LocalUsageScanner {
         let cacheWrite = Self.int64(usage["cache_write_input_tokens"])
         let output = Self.int64(usage["output_tokens"])
         let model = currentModel ?? "gpt-5.6-sol"
-        let cost = Pricing.apiCost(
-          provider: .openAI, model: model, input: input, cached: cached,
-          cacheWrite: cacheWrite, cacheWriteOneHour: 0, output: output)
         latest = (
           timestamp,
-          UsageTotals(
-            input: input, cached: cached, cacheWrite: cacheWrite, output: output,
-            costUSD: cost ?? 0, estimated: cost == nil || currentModel == nil)
+          Pricing.totals(
+            provider: .openAI, model: model, input: input, cached: cached,
+            cacheWrite: cacheWrite, output: output,
+            estimated: currentModel == nil)
         )
       }
     }
@@ -1011,12 +1110,14 @@ public actor LocalUsageScanner {
     return (nextOffset, bufferState.discardingOversizedLine)
   }
 
-  static func parseClaudeLine(_ data: Data) -> CachedRow? {
+  static func parseClaudeLine(
+    _ data: Data, timeZone: TimeZone = .current, previousTimeZone: TimeZone? = nil
+  ) -> CachedRow? {
     guard data.range(of: Data(#""type":"assistant""#.utf8)) != nil,
       let usageData = Self.jsonObject(after: #""usage":"#, in: data),
       let usage = try? JSONSerialization.jsonObject(with: usageData) as? [String: Any],
       let timestampText = Self.jsonString(named: "timestamp", in: data),
-      timestampText.count >= 10
+      let timestamp = Self.parseDate(timestampText)
     else { return nil }
     let model = Self.jsonString(named: "model", in: data) ?? "claude-opus-5"
     let input = Self.int64(usage["input_tokens"])
@@ -1026,18 +1127,17 @@ public actor LocalUsageScanner {
     let creation = usage["cache_creation"] as? [String: Any]
     let oneHour = min(cacheWrite, Self.int64(creation?["ephemeral_1h_input_tokens"]))
     guard saturatingNonnegativeSum(input, cached, cacheWrite, output) > 0 else { return nil }
-    let cost = Pricing.apiCost(
-      provider: .anthropic, model: model, input: input, cached: cached,
-      cacheWrite: cacheWrite, cacheWriteOneHour: oneHour, output: output)
     let messageID = Self.jsonString(named: "id", in: data)
     let requestID = Self.jsonString(named: "requestId", in: data)
     let key = messageID.flatMap { message in requestID.map { "\(message):\($0)" } }
     return CachedRow(
       key: key,
-      dayKey: String(timestampText.prefix(10)),
-      totals: UsageTotals(
-        input: input, cached: cached, cacheWrite: cacheWrite, output: output,
-        costUSD: cost ?? 0, estimated: cost == nil))
+      dayKey: Self.dayKey(timestamp, timeZone: timeZone),
+      totals: Pricing.totals(
+        provider: .anthropic, model: model, input: input, cached: cached,
+        cacheWrite: cacheWrite, cacheWriteOneHour: oneHour, output: output,
+        estimated: false),
+      previousDayKey: previousTimeZone.map { Self.dayKey(timestamp, timeZone: $0) })
   }
 
   private static func jsonObject(after marker: String, in data: Data) -> Data? {
@@ -1105,11 +1205,9 @@ public actor LocalUsageScanner {
       object["primaryModelId"] as? String
       ?? (object["modelsUsed"] as? [String])?.last
       ?? "grok-4.6"
-    let cost = Pricing.apiCost(
+    return Pricing.totals(
       provider: .grok, model: model, input: total, cached: 0,
-      cacheWrite: 0, cacheWriteOneHour: 0, output: 0)
-    return UsageTotals(
-      input: total, output: 0, costUSD: cost ?? 0, estimated: true)
+      cacheWrite: 0, output: 0, estimated: true)
   }
 
   private func loadIndex() -> UsageIndex {
@@ -1169,6 +1267,7 @@ public actor LocalUsageScanner {
   private func recordIsValid(_ record: CachedFile) -> Bool {
     record.days.count <= 100 && record.recentRows.count <= 128
       && record.recentOrder.count <= 128
+      && (record.rebucketedFromDays?.count ?? 0) <= 100
   }
 
   private func saveIndex(
@@ -1234,8 +1333,8 @@ public actor LocalUsageScanner {
 
   private static let dateParsers = ScannerDateParsers()
 
-  private static func dayKey(_ date: Date) -> String {
-    Self.dateParsers.dayKey(date)
+  private static func dayKey(_ date: Date, timeZone: TimeZone = .current) -> String {
+    Self.dateParsers.dayKey(date, timeZone: timeZone)
   }
 
   private static func parseDate(_ text: String) -> Date? {
@@ -1295,6 +1394,99 @@ public actor LocalUsageScanner {
     return cost
   }
 
+  /// Old OpenAI archives added cache writes even though input includes them.
+  /// Correct only totals fully backed by the retained per-file token fields.
+  /// Archive-only days and mismatched totals cannot be reconstructed safely.
+  @discardableResult
+  private static func repairOpenAIArchivedTotals(_ index: inout UsageIndex) -> Bool {
+    var totals: [String: UsageTotals] = [:]
+    for record in index.records.values where record.provider == .openAI {
+      for (day, value) in record.days {
+        totals[day, default: UsageTotals()].add(value)
+      }
+    }
+    var changed = false
+    for (day, value) in totals where value.cacheWrite > 0 {
+      let corrected = value.totalTokens(provider: .openAI)
+      let inflated = saturatingNonnegativeSum(corrected, value.cacheWrite)
+      guard corrected != inflated,
+        var archived = index.dailyHistory[.openAI]?[day], archived.tokens == inflated
+      else { continue }
+      archived.tokens = corrected
+      index.dailyHistory[.openAI]?[day] = archived
+      changed = true
+    }
+    return changed
+  }
+
+  /// A completed reparse supplies both the old and the local-day grouping.
+  /// Move the source-backed contribution and keep any archived remainder.
+  /// A day with no recoverable source keeps its recorded date and total.
+  private static func reconcileClaudeDayKeys(
+    index: inout UsageIndex, published: [String: CachedFile],
+    legacy: [ProviderID: [String: ArchivedUsageDay]],
+    fresh: [ProviderID: [String: ArchivedUsageDay]],
+    observed: inout [ProviderID: [String: ArchivedUsageDay]]
+  ) {
+    var prior = index
+    prior.records = published
+    var migrated: Set<String> = []
+    var affected: Set<String> = []
+    for (key, record) in index.records where record.savingsPriced == true {
+      guard let oldDays = record.rebucketedFromDays else { continue }
+      var previous = record
+      previous.days = oldDays
+      prior.records[key] = previous
+      migrated.insert(key)
+      affected.formUnion(oldDays.keys)
+      affected.formUnion(record.days.keys)
+    }
+    guard !migrated.isEmpty else { return }
+    let reconstructed = Self.observedDays(
+      index: prior, providers: [.anthropic], now: index.updatedAt)[.anthropic] ?? [:]
+    for day in affected {
+      let previous = legacy[.anthropic]?[day] ?? reconstructed[day]
+      let corrected = fresh[.anthropic]?[day]
+      if let archived = index.dailyHistory[.anthropic]?[day] {
+        let previousTokens = previous?.tokens ?? 0
+        guard archived.tokens >= previousTokens else {
+          observed[.anthropic]?.removeValue(forKey: day)
+          continue
+        }
+        let remainder = archived.tokens - previousTokens
+        let tokens = saturatingNonnegativeSum(remainder, corrected?.tokens ?? 0)
+        if tokens == 0, corrected == nil {
+          observed[.anthropic]?.removeValue(forKey: day)
+          index.dailyHistory[.anthropic]?.removeValue(forKey: day)
+          continue
+        }
+        let cost: Double?
+        if let archivedCost = archived.costUSD,
+          let previousCost = previous?.costUSD ?? (previous == nil ? 0 : nil),
+          let correctedCost = corrected?.costUSD ?? (corrected == nil ? 0 : nil),
+          archivedCost >= previousCost {
+          cost = Self.recordedCost(archivedCost - previousCost + correctedCost)
+        } else {
+          cost = nil
+        }
+        observed[.anthropic, default: [:]][day] = ArchivedUsageDay(
+          tokens: tokens, costUSD: cost,
+          fetchedAt: remainder == 0 ? (corrected?.fetchedAt ?? archived.fetchedAt) : archived.fetchedAt)
+      } else if let corrected {
+        observed[.anthropic, default: [:]][day] = corrected
+      } else {
+        observed[.anthropic]?.removeValue(forKey: day)
+      }
+    }
+    for key in migrated {
+      index.records[key]?.rebucketedFromDays = nil
+      index.records[key]?.rebucketedFromTimeZone = nil
+      for rowKey in index.records[key]?.recentRows.keys ?? Dictionary<String, CachedRow>().keys {
+        index.records[key]?.recentRows[rowKey]?.previousDayKey = nil
+      }
+    }
+  }
+
   /// Replaces overlapping archive keys with this scan's observed totals.
   /// Older archive days outside the new observation stay, then retention drops
   /// anything older than 90 civil days or dated after `now`.
@@ -1302,10 +1494,11 @@ public actor LocalUsageScanner {
   private static func mergeDailyHistory(
     _ index: inout UsageIndex,
     observed: [ProviderID: [String: ArchivedUsageDay]],
-    now: Date
+    now: Date,
+    calendar: Calendar
   ) -> Bool {
     guard !observed.isEmpty else { return false }
-    let calendar = CachedUsageHistory.civilCalendar(.current)
+    let calendar = CachedUsageHistory.civilCalendar(calendar)
     let today = CachedUsageHistory.dayKey(for: now, calendar: calendar)
     let oldest = CachedUsageHistory.dayKey(
       daysBefore: CachedUsageHistory.retentionDays - 1, from: now, calendar: calendar)
@@ -1347,8 +1540,20 @@ public actor LocalUsageScanner {
     now: Date
   ) throws -> [ProviderID: LocalUsageSummary] {
     let days = min(90, max(1, periodDays))
-    let cutoff = Calendar.current.date(byAdding: .day, value: -days + 1, to: now) ?? now
-    let plans = self.visitPlans(selected: selected, dirtyProviders: dirtyProviders)
+    self.scanNow = now
+    if selected.contains(.openAI), Self.repairOpenAIArchivedTotals(&box.index) {
+      ledger.indexChanged = true
+      ledger.historyChanged = true
+    }
+    let cutoff = self.calendar.date(byAdding: .day, value: -days + 1, to: now) ?? now
+    var plans = self.visitPlans(selected: selected, dirtyProviders: dirtyProviders)
+    for index in plans.indices {
+      guard self.providerNeedsHistoryRefresh(box.index, provider: plans[index].provider) else {
+        continue
+      }
+      if case .full = plans[index].visit { continue }
+      plans[index].visit = .full(.baseline)
+    }
     ledger.tokens = Dictionary(uniqueKeysWithValues: plans.map { ($0.provider.rawValue, $0.token) })
     for plan in plans {
       if case .skip = plan.visit {
@@ -1361,6 +1566,7 @@ public actor LocalUsageScanner {
     // Capture those aggregates before any overlay or rescan replaces them.
     let legacy = Self.observedDays(
       index: box.index, providers: ledger.dirtyProviders, now: box.index.updatedAt)
+    ledger.publishedRecords = box.index.records
     if var checkpoint = self.checkpoint(matching: anchor) {
       if checkpoint.needsFinalize {
         checkpoint.needsFinalize = false
@@ -1371,7 +1577,7 @@ public actor LocalUsageScanner {
       self.scanMetrics.resumes += 1
     }
     try budget.ensureTime()
-    let cutoffKey = Self.dayKey(cutoff)
+    let cutoffKey = Self.dayKey(cutoff, timeZone: self.timeZone)
     for plan in plans {
       try self.visit(
         plan, cutoff: cutoff, cutoffKey: cutoffKey, box: box, ledger: ledger, budget: budget)
@@ -1394,6 +1600,8 @@ public actor LocalUsageScanner {
     now: Date,
     budget: ScanBudget
   ) throws -> [ProviderID: LocalUsageSummary] {
+    // Restore before observed days are merged, or a prefix would replace them.
+    self.withholdUnfinishedMigrations(box: box, ledger: ledger)
     if !ledger.retainedReady {
       ledger.retainedKeys = ledger.pendingRetained
       ledger.retainedReady = true
@@ -1404,12 +1612,29 @@ public actor LocalUsageScanner {
       budget.markStarved()
     }
     try budget.ensureTime()
-    var observed = legacy
+    var observed = legacy.filter { !ledger.heldProviders.contains($0.key) }
     let fresh = Self.observedDays(index: box.index, providers: ledger.dirtyProviders, now: now)
     for (provider, days) in fresh {
       var stored = observed[provider] ?? [:]
       for (key, day) in days { stored[key] = day }
       observed[provider] = stored
+    }
+    if !ledger.heldProviders.contains(.anthropic) {
+      Self.reconcileClaudeDayKeys(
+        index: &box.index, published: ledger.publishedRecords, legacy: legacy,
+        fresh: fresh, observed: &observed)
+    }
+    // An unchanged file set does not establish why an archive differs from
+    // its retained records. The exact legacy cache-write case was repaired
+    // above; preserve other saved totals until new source data is read.
+    let openAIChanged = ledger.parsedRecords.values.contains { $0.provider == .openAI }
+      || ledger.removedKeys.contains { Self.provider(ofKey: $0) == .openAI }
+    if !openAIChanged, let archived = box.index.dailyHistory[.openAI] {
+      for (day, value) in observed[.openAI] ?? [:] {
+        if let saved = archived[day], saved.tokens != value.tokens {
+          observed[.openAI]?[day] = saved
+        }
+      }
     }
     try budget.ensureTime()
     let previousRecordCount = box.index.records.count
@@ -1422,15 +1647,16 @@ public actor LocalUsageScanner {
       return retained.contains(key)
     }
     if box.index.records.count != previousRecordCount { ledger.indexChanged = true }
-    if Self.mergeDailyHistory(&box.index, observed: observed, now: now) {
+    if Self.mergeDailyHistory(&box.index, observed: observed, now: now, calendar: self.calendar) {
       ledger.indexChanged = true
     }
-    let cutoffKey = Self.dayKey(cutoff)
-    let todayKey = Self.dayKey(now)
+    let cutoffKey = Self.dayKey(cutoff, timeZone: self.timeZone)
+    let todayKey = Self.dayKey(now, timeZone: self.timeZone)
     var selectedIndex = box.index
     selectedIndex.records = box.index.records.filter { selected.contains($0.value.provider) }
     let series = try Self.dailySeries(
-      index: selectedIndex, days: days, now: now, deadline: .distantFuture, budget: budget)
+      index: selectedIndex, days: days, now: now, calendar: self.calendar,
+      deadline: .distantFuture, budget: budget)
     var summaries: [ProviderID: LocalUsageSummary] = [:]
     for provider in selected {
       try budget.ensureTime()
@@ -1442,7 +1668,7 @@ public actor LocalUsageScanner {
         provider: provider, since: todayKey, index: box.index,
         deadline: .distantFuture, budget: budget)
       let cycle = try Self.aggregate(
-        provider: provider, since: Self.dayKey(cycleStart), index: box.index,
+        provider: provider, since: Self.dayKey(cycleStart, timeZone: self.timeZone), index: box.index,
         deadline: .distantFuture, budget: budget)
       // A provider is current only after its planned files were fully
       // revalidated. Missing roots are removed from dirtyProviders in visit(),
@@ -1463,13 +1689,73 @@ public actor LocalUsageScanner {
     }
     for provider in dirty { self.lastScanDates[provider] = now }
     self.acknowledge(selected: selected, ledger: ledger)
-    let pending = Set((self.memoryCheckpoint?.dirtyProviders ?? []).compactMap(ProviderID.init(rawValue:)))
-    if pending.isSubset(of: dirty) {
-      self.memoryCheckpoint = nil
-      LocalHistoryCheckpointStore.discard(cacheURL: self.cacheURL)
-      self.scanIncomplete = false
+    if !ledger.heldProviders.isEmpty {
+      // The published file keeps the pre-migration record. Carry the partial
+      // reparse forward under the anchor this pass actually left on disk.
+      let checkpointAnchor = ledger.indexChanged ? self.residentAnchor : expectedAnchor
+      self.preserveCheckpoint(ledger, anchor: checkpointAnchor)
+    } else {
+      let pending = Set(
+        (self.memoryCheckpoint?.dirtyProviders ?? []).compactMap(ProviderID.init(rawValue:)))
+      if pending.isSubset(of: dirty) {
+        self.memoryCheckpoint = nil
+        LocalHistoryCheckpointStore.discard(cacheURL: self.cacheURL)
+        self.scanIncomplete = false
+      }
     }
     return summaries
+  }
+
+  /// A checkpoint can overlay a half-read savings reparse, then this pass can
+  /// return without finishing it. Opening fails when the file is unreadable,
+  /// and that path never reaches the incomplete-read guard. Put the published
+  /// record back. The partial stays in the ledger so the next checkpoint can
+  /// resume. A file that was never published still keeps its prefix.
+  private func withholdUnfinishedMigrations(box: IndexBox, ledger: ScanLedger) {
+    var restored: Set<String> = []
+    for (key, record) in box.index.records where record.savingsPriced == false {
+      guard let original = ledger.publishedRecords[key] else { continue }
+      guard original.savingsPriced != false else { continue }
+      box.index.records[key] = original
+      ledger.heldProviders.insert(record.provider)
+      ledger.dirtyProviders.remove(record.provider)
+      restored.insert(key)
+    }
+    guard !restored.isEmpty else { return }
+    let otherChange = ledger.parsedRecords.keys.contains { !restored.contains($0) }
+      || !ledger.removedKeys.isEmpty
+    if !otherChange && !ledger.historyChanged { ledger.indexChanged = false }
+  }
+
+  /// A checkpoint can overlay a half-read savings reparse before this pass
+  /// finds the provider root gone. Put the published record back so finalize
+  /// cannot save that prefix, and keep the partial record in the checkpoint.
+  private func withholdUnvisitedMigration(
+    _ provider: ProviderID, box: IndexBox, ledger: ScanLedger
+  ) {
+    let partial = ledger.parsedRecords.contains {
+      $0.value.provider == provider && $0.value.savingsPriced == false
+    }
+    guard partial else { return }
+    for (key, record) in box.index.records where record.provider == provider {
+      if let original = ledger.publishedRecords[key] {
+        box.index.records[key] = original
+      } else {
+        box.index.records.removeValue(forKey: key)
+      }
+    }
+    for (key, record) in ledger.publishedRecords where record.provider == provider {
+      box.index.records[key] = record
+    }
+    ledger.removedKeys = ledger.removedKeys.filter { Self.provider(ofKey: $0) != provider }
+    ledger.heldProviders.insert(provider)
+    let otherWork = ledger.parsedRecords.values.contains {
+      !ledger.heldProviders.contains($0.provider)
+    } || ledger.removedKeys.contains { key in
+      guard let owner = Self.provider(ofKey: key) else { return true }
+      return !ledger.heldProviders.contains(owner)
+    }
+    if !otherWork && !ledger.historyChanged { ledger.indexChanged = false }
   }
 
   private func visit(
@@ -1488,6 +1774,7 @@ public actor LocalUsageScanner {
       let root = self.root(for: plan.provider)
       if self.watchChanges, !self.directoryExists(root) {
         self.changeTracker.noteUnavailable(plan.provider)
+        self.withholdUnvisitedMigration(plan.provider, box: box, ledger: ledger)
         ledger.dirtyProviders.remove(plan.provider)
         return
       }
@@ -1716,7 +2003,8 @@ public actor LocalUsageScanner {
       ledger.pruneProviders = Self.providerSet(checkpoint.pruneProviders)
       ledger.dirtyProviders = Self.providerSet(checkpoint.dirtyProviders)
     }
-    ledger.indexChanged = !ledger.parsedRecords.isEmpty || !ledger.removedKeys.isEmpty
+    ledger.indexChanged = ledger.historyChanged
+      || !ledger.parsedRecords.isEmpty || !ledger.removedKeys.isEmpty
   }
 
   private func encodeRecords(_ records: [String: CachedFile]) throws -> Data {
@@ -1736,6 +2024,13 @@ public actor LocalUsageScanner {
     self.cancelAfterParsedFiles = nil
     self.stopBeforePublish = false
     return budget
+  }
+
+  private func providerNeedsHistoryRefresh(_ index: UsageIndex, provider: ProviderID) -> Bool {
+    index.records.values.contains {
+      $0.provider == provider && ($0.needsSavingsRefresh
+        || (provider == .anthropic && $0.dayTimeZone != self.timeZone.identifier))
+    }
   }
 
   private func visitPlans(
@@ -1815,6 +2110,10 @@ public actor LocalUsageScanner {
     self.maximumBytesPerScan = max(0, maximumBytes)
   }
 
+  func testingSetMaximumBytesPerFile(_ maximumBytes: Int) {
+    self.maximumBytesPerFileScan = max(0, maximumBytes)
+  }
+
   func testingSetResidentIndexByteLimit(_ maximumBytes: Int?) {
     self.residentIndexByteLimitOverride = maximumBytes.map { max(0, $0) }
   }
@@ -1875,10 +2174,10 @@ private final class ScannerDateParsers: @unchecked Sendable {
     self.fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
   }
 
-  func dayKey(_ date: Date) -> String {
+  func dayKey(_ date: Date, timeZone: TimeZone) -> String {
     self.lock.lock()
     defer { self.lock.unlock() }
-    self.day.timeZone = .current
+    self.day.timeZone = timeZone
     return self.day.string(from: date)
   }
 
@@ -1960,6 +2259,24 @@ private struct CachedFile: Codable {
   /// Persists across the per-file byte budget so an oversized unterminated
   /// record cannot have its continuation parsed as a fresh record next time.
   var discardingOversizedLine: Bool? = nil
+  /// True after this file has been priced with cache-read savings. False while
+  /// a Claude reparse is still short of the end of the file. Nil on indexes
+  /// written before savings existed.
+  var savingsPriced: Bool? = nil
+  /// Missing on Claude indexes whose day keys used the timestamp's UTC date.
+  var dayTimeZone: String? = nil
+  /// Bounded source-day totals carried only until a day migration is published.
+  var rebucketedFromDays: [String: UsageTotals]? = nil
+  var rebucketedFromTimeZone: String? = nil
+
+  /// Legacy rows with cache reads, and an unfinished reparse, need another pass.
+  /// A finished pass stays put even when the model has no rate.
+  var needsSavingsRefresh: Bool {
+    if self.savingsPriced == true { return false }
+    if self.savingsPriced == false { return true }
+    return self.days.values.contains { $0.pricedSavings == nil }
+      || self.recentRows.values.contains { $0.totals.pricedSavings == nil }
+  }
 
   func totals(since cutoffKey: String) -> UsageTotals {
     self.days.filter { $0.key >= cutoffKey }.values.reduce(into: UsageTotals()) { result, value in
@@ -1972,6 +2289,7 @@ struct CachedRow: Codable, Equatable {
   let key: String?
   let dayKey: String
   let totals: UsageTotals
+  var previousDayKey: String? = nil
 }
 
 struct UsageTotals: Codable, Equatable {
@@ -1981,8 +2299,83 @@ struct UsageTotals: Codable, Equatable {
   var output: Int64 = 0
   var costUSD: Double = 0
   var estimated = false
+  /// Cache-read discount against the full input rate. Meaningful only when
+  /// `cacheSavingsKnown` is true. Rows written before this field existed leave
+  /// it nil; a cache read on those rows is unknown, not zero.
+  var cacheSavingsUSD: Double = 0
+  var cacheSavingsKnown: Bool? = nil
+
+  private enum CodingKeys: String, CodingKey {
+    case input, cached, cacheWrite, output, costUSD, estimated
+    case cacheSavingsUSD, cacheSavingsKnown
+  }
+
+  init(
+    input: Int64 = 0, cached: Int64 = 0, cacheWrite: Int64 = 0, output: Int64 = 0,
+    costUSD: Double = 0, estimated: Bool = false,
+    cacheSavingsUSD: Double = 0, cacheSavingsKnown: Bool? = nil
+  ) {
+    self.input = input
+    self.cached = cached
+    self.cacheWrite = cacheWrite
+    self.output = output
+    self.costUSD = costUSD
+    self.estimated = estimated
+    self.cacheSavingsUSD = cacheSavingsUSD
+    self.cacheSavingsKnown = cacheSavingsKnown
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.input = try container.decodeIfPresent(Int64.self, forKey: .input) ?? 0
+    self.cached = try container.decodeIfPresent(Int64.self, forKey: .cached) ?? 0
+    self.cacheWrite = try container.decodeIfPresent(Int64.self, forKey: .cacheWrite) ?? 0
+    self.output = try container.decodeIfPresent(Int64.self, forKey: .output) ?? 0
+    self.costUSD = try container.decodeIfPresent(Double.self, forKey: .costUSD) ?? 0
+    self.estimated = try container.decodeIfPresent(Bool.self, forKey: .estimated) ?? false
+    if try container.decodeIfPresent(Bool.self, forKey: .cacheSavingsKnown) == false {
+      self.cacheSavingsUSD = 0
+      self.cacheSavingsKnown = false
+    } else if container.contains(.cacheSavingsUSD) {
+      let value = try container.decode(Double.self, forKey: .cacheSavingsUSD)
+      if value.isFinite, value >= 0 {
+        self.cacheSavingsUSD = value
+        self.cacheSavingsKnown = true
+      } else {
+        self.cacheSavingsUSD = 0
+        self.cacheSavingsKnown = false
+      }
+    } else {
+      self.cacheSavingsUSD = 0
+      self.cacheSavingsKnown = nil
+    }
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(self.input, forKey: .input)
+    try container.encode(self.cached, forKey: .cached)
+    try container.encode(self.cacheWrite, forKey: .cacheWrite)
+    try container.encode(self.output, forKey: .output)
+    try container.encode(self.costUSD, forKey: .costUSD)
+    try container.encode(self.estimated, forKey: .estimated)
+    if self.cacheSavingsKnown == true {
+      try container.encode(self.cacheSavingsUSD, forKey: .cacheSavingsUSD)
+    } else if self.cacheSavingsKnown == false {
+      try container.encode(false, forKey: .cacheSavingsKnown)
+    }
+  }
+
+  /// Priced discount, or zero when this row has no cache reads. Nil when a
+  /// cache read was stored before it could be priced, or the model has no rate.
+  var pricedSavings: Double? {
+    if self.cacheSavingsKnown == true { return max(0, self.cacheSavingsUSD) }
+    if self.cacheSavingsKnown == false { return nil }
+    return self.cached == 0 ? 0 : nil
+  }
 
   mutating func add(_ other: UsageTotals) {
+    let savings = Self.combine(self.pricedSavings, other.pricedSavings, minus: false)
     self.input = saturatingNonnegativeSum(self.input, other.input)
     self.cached = saturatingNonnegativeSum(self.cached, other.cached)
     self.cacheWrite = saturatingNonnegativeSum(self.cacheWrite, other.cacheWrite)
@@ -1990,19 +2383,44 @@ struct UsageTotals: Codable, Equatable {
     let nextCost = self.costUSD + max(0, other.costUSD)
     self.costUSD = nextCost.isFinite ? nextCost : Double.greatestFiniteMagnitude
     self.estimated = self.estimated || other.estimated
+    self.apply(savings)
   }
 
   mutating func subtract(_ other: UsageTotals) {
+    let savings = Self.combine(self.pricedSavings, other.pricedSavings, minus: true)
     self.input = saturatingNonnegativeSubtract(self.input, other.input)
     self.cached = saturatingNonnegativeSubtract(self.cached, other.cached)
     self.cacheWrite = saturatingNonnegativeSubtract(self.cacheWrite, other.cacheWrite)
     self.output = saturatingNonnegativeSubtract(self.output, other.output)
     self.costUSD = max(0, self.costUSD - other.costUSD)
+    self.apply(savings)
+    // An unknown row poisons the whole day. With no cache reads left the
+    // discount is zero, so a priced replacement can be added on this day.
+    // Other reads that are still present stay unknown until a full reparse.
+    if self.cacheSavingsKnown == false, self.cached == 0 {
+      self.cacheSavingsUSD = 0
+      self.cacheSavingsKnown = true
+    }
+  }
+
+  private static func combine(
+    _ left: Double?, _ right: Double?, minus: Bool
+  ) -> (value: Double, known: Bool) {
+    guard let left, let right else { return (0, false) }
+    let next = minus ? left - right : left + right
+    guard next.isFinite else { return (0, false) }
+    return (max(0, next), true)
+  }
+
+  private mutating func apply(_ savings: (value: Double, known: Bool)) {
+    self.cacheSavingsUSD = savings.known ? savings.value : 0
+    self.cacheSavingsKnown = savings.known
   }
 
   func totalTokens(provider: ProviderID) -> Int64 {
     saturatingNonnegativeSum(
-      self.input, provider == .anthropic ? self.cached : 0, self.cacheWrite, self.output)
+      self.input, provider == .anthropic ? self.cached : 0,
+      provider == .openAI ? 0 : self.cacheWrite, self.output)
   }
 
   func summary(
@@ -2022,6 +2440,7 @@ struct UsageTotals: Codable, Equatable {
       cacheWriteInputTokens: self.cacheWrite,
       outputTokens: self.output,
       apiEquivalentCostUSD: self.costUSD,
+      cacheSavingsUSD: self.pricedSavings,
       isCostEstimate: self.estimated,
       todayTokens: today.totalTokens(provider: provider),
       cycleTokens: cycle.totalTokens(provider: provider),
@@ -2039,6 +2458,49 @@ private enum Pricing {
     let cached: Double
     let cacheWrite: Double
     let output: Double
+  }
+
+  static func totals(
+    provider: ProviderID,
+    model: String,
+    input: Int64,
+    cached: Int64,
+    cacheWrite: Int64,
+    cacheWriteOneHour: Int64 = 0,
+    output: Int64,
+    estimated: Bool
+  ) -> UsageTotals {
+    let cost = self.apiCost(
+      provider: provider, model: model, input: input, cached: cached,
+      cacheWrite: cacheWrite, cacheWriteOneHour: cacheWriteOneHour, output: output)
+    let savings = self.cacheReadSavings(
+      provider: provider, model: model, input: input, cached: cached)
+    return UsageTotals(
+      input: input, cached: cached, cacheWrite: cacheWrite, output: output,
+      costUSD: cost ?? 0, estimated: estimated || cost == nil,
+      cacheSavingsUSD: savings ?? 0, cacheSavingsKnown: savings != nil)
+  }
+
+  /// Dollars saved because cache reads were billed below the full input rate.
+  /// Zero when nothing was read from cache. Nil when reads exist and the model
+  /// has no rate, so the total stays blank instead of becoming a fake zero.
+  static func cacheReadSavings(
+    provider: ProviderID,
+    model: String,
+    input: Int64,
+    cached: Int64
+  ) -> Double? {
+    let reads = provider == .openAI
+      ? min(max(0, cached), max(0, input))
+      : max(0, cached)
+    if reads == 0 { return 0 }
+    guard let rates = self.rates(provider: provider, model: model.lowercased()) else { return nil }
+    let delta = rates.input - rates.cached
+    guard delta.isFinite else { return nil }
+    if delta <= 0 { return 0 }
+    let savings = Double(reads) * delta / 1_000_000
+    guard savings.isFinite else { return nil }
+    return savings
   }
 
   static func apiCost(

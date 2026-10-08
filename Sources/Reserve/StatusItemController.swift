@@ -538,6 +538,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       }
       && !labels.contains { $0.hasSuffix("% used") }
       && DashboardFormat.remainingPercent(99.7525) == "99"
+    let tileResetsAreVisible = previewSummaries.allSatisfy { summary in
+      guard let reset = descendants.compactMap({ $0 as? ReserveLabel }).first(where: {
+        $0.identifier?.rawValue == "tile-reset-\(summary.provider.rawValue)"
+      }) else { return false }
+      return reset.stringValue.hasPrefix("Resets ")
+        && reset.toolTip == summary.primary?.title && reset.clockText != nil
+    }
     let forecastCount = descendants.filter { $0.identifier?.rawValue == "forecast" }.count
     let allowanceCount = descendants.filter {
       ($0.identifier?.rawValue ?? "").hasPrefix("allowance-")
@@ -895,7 +902,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       actionsPresent, quitRemainsReachable,
       logosPresent, bundledProviderArtworkPresent, scrollingMatchesAvailableSpace, contentFits,
       dashboardFits, fifthProviderReachable, headlinePresent,
-      activityMetricsAreGone, percentagesAreLabelled, forecastsPresent, overviewNavigationPresent,
+      activityMetricsAreGone, percentagesAreLabelled, tileResetsAreVisible,
+      forecastsPresent, overviewNavigationPresent,
       detailLayersPresent, keyboardReachable, spaceSelectsProvider, returnOpensDetail,
       rowsAreSpoken, decorationIsSilent, metersAreSpoken, meterSemanticsWork, motionIsPurposeful,
       chartScaleWorks,
@@ -1962,6 +1970,47 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       && DashboardFormat.secondaryDetail(soon, now: now) == "resets in 1h 20m"
       && !DashboardFormat.limitLine(far, now: now).contains("resets in ")
       && DashboardFormat.limitLine(far, now: now).hasPrefix("Weekly limit · resets ")
+    // Tile resets follow the displayed allowance, survive readings in place,
+    // and stop counting down when the provider's reset timestamp has passed.
+    var tileSummary = summary(fetchedAt: now)
+    tileSummary.allowances = [soon, far]
+    let tile = ProviderOverviewTile(
+      summary: tileSummary, now: now, isSelected: false, isPinnedForMenuBar: false,
+      selectProvider: { _ in })
+    guard let tileReset = Self.descendants(of: tile).compactMap({ $0 as? ReserveLabel }).first(where: {
+      $0.identifier?.rawValue == "tile-reset-openAI"
+    }), tileReset.stringValue == "Resets in 1h 20m" else { return false }
+    tick(tile, later)
+    guard tileReset.stringValue == "Resets in 1h 18m",
+      (tile.accessibilityValue() as? String ?? "").contains("resets in 1h 18m")
+    else { return false }
+    tick(tile, now.addingTimeInterval(80 * 60))
+    guard tileReset.stringValue == "Next reset unknown" else { return false }
+    let secondarySoon = Allowance(
+      id: soon.id, title: "5-hour window", usedPercent: soon.usedPercent,
+      resetsAt: soon.resetsAt, projection: nil, isPrimary: false, paceState: .onPace)
+    tileSummary.allowances = [far, secondarySoon]
+    let tileReadingApplied = tile.apply(
+      summary: tileSummary, now: now, isSelected: false, isPinnedForMenuBar: false)
+    tick(tile, later)
+    guard tileReadingApplied,
+      Self.descendants(of: tile).contains(where: { $0 === tileReset }),
+      tileReset.stringValue == DashboardFormat.resetLine(far, now: later),
+      !tileReset.stringValue.contains("in 1h") else { return false }
+    tileSummary.allowances = [Allowance(
+      id: "unknown-reset", title: "Weekly limit", usedPercent: 50,
+      resetsAt: nil, projection: nil, isPrimary: true, paceState: .unknown)]
+    guard tile.apply(summary: tileSummary, now: now, isSelected: false, isPinnedForMenuBar: false)
+    else { return false }
+    tick(tile, later)
+    guard tileReset.stringValue == "Next reset unknown" else { return false }
+    tileSummary.allowances = []
+    let unavailableTile = ProviderOverviewTile(
+      summary: tileSummary, now: now, isSelected: false, isPinnedForMenuBar: false,
+      selectProvider: { _ in })
+    guard Self.descendants(of: unavailableTile).compactMap({ $0 as? ReserveLabel }).contains(where: {
+      $0.identifier?.rawValue == "tile-reset-openAI" && $0.stringValue == "Next reset unknown"
+    }) else { return false }
     // The pace marker is the one element whose meaning is not written beside it.
     let markedMeter = ReserveMeter(remainingPercent: 40, paceRemainingPercent: 58,
       label: "Weekly limit", color: ReserveColor.onPace)
