@@ -635,6 +635,54 @@ enum ConnectionFlowSelfTest {
       source: "synthetic fresh scan")
     let planKeys = PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in })
 
+    let cachedGate = HistoryScanGate()
+    let cached = Self.historyRefreshStore(
+      directory: directory, name: "cached-startup", planKeys: planKeys,
+      scan: { _, _ in
+        await cachedGate.enter()
+        return [.openAI: replacement]
+      },
+      cachedLocalUsageLoad: { providers, _ in
+        guard providers == [.openAI] else { return [:] }
+        return [.openAI: previous]
+      })
+    cached.refreshAll(manual: true)
+    for _ in 0..<150 {
+      if await cachedGate.started { break }
+      try? await Task.sleep(for: .milliseconds(20))
+    }
+    let cachedState = cached.orderedStates.first { $0.provider == .openAI }!
+    expect(
+      cachedState.localUsage == previous && cachedState.localHistoryUpdating,
+      "a slow first scan hid the published local totals")
+    expect(
+      cachedState.localHistoryCheckedAt == nil,
+      "loading saved totals was treated as a successful new scan")
+    let cachedCard = ProviderDashboardCard(
+      summary: AllowanceBuilder.summary(for: cachedState), now: Date(),
+      isSelectedForMenuBar: false, isExpanded: true,
+      connectProvider: { _ in }, selectMenuBarProvider: { _ in })
+    cachedCard.layoutSubtreeIfNeeded()
+    let cachedText = LifecycleSelfTest.descendants(of: cachedCard).compactMap {
+      ($0 as? NSTextField)?.stringValue
+    }
+    expect(
+      cachedText.contains("Local tokens, last 30 days")
+        && cachedText.contains("Updating activity · showing saved totals")
+        && !cachedText.contains("Gathering activity from this Mac…"),
+      "the running history update did not explain its retained totals")
+    await cachedGate.release()
+    await self.settle { !cached.isScanningLocalUsage }
+    expect(
+      cached.states[.openAI]?.localUsage == replacement
+        && cached.orderedStates.first { $0.provider == .openAI }?.localHistoryUpdating == false,
+      "a completed scan did not replace cached totals or clear the update note")
+    cached.localHistoryEnabled = false
+    await cached.loadCachedLocalUsage()
+    expect(
+      cached.states[.openAI]?.localUsage == nil,
+      "loading cached totals restored disabled local history")
+
     let manual = Self.historyRefreshStore(
       directory: directory, name: "manual", planKeys: planKeys,
       scan: { providers, _ in
@@ -823,6 +871,7 @@ enum ConnectionFlowSelfTest {
     planKeys: PlanKeyStorage,
     scan: @escaping @Sendable (Set<ProviderID>, Date) async throws -> [ProviderID: LocalUsageSummary]
     ,
+    cachedLocalUsageLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: LocalUsageSummary])? = nil,
     dailyHistoryLoad: (@Sendable (Set<ProviderID>, Date) async -> [ProviderID: CachedUsageHistory])? = nil
   ) -> UsageStore {
     let suite = "Reserve.LocalHistoryRefresh.\(name).\(UUID().uuidString)"
@@ -851,6 +900,7 @@ enum ConnectionFlowSelfTest {
           source: "isolated history refresh")
       },
       localUsageScan: scan,
+      cachedLocalUsageLoad: cachedLocalUsageLoad,
       dailyHistoryLoad: dailyHistoryLoad,
       planKeys: planKeys)
     return store

@@ -346,6 +346,10 @@ public actor LocalUsageScanner {
     return calendar
   }
   private let maximumCacheBytes = 12 * 1024 * 1024
+  /// Migration checkpoints also carry the original day buckets and encode
+  /// their record payload as base64. Keep that temporary envelope separately
+  /// bounded; the published index still has its original 12 MB limit.
+  private var maximumCheckpointBytes: Int { self.maximumCacheBytes * 2 }
   private let maximumLineBytes = 1024 * 1024
   private let codexTailBytes = 2 * 1024 * 1024
   private let codexTailStepBytes = 256 * 1024
@@ -514,6 +518,39 @@ public actor LocalUsageScanner {
       }
       result[provider] = CachedUsageHistory(provider: provider, days: rows)
     }
+  }
+
+  /// Published totals only. A pending migration never replaces these with its
+  /// partially parsed records. This read does not visit session roots or write.
+  public func cachedUsage(
+    periodDays: Int = 30,
+    now: Date = Date(),
+    providers: Set<ProviderID> = [.openAI, .anthropic, .grok]
+  ) throws -> [ProviderID: LocalUsageSummary] {
+    let selected = providers.intersection([.openAI, .anthropic, .grok])
+    guard !selected.isEmpty else { return [:] }
+    var index = self.loadIndex()
+    defer { self.releaseResidentPublishedIndexIfLarge() }
+    index.records = index.records.filter { selected.contains($0.value.provider) }
+    guard !index.records.isEmpty else { return [:] }
+    let days = min(90, max(1, periodDays))
+    let cutoff = self.calendar.date(byAdding: .day, value: -days + 1, to: now) ?? now
+    let series = try Self.dailySeries(
+      index: index, days: days, now: now, calendar: self.calendar, deadline: .distantFuture)
+    var summaries: [ProviderID: LocalUsageSummary] = [:]
+    for provider in selected where index.records.values.contains(where: { $0.provider == provider })
+    {
+      let totals = try Self.aggregate(
+        provider: provider, since: Self.dayKey(cutoff, timeZone: self.timeZone),
+        index: index, deadline: .distantFuture)
+      let today = try Self.aggregate(
+        provider: provider, since: Self.dayKey(now, timeZone: self.timeZone),
+        index: index, deadline: .distantFuture)
+      summaries[provider] = totals.summary(
+        provider: provider, periodDays: days, today: today, cycle: totals,
+        cycleStartedAt: cutoff, now: index.updatedAt, dailyTokens: series[provider] ?? [])
+    }
+    return summaries
   }
 
   /// Continuous daily series for every provider, quiet days included so a chart
@@ -1084,27 +1121,35 @@ public actor LocalUsageScanner {
     var fileBytesRemaining = min(self.maximumBytesPerFileScan, remainingBytes)
     var consumedBytes = 0
     var lineCount = 0
-    while fileBytesRemaining > 0, remainingBytes > 0,
-      lineCount < self.maximumLinesPerFile
-    {
+    do {
+      while fileBytesRemaining > 0, remainingBytes > 0,
+        lineCount < self.maximumLinesPerFile
+      {
+        try Self.checkDeadline(deadline, budget: budget)
+        let allowance = min(64 * 1_024, remainingBytes, fileBytesRemaining)
+        guard let chunk = try handle.read(upToCount: allowance), !chunk.isEmpty else { break }
+        if let budget {
+          budget.consume(chunk.count, remaining: &remainingBytes)
+        } else {
+          remainingBytes -= chunk.count
+        }
+        fileBytesRemaining -= chunk.count
+        let result = buffer.append(
+          chunk, maximumLines: self.maximumLinesPerFile - lineCount)
+        consumedBytes += result.consumedBytes
+        for data in result.lines {
+          lineCount += 1
+          autoreleasepool { visit(data) }
+        }
+      }
       try Self.checkDeadline(deadline, budget: budget)
-      let allowance = min(64 * 1_024, remainingBytes, fileBytesRemaining)
-      guard let chunk = try handle.read(upToCount: allowance), !chunk.isEmpty else { break }
-      if let budget {
-        budget.consume(chunk.count, remaining: &remainingBytes)
-      } else {
-        remainingBytes -= chunk.count
-      }
-      fileBytesRemaining -= chunk.count
-      let result = buffer.append(
-        chunk, maximumLines: self.maximumLinesPerFile - lineCount)
-      consumedBytes += result.consumedBytes
-      for data in result.lines {
-        lineCount += 1
-        autoreleasepool { visit(data) }
-      }
+    } catch let error as UsageProviderError {
+      guard case .timedOut = error, consumedBytes > 0 else { throw error }
+      // Commit complete lines before the caller reports its exhausted budget.
+      // Otherwise each timed pass would discard this prefix and start again.
+      budget?.markStarved()
     }
-    try Self.checkDeadline(deadline, budget: budget)
+    try Task.checkCancellation()
     let nextOffset = max(0, offset) + Int64(consumedBytes)
     let bufferState = buffer.append(Data(), maximumLines: 0)
     return (nextOffset, bufferState.discardingOversizedLine)
@@ -1918,7 +1963,7 @@ public actor LocalUsageScanner {
       return memory
     }
     guard let loaded = LocalHistoryCheckpointStore.load(
-      cacheURL: self.cacheURL, maximumBytes: self.maximumCacheBytes)
+      cacheURL: self.cacheURL, maximumBytes: self.maximumCheckpointBytes)
     else { return nil }
     guard loaded.anchor == anchor else {
       LocalHistoryCheckpointStore.discard(cacheURL: self.cacheURL)
@@ -1936,7 +1981,7 @@ public actor LocalUsageScanner {
       return
     }
     guard let recordsJSON = try? self.encodeRecords(ledger.parsedRecords),
-      recordsJSON.count <= self.maximumCacheBytes
+      recordsJSON.count <= self.maximumCheckpointBytes
     else {
       self.scanIncomplete = self.memoryCheckpoint.map { $0.anchor == anchor } ?? false
       return
@@ -1956,7 +2001,7 @@ public actor LocalUsageScanner {
     self.scanIncomplete = true
     if advanced { self.scanMetrics.checkpoints += 1 }
     _ = try? LocalHistoryCheckpointStore.save(
-      checkpoint, cacheURL: self.cacheURL, maximumBytes: self.maximumCacheBytes,
+      checkpoint, cacheURL: self.cacheURL, maximumBytes: self.maximumCheckpointBytes,
       fileManager: self.fileManager)
   }
 
@@ -2286,10 +2331,23 @@ private struct CachedFile: Codable {
 }
 
 struct CachedRow: Codable, Equatable {
+  /// A parsed row uses this to enter `recentRows`. That dictionary already
+  /// persists the same key, so its stored value does not repeat it.
   let key: String?
   let dayKey: String
   let totals: UsageTotals
   var previousDayKey: String? = nil
+
+  private enum CodingKeys: String, CodingKey {
+    case key, dayKey, totals, previousDayKey
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(self.dayKey, forKey: .dayKey)
+    try container.encode(self.totals, forKey: .totals)
+    try container.encodeIfPresent(self.previousDayKey, forKey: .previousDayKey)
+  }
 }
 
 struct UsageTotals: Codable, Equatable {
@@ -2353,12 +2411,14 @@ struct UsageTotals: Codable, Equatable {
 
   func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
-    try container.encode(self.input, forKey: .input)
-    try container.encode(self.cached, forKey: .cached)
-    try container.encode(self.cacheWrite, forKey: .cacheWrite)
-    try container.encode(self.output, forKey: .output)
-    try container.encode(self.costUSD, forKey: .costUSD)
-    try container.encode(self.estimated, forKey: .estimated)
+    // Missing values already decode to these defaults. Avoid repeating them in
+    // every recent row so a large history can keep its existing storage cap.
+    if self.input != 0 { try container.encode(self.input, forKey: .input) }
+    if self.cached != 0 { try container.encode(self.cached, forKey: .cached) }
+    if self.cacheWrite != 0 { try container.encode(self.cacheWrite, forKey: .cacheWrite) }
+    if self.output != 0 { try container.encode(self.output, forKey: .output) }
+    if self.costUSD != 0 { try container.encode(self.costUSD, forKey: .costUSD) }
+    if self.estimated { try container.encode(self.estimated, forKey: .estimated) }
     if self.cacheSavingsKnown == true {
       try container.encode(self.cacheSavingsUSD, forKey: .cacheSavingsUSD)
     } else if self.cacheSavingsKnown == false {
