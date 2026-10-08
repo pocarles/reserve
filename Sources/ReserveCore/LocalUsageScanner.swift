@@ -1546,14 +1546,13 @@ public actor LocalUsageScanner {
       ledger.historyChanged = true
     }
     let cutoff = self.calendar.date(byAdding: .day, value: -days + 1, to: now) ?? now
-    let plans = self.visitPlans(selected: selected, dirtyProviders: dirtyProviders).map { plan in
-      guard self.providerNeedsHistoryRefresh(box.index, provider: plan.provider) else {
-        return plan
+    var plans = self.visitPlans(selected: selected, dirtyProviders: dirtyProviders)
+    for index in plans.indices {
+      guard self.providerNeedsHistoryRefresh(box.index, provider: plans[index].provider) else {
+        continue
       }
-      if case .full = plan.visit { return plan }
-      var refreshed = plan
-      refreshed.visit = .full(.baseline)
-      return refreshed
+      if case .full = plans[index].visit { continue }
+      plans[index].visit = .full(.baseline)
     }
     ledger.tokens = Dictionary(uniqueKeysWithValues: plans.map { ($0.provider.rawValue, $0.token) })
     for plan in plans {
