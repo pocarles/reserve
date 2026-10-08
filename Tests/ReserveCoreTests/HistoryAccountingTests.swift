@@ -4,6 +4,67 @@ import Testing
 
 @Suite("Local history accounting")
 struct HistoryAccountingTests {
+  @Test func storedRowsKeepTheirDeduplicationKeyInTheTable() throws {
+    let key = "message-id:request-id"
+    let row = CachedRow(key: key, dayKey: "2026-10-08",
+      totals: UsageTotals(input: 10, output: 1), previousDayKey: "2026-10-09")
+    let encoded = try JSONEncoder().encode([key: row])
+    let table = try JSONDecoder().decode([String: CachedRow].self, from: encoded)
+    let stored = try #require(table[key])
+    #expect(stored.key == nil)
+    #expect(stored.dayKey == row.dayKey && stored.previousDayKey == row.previousDayKey)
+    #expect(stored.totals == row.totals)
+    let text = String(decoding: encoded, as: UTF8.self)
+    #expect(text.components(separatedBy: key).count == 2)
+    // Previous versions wrote the duplicate inside the value. They still read.
+    let legacy = Data(#"{"key":"message-id:request-id","dayKey":"2026-10-08","totals":{"input":10,"output":1}}"#.utf8)
+    #expect(try JSONDecoder().decode(CachedRow.self, from: legacy).key == key)
+  }
+
+  @Test func compactTotalsKeepDefaultValuesAndSavingsKnowledge() throws {
+    let totals = [
+      UsageTotals(),
+      UsageTotals(input: 10, output: 2, costUSD: 1, estimated: true),
+      UsageTotals(cached: 10, cacheSavingsUSD: 0.2, cacheSavingsKnown: true),
+      UsageTotals(cacheSavingsKnown: true),
+      UsageTotals(cached: 10, cacheSavingsKnown: false),
+      UsageTotals(cached: 10),
+    ]
+    for value in totals {
+      let data = try JSONEncoder().encode(value)
+      #expect(try JSONDecoder().decode(UsageTotals.self, from: data) == value)
+    }
+    let empty = try JSONEncoder().encode(UsageTotals())
+    #expect(String(decoding: empty, as: UTF8.self) == "{}")
+  }
+
+  @Test func aLargerTemporaryCheckpointCanResume() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let now = Fixture.date("2026-10-09T01:30:00Z")
+    try await fixture.seedLegacyClaude(now: now)
+    let object = try #require(JSONSerialization.jsonObject(
+      with: Data(contentsOf: fixture.cache)) as? [String: Any])
+    var records = try JSONSerialization.data(withJSONObject: try #require(object["records"]))
+    // JSON whitespace keeps the decoded fixture small while its base64
+    // envelope exercises the separate migration-file allowance.
+    records.append(Data(repeating: 32, count: 10 * 1024 * 1024 - records.count))
+    let checkpoint = LocalHistoryCheckpoint(
+      version: 1,
+      anchor: LocalHistoryIndexFile.anchor(url: fixture.cache, maximumBytes: 12 * 1024 * 1024),
+      removedKeys: [], needsFinalize: false, retainedKeys: [],
+      dirtyProviders: [ProviderID.anthropic.rawValue], pruneProviders: [], tokens: [:],
+      recordsJSON: records)
+    #expect(try LocalHistoryCheckpointStore.save(
+      checkpoint, cacheURL: fixture.cache, maximumBytes: 24 * 1024 * 1024,
+      fileManager: .default))
+    let scanner = fixture.scanner(zone: "America/New_York")
+    let usage = try await scanner.scan(now: now, providers: [.anthropic])
+    #expect(usage[.anthropic]?.totalTokens == 11)
+    #expect(await scanner.scanMetrics.resumes == 1)
+    #expect(await scanner.testingCheckpointExists() == false)
+  }
+
   @Test func anExhaustedSharedBudgetCheckpointsCompleteClaudeLines() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }

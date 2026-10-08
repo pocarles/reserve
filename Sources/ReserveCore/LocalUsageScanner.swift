@@ -346,6 +346,10 @@ public actor LocalUsageScanner {
     return calendar
   }
   private let maximumCacheBytes = 12 * 1024 * 1024
+  /// Migration checkpoints also carry the original day buckets and encode
+  /// their record payload as base64. Keep that temporary envelope separately
+  /// bounded; the published index still has its original 12 MB limit.
+  private var maximumCheckpointBytes: Int { self.maximumCacheBytes * 2 }
   private let maximumLineBytes = 1024 * 1024
   private let codexTailBytes = 2 * 1024 * 1024
   private let codexTailStepBytes = 256 * 1024
@@ -1959,7 +1963,7 @@ public actor LocalUsageScanner {
       return memory
     }
     guard let loaded = LocalHistoryCheckpointStore.load(
-      cacheURL: self.cacheURL, maximumBytes: self.maximumCacheBytes)
+      cacheURL: self.cacheURL, maximumBytes: self.maximumCheckpointBytes)
     else { return nil }
     guard loaded.anchor == anchor else {
       LocalHistoryCheckpointStore.discard(cacheURL: self.cacheURL)
@@ -1977,7 +1981,7 @@ public actor LocalUsageScanner {
       return
     }
     guard let recordsJSON = try? self.encodeRecords(ledger.parsedRecords),
-      recordsJSON.count <= self.maximumCacheBytes
+      recordsJSON.count <= self.maximumCheckpointBytes
     else {
       self.scanIncomplete = self.memoryCheckpoint.map { $0.anchor == anchor } ?? false
       return
@@ -1997,7 +2001,7 @@ public actor LocalUsageScanner {
     self.scanIncomplete = true
     if advanced { self.scanMetrics.checkpoints += 1 }
     _ = try? LocalHistoryCheckpointStore.save(
-      checkpoint, cacheURL: self.cacheURL, maximumBytes: self.maximumCacheBytes,
+      checkpoint, cacheURL: self.cacheURL, maximumBytes: self.maximumCheckpointBytes,
       fileManager: self.fileManager)
   }
 
@@ -2327,10 +2331,23 @@ private struct CachedFile: Codable {
 }
 
 struct CachedRow: Codable, Equatable {
+  /// A parsed row uses this to enter `recentRows`. That dictionary already
+  /// persists the same key, so its stored value does not repeat it.
   let key: String?
   let dayKey: String
   let totals: UsageTotals
   var previousDayKey: String? = nil
+
+  private enum CodingKeys: String, CodingKey {
+    case key, dayKey, totals, previousDayKey
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(self.dayKey, forKey: .dayKey)
+    try container.encode(self.totals, forKey: .totals)
+    try container.encodeIfPresent(self.previousDayKey, forKey: .previousDayKey)
+  }
 }
 
 struct UsageTotals: Codable, Equatable {
@@ -2394,12 +2411,14 @@ struct UsageTotals: Codable, Equatable {
 
   func encode(to encoder: Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
-    try container.encode(self.input, forKey: .input)
-    try container.encode(self.cached, forKey: .cached)
-    try container.encode(self.cacheWrite, forKey: .cacheWrite)
-    try container.encode(self.output, forKey: .output)
-    try container.encode(self.costUSD, forKey: .costUSD)
-    try container.encode(self.estimated, forKey: .estimated)
+    // Missing values already decode to these defaults. Avoid repeating them in
+    // every recent row so a large history can keep its existing storage cap.
+    if self.input != 0 { try container.encode(self.input, forKey: .input) }
+    if self.cached != 0 { try container.encode(self.cached, forKey: .cached) }
+    if self.cacheWrite != 0 { try container.encode(self.cacheWrite, forKey: .cacheWrite) }
+    if self.output != 0 { try container.encode(self.output, forKey: .output) }
+    if self.costUSD != 0 { try container.encode(self.costUSD, forKey: .costUSD) }
+    if self.estimated { try container.encode(self.estimated, forKey: .estimated) }
     if self.cacheSavingsKnown == true {
       try container.encode(self.cacheSavingsUSD, forKey: .cacheSavingsUSD)
     } else if self.cacheSavingsKnown == false {
