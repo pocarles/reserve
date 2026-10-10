@@ -51,6 +51,9 @@ public struct ProviderDescriptor: Sendable {
   /// account. They are labelled Beta, and a response Reserve cannot read asks
   /// the person to report it (see `BetaProviderReport`).
   public let isBeta: Bool
+  /// The slot reads one Claude Code configuration directory the person
+  /// chooses in Settings. Nothing is read until that directory is set.
+  public let usesConfigDirectory: Bool
   public var supportsAutomaticHelperInstallation: Bool { self.installationStrategy == .automaticHelper }
   /// An installable helper that has no update command of its own (the
   /// Antigravity CLI updates itself when the person runs it) is never started
@@ -80,6 +83,19 @@ public struct ProviderDescriptor: Sendable {
         authenticationStrategy: .protectedSession,
         loginArguments: ["auth", "login", "--claudeai"], loginDisplayName: "Claude Code",
         trustedLoginHosts: ["claude.com", "claude.ai", "platform.claude.com"])
+    case .anthropicSecondary:
+      // The same helper and sign-in as Claude, keyed to a configuration
+      // directory the person chooses. Claude Code keeps a separate sign-in per
+      // directory, so this slot can hold a team account beside a personal one
+      // even when both use the same email address. Its directory's session
+      // transcripts are not scanned yet, so it reports no local history.
+      Self(id: id, displayName: "Claude 2", executable: "claude", helperName: "Claude helper",
+        installer: "https://claude.ai/install.sh", account: "https://claude.ai/settings/usage",
+        status: "https://status.claude.com", capabilities: [.liveAllowance, .extraSpending, .limitMeters],
+        authenticationStrategy: .protectedSession,
+        loginArguments: ["auth", "login", "--claudeai"], loginDisplayName: "Claude Code",
+        trustedLoginHosts: ["claude.com", "claude.ai", "platform.claude.com"],
+        usesConfigDirectory: true)
     case .grok:
       Self(id: id, displayName: "Grok", executable: "grok", helperName: "Grok helper",
         installer: "https://x.ai/cli/install.sh", account: "https://grok.com",
@@ -144,10 +160,11 @@ public struct ProviderDescriptor: Sendable {
     capabilities: Capabilities, authenticationStrategy: AuthenticationStrategy = .cliOAuth,
     installationStrategy: InstallationStrategy = .automaticHelper, updateArguments: [String]? = nil,
     loginArguments: [String], loginDisplayName: String, trustedLoginHosts: Set<String>,
-    isBeta: Bool = false
+    isBeta: Bool = false, usesConfigDirectory: Bool = false
   ) {
     self.id = id
     self.displayName = displayName
+    self.usesConfigDirectory = usesConfigDirectory
     self.helper = ProviderHelperDefinition(
       provider: id, executable: executable, displayName: helperName,
       installerURL: URL(string: installer)!,
@@ -176,6 +193,7 @@ public struct ProviderDescriptor: Sendable {
   ) {
     self.id = id
     self.displayName = displayName
+    self.usesConfigDirectory = false
     self.helper = nil
     self.accountURL = URL(string: account)!
     self.statusURL = status.flatMap { URL(string: $0) }

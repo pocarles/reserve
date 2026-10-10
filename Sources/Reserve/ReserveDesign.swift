@@ -108,7 +108,7 @@ enum ReserveColor {
     switch provider {
     case .openAI:
       return Self.dynamic(light: 0x10_10_0F, dark: 0xED_ED_EA)
-    case .anthropic:
+    case .anthropic, .anthropicSecondary:
       return Self.dynamic(light: 0xC2_5B_36, dark: 0xE8_70_45)
     case .grok:
       return Self.dynamic(light: 0x1F_63_92, dark: 0x6B_AE_EE)
@@ -781,7 +781,7 @@ final class ReserveProviderLogo: ReserveSurface {
     let accent = ReserveColor.providerAccent(provider)
     super.init(fill: accent, fillAlpha: 0.14, radius: size <= 26 ? 8 : ReserveRadius.logo)
     let image = NSImageView(image: ProviderArtwork.image(for: provider))
-    image.contentTintColor = provider != .anthropic ? ReserveColor.text : nil
+    image.contentTintColor = !provider.isAnthropic ? ReserveColor.text : nil
     image.imageScaling = .scaleProportionallyUpOrDown
     // The mark repeats the row's own label, so it stays silent.
     image.setAccessibilityElement(false)

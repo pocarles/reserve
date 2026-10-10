@@ -444,7 +444,8 @@ struct ReserveCoreTests {
   func testProviderHelperCatalogUsesOnlyFixedOfficialHTTPSInstallers() throws {
     // Key-connected plans (Z.ai, Kimi) have no helper and nothing to install.
     let helperProviders = ProviderID.allCases.filter { !ProviderDescriptor.forProvider($0).usesAPIKey }
-    XCTAssertEqual(helperProviders, [.openAI, .anthropic, .grok, .cursor, .copilot, .gemini])
+    XCTAssertEqual(
+      helperProviders, [.openAI, .anthropic, .grok, .cursor, .copilot, .gemini, .anthropicSecondary])
     XCTAssertTrue(ProviderHelperCatalog.definition(for: .zai) == nil)
     XCTAssertTrue(ProviderHelperCatalog.definition(for: .kimi) == nil)
     let definitions = helperProviders.compactMap(ProviderHelperCatalog.definition)
@@ -495,7 +496,7 @@ struct ReserveCoreTests {
 
   @Test
   func testCursorIsFourthProviderAndStartsWithDistinctPools() throws {
-    XCTAssertEqual(ProviderID.allCases.count, 8)
+    XCTAssertEqual(ProviderID.allCases.count, 9)
     XCTAssertEqual(ProviderID.allCases.firstIndex(of: .cursor), 3)
     XCTAssertEqual(ProviderID.cursor.displayName, "Cursor")
     let data = Data(

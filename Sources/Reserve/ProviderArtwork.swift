@@ -53,16 +53,18 @@ enum ProviderArtwork {
   }
 
   private static func bundledImage(for provider: ProviderID) -> NSImage? {
+    // Both Claude slots carry the same Claude mark.
+    let resource = provider.isAnthropic ? ProviderID.anthropic.rawValue : provider.rawValue
     guard
       let url = Bundle.reserveResources?.url(
-        forResource: provider.rawValue,
+        forResource: resource,
         withExtension: "svg",
         subdirectory: "ProviderLogos"),
       let image = NSImage(contentsOf: url), image.isValid
     else { return nil }
     // OpenAI and xAI publish monochrome marks. Template rendering supplies the
     // surrounding label colour without changing their first-party geometry.
-    image.isTemplate = provider != .anthropic
+    image.isTemplate = !provider.isAnthropic
     return image
   }
 
@@ -70,7 +72,7 @@ enum ProviderArtwork {
     let letter: String =
       switch provider {
       case .openAI: "O"
-      case .anthropic: "A"
+      case .anthropic, .anthropicSecondary: "A"
       case .grok: "G"
       case .cursor: "C"
       case .copilot: "C"

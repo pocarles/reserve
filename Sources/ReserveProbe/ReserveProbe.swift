@@ -21,6 +21,7 @@ struct ReserveProbe {
     switch argument?.lowercased() {
     case "openai": selected = [.openAI]
     case "anthropic", "claude": selected = [.anthropic]
+    case "anthropic2", "claude2": selected = [.anthropicSecondary]
     case "grok": selected = [.grok]
     case "cursor": selected = [.cursor]
     case "copilot": selected = [.copilot]
@@ -35,7 +36,7 @@ struct ReserveProbe {
       }
     default:
       FileHandle.standardError.write(
-        Data("Usage: reserve-probe [openai|anthropic|grok|cursor|copilot|zai|kimi|gemini|local|all] [--insights]\n".utf8))
+        Data("Usage: reserve-probe [openai|anthropic|claude2|grok|cursor|copilot|zai|kimi|gemini|local|all] [--insights] [--claude-config-dir=PATH]\n".utf8))
       exit(64)
     }
 
@@ -46,6 +47,18 @@ struct ReserveProbe {
         switch provider {
         case .openAI: OpenAIProvider(includeAccountActivity: includeInsights)
         case .anthropic: AnthropicProvider(allowKeychainRead: allowClaudeKeychainRead)
+        case .anthropicSecondary:
+          // The second slot's directory comes from the flag, else from what
+          // the app saved in Settings.
+          AnthropicProvider(
+            id: .anthropicSecondary,
+            configDirectory: arguments.first(where: { $0.hasPrefix("--claude-config-dir=") })
+              .map { String($0.dropFirst("--claude-config-dir=".count)) }
+              .flatMap(ClaudeConfigDirectory.init(path:))
+              ?? UserDefaults(suiteName: "com.pocarles.reserve")?
+              .string(forKey: "\(ProviderID.anthropicSecondary.rawValue).configDirectory")
+              .flatMap(ClaudeConfigDirectory.init(path:)),
+            allowKeychainRead: allowClaudeKeychainRead)
         case .grok: GrokProvider()
         case .cursor: CursorProvider(allowKeychainRead: allowCursorKeychainRead, includeAccountUsage: includeInsights)
         case .copilot: CopilotProvider()

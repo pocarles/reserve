@@ -26,6 +26,9 @@ struct ProviderViewState: Identifiable {
   var requiresInstallation = false
   var requiresUpdate = false
   var usageAccessDenied = false
+  /// The second Claude slot has no configuration folder chosen yet, so there
+  /// is nothing to sign in to or read. Its own step, not a sign-in.
+  var requiresConfigDirectory = false
   var localHistoryEnabled = false
   /// Presentation preference copied onto each state so the dashboard can mask
   /// personal details without reading preferences itself.
@@ -157,7 +160,8 @@ final class UsageStore {
   private var loginTimeoutTasks: [ProviderID: Task<Void, Never>] = [:]
   private var loginInputs: [ProviderID: Pipe] = [:]
   private var loginOutputs: [ProviderID: Pipe] = [:]
-  private var claudeBrowserPipe: ClaudeLoginBrowserPipe?
+  /// One browser handoff per Claude slot: both can sign in on the same Mac.
+  private var claudeBrowserPipes: [ProviderID: ClaudeLoginBrowserPipe] = [:]
   private var loginStorageFailures: Set<ProviderID> = []
   private var loginTimeoutMessages: [ProviderID: String] = [:]
   private var loginOutputBuffers: [ProviderID: Data] = [:]
@@ -184,7 +188,8 @@ final class UsageStore {
   private var lastLocalUsageScanAt: Date?
   /// Safe wording for the last failed scan. Nil after a successful scan.
   private var localHistoryScanError: String?
-  private var claudeQuotaWatcher: QuotaFileWatcher?
+  /// One status-line cache watcher per Claude slot that gets passive updates.
+  private var claudeQuotaWatchers: [ProviderID: QuotaFileWatcher] = [:]
   /// One throttle per provider, because detail data is now asked for one card at
   /// a time as well as all at once from the Insights pane.
   private var insightsRequestedAt: [ProviderID: Date] = [:]
@@ -437,8 +442,8 @@ final class UsageStore {
     ReserveAppearance.mode = self.appearanceMode
     self.notifications.requestAuthorizationIfNeeded()
     if startAutomatically {
-      if self.claudePassiveUpdatesEnabled {
-        self.claudeQuotaWatcher = try? self.makeClaudeQuotaWatcher()
+      for provider in Self.claudeProviders where self.claudePassiveUpdatesEnabled(for: provider) {
+        self.claudeQuotaWatchers[provider] = try? self.makeClaudeQuotaWatcher(for: provider)
       }
       self.startupTask = Task { [weak self] in
         await self?.loadCacheAndStart()
@@ -489,40 +494,147 @@ final class UsageStore {
     }
   }
 
+  /// Both Claude slots: the default home and the chosen configuration folder.
+  static let claudeProviders: [ProviderID] = [.anthropic, .anthropicSecondary]
+
   var claudePassiveUpdatesEnabled: Bool {
-    self.defaults.bool(forKey: "anthropic.passiveStatusline")
+    self.claudePassiveUpdatesEnabled(for: .anthropic)
+  }
+
+  /// The first slot keeps its original key, so an existing choice survives.
+  func claudePassiveUpdatesEnabled(for provider: ProviderID) -> Bool {
+    guard provider.isAnthropic else { return false }
+    return self.defaults.bool(forKey: "\(provider.rawValue).passiveStatusline")
   }
 
   /// Only called after an explicit choice in Claude's provider details.
   func setClaudePassiveUpdatesEnabled(_ enabled: Bool) throws {
+    try self.setClaudePassiveUpdatesEnabled(enabled, for: .anthropic)
+  }
+
+  func setClaudePassiveUpdatesEnabled(_ enabled: Bool, for provider: ProviderID) throws {
+    guard provider.isAnthropic else { return }
+    let settingsURL = try self.claudeStatuslineSettingsURL(for: provider)
     var watcher: QuotaFileWatcher?
     if enabled {
-      watcher = try self.makeClaudeQuotaWatcher()
+      watcher = try self.makeClaudeQuotaWatcher(for: provider)
       guard let executable = Bundle.main.executableURL else {
         throw UsageProviderError.unavailable("Reserve could not locate its app. Reopen it and try again.")
       }
-      try ClaudeStatuslineBridge.configure(settingsURL: ClaudeStatuslineBridge.settingsURL(),
-        executableURL: executable, cacheURL: ClaudeStatuslineBridge.cacheURL())
+      try ClaudeStatuslineBridge.configure(settingsURL: settingsURL,
+        executableURL: executable, cacheURL: ClaudeStatuslineBridge.cacheURL(provider: provider))
     } else {
-      try ClaudeStatuslineBridge.remove(settingsURL: ClaudeStatuslineBridge.settingsURL())
+      try ClaudeStatuslineBridge.remove(settingsURL: settingsURL)
     }
-    self.cancelConnection(.anthropic)
-    self.claudeQuotaWatcher?.stop()
-    self.claudeQuotaWatcher = watcher
-    self.defaults.set(enabled, forKey: "anthropic.passiveStatusline")
-    self.states[.anthropic]?.requiresKeychainAccess = false
-    self.states[.anthropic]?.requiresConnection = false
+    self.cancelConnection(provider)
+    self.claudeQuotaWatchers[provider]?.stop()
+    self.claudeQuotaWatchers[provider] = watcher
+    self.defaults.set(enabled, forKey: "\(provider.rawValue).passiveStatusline")
+    self.states[provider]?.requiresKeychainAccess = false
+    self.states[provider]?.requiresConnection = false
     self.changed()
-    self.refresh(.anthropic, queueIfBusy: true)
+    self.refresh(provider, queueIfBusy: true)
   }
 
-  private func makeClaudeQuotaWatcher() throws -> QuotaFileWatcher {
-    try QuotaFileWatcher(cacheURL: ClaudeStatuslineBridge.cacheURL()) { [weak self] in
+  /// The status line lives in the slot's own settings file: Claude Code's
+  /// default home for the first slot, the chosen folder for the second.
+  private func claudeStatuslineSettingsURL(for provider: ProviderID) throws -> URL {
+    guard ProviderDescriptor.forProvider(provider).usesConfigDirectory else {
+      return ClaudeStatuslineBridge.settingsURL()
+    }
+    guard let directory = self.claudeConfigDirectory(for: provider) else {
+      throw AnthropicProvider.configDirectoryMissing
+    }
+    return directory.settingsURL
+  }
+
+  private func makeClaudeQuotaWatcher(for provider: ProviderID) throws -> QuotaFileWatcher {
+    try QuotaFileWatcher(cacheURL: ClaudeStatuslineBridge.cacheURL(provider: provider)) { [weak self] in
       Task { @MainActor [weak self] in
-        guard let self, self.claudePassiveUpdatesEnabled, self.isEnabled(.anthropic) else { return }
-        self.refresh(.anthropic, queueIfBusy: true)
+        guard let self, self.claudePassiveUpdatesEnabled(for: provider), self.isEnabled(provider)
+        else { return }
+        self.refresh(provider, queueIfBusy: true)
       }
     }
+  }
+
+  // MARK: Second Claude slot
+
+  /// The Claude Code configuration folder the second slot reads. Nil until the
+  /// person chooses one; the first slot never has one here.
+  func claudeConfigDirectory(for provider: ProviderID) -> ClaudeConfigDirectory? {
+    guard ProviderDescriptor.forProvider(provider).usesConfigDirectory,
+      let path = self.defaults.string(forKey: Self.configDirectoryKey(provider))
+    else { return nil }
+    return ClaudeConfigDirectory(path: path)
+  }
+
+  /// Stores the folder, normalised, and starts over for that slot: the old
+  /// folder's sign-in, consent and status line are not carried across. An
+  /// empty value clears the folder. Throws for a path that is not absolute.
+  @discardableResult
+  func setClaudeConfigDirectory(_ input: String?, for provider: ProviderID) throws
+    -> ClaudeConfigDirectory?
+  {
+    guard ProviderDescriptor.forProvider(provider).usesConfigDirectory else { return nil }
+    let trimmed = (input ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    var directory: ClaudeConfigDirectory?
+    if !trimmed.isEmpty {
+      guard let parsed = ClaudeConfigDirectory(path: trimmed) else {
+        throw UsageProviderError.unavailable(
+          "Enter the full path of a folder, such as ~/.claude-team.")
+      }
+      // Pointed at the default home, Claude Code would keep a second sign-in
+      // beside the first account's, in a differently named Keychain item.
+      // The first Claude card already covers that folder.
+      guard !parsed.isDefaultHome() else {
+        throw UsageProviderError.unavailable(
+          "That is the first Claude account's folder. Choose a different folder for this account, such as ~/.claude-team.")
+      }
+      directory = parsed
+    }
+    let current = self.claudeConfigDirectory(for: provider)
+    guard directory != current else { return directory }
+    // The status line is installed in the old folder's settings file, so it
+    // comes out before the folder changes.
+    if self.claudePassiveUpdatesEnabled(for: provider) {
+      try self.setClaudePassiveUpdatesEnabled(false, for: provider)
+    }
+    self.cancelConnection(provider)
+    // Consent was given for the old folder's Keychain item. The new item asks
+    // again, exactly like a first connection.
+    self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
+    if let directory {
+      self.defaults.set(directory.path, forKey: Self.configDirectoryKey(provider))
+    } else {
+      self.defaults.removeObject(forKey: Self.configDirectoryKey(provider))
+    }
+    self.states[provider] = ProviderViewState(provider: provider)
+    self.staleProviders.remove(provider)
+    self.incidentProviders.remove(provider)
+    self.notifications.clearStale(provider)
+    self.notifications.clearIncident(provider)
+    self.rebuildNotificationSchedules()
+    Task { await self.persistSnapshots() }
+    self.changed()
+    if self.isEnabled(provider) { self.refresh(provider, trigger: .connectionRecovery) }
+    return directory
+  }
+
+  private static func configDirectoryKey(_ provider: ProviderID) -> String {
+    "\(provider.rawValue).configDirectory"
+  }
+
+  /// Marks the slot as waiting for its folder. Returns true when it is.
+  private func noteMissingConfigDirectory(_ provider: ProviderID) -> Bool {
+    guard ProviderDescriptor.forProvider(provider).usesConfigDirectory,
+      self.claudeConfigDirectory(for: provider) == nil
+    else { return false }
+    self.states[provider]?.requiresConfigDirectory = true
+    self.states[provider]?.requiresConnection = false
+    self.states[provider]?.requiresKeychainAccess = false
+    self.states[provider]?.error = AnthropicProvider.configDirectoryMissing.localizedDescription
+    return true
   }
 
   var claudeKeychainReadAllowed: Bool {
@@ -540,7 +652,7 @@ final class UsageStore {
   }
 
   func setKeychainReadAllowed(_ allowed: Bool, for provider: ProviderID) {
-    guard provider == .anthropic || provider == .cursor else { return }
+    guard provider.isAnthropic || provider == .cursor else { return }
     self.defaults.set(allowed, forKey: "\(provider.rawValue).keychainReadAllowed")
     if !allowed {
       self.cancelConnection(provider)
@@ -572,7 +684,7 @@ final class UsageStore {
 
   func allowKeychainAccess(for provider: ProviderID, onFinished: (() -> Void)? = nil) {
     // Every early return completes, so a window waiting on it cannot hang.
-    guard provider == .anthropic || provider == .cursor else { onFinished?(); return }
+    guard provider.isAnthropic || provider == .cursor else { onFinished?(); return }
     self.defaults.set(true, forKey: "\(provider.rawValue).keychainReadAllowed")
     self.states[provider]?.requiresKeychainAccess = true
     self.pendingKeychainInteractions.insert(provider)
@@ -1078,6 +1190,13 @@ final class UsageStore {
       self.allowKeychainAccess(for: provider, onFinished: onFinished)
       return
     }
+    // The second Claude slot signs in inside its folder, so the folder comes
+    // first; without it a sign-in would land in the first slot's account.
+    if self.noteMissingConfigDirectory(provider) {
+      self.changed()
+      onFinished?()
+      return
+    }
     // A key-connected plan is connected by saving its key, never by a CLI.
     // Callers route those to the key field; this only re-reads usage.
     if ProviderDescriptor.forProvider(provider).usesAPIKey {
@@ -1127,6 +1246,11 @@ final class UsageStore {
       // Cursor documents this switch so the host app owns the browser handoff.
       process.environment?["NO_OPEN_BROWSER"] = "1"
     }
+    if let directory = self.claudeConfigDirectory(for: provider) {
+      // Claude Code keys the sign-in to this folder, which keeps the first
+      // slot's account untouched even when both use the same email address.
+      process.environment?[ClaudeConfigDirectory.environmentKey] = directory.path
+    }
     process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
     let input = Pipe()
     let output = Pipe()
@@ -1141,12 +1265,12 @@ final class UsageStore {
     }
 
     do {
-      if provider == .anthropic {
+      if provider.isAnthropic {
         let browserPipe = try ClaudeLoginBrowserPipe { [weak self] data in
           guard let self, self.loginGenerations[provider] == generation else { return }
           self.consumeLoginOutput(data, for: provider, fromBrowser: true)
         }
-        self.claudeBrowserPipe = browserPipe
+        self.claudeBrowserPipes[provider] = browserPipe
         process.environment?["BROWSER"] = browserPipe.browserExecutable
         process.environment?["RESERVE_LOGIN_PIPE"] = browserPipe.path
       }
@@ -1154,7 +1278,7 @@ final class UsageStore {
       // write can otherwise reach a cancelled or already-exited login process.
       // Claude Code reads its stdin as a pasted authorization code and answers
       // an empty line with "Invalid code", so it is left alone.
-      if provider != .anthropic {
+      if !provider.isAnthropic {
         try input.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
       }
       #if RESERVE_DEV_AUTOMATION
@@ -1221,10 +1345,7 @@ final class UsageStore {
       }
       self.scheduleLoginHandoffDeadline(for: provider, generation: generation)
     } catch {
-      if provider == .anthropic {
-        self.claudeBrowserPipe?.close()
-        self.claudeBrowserPipe = nil
-      }
+      self.claudeBrowserPipes.removeValue(forKey: provider)?.close()
       self.loginGenerations[provider] = generation + 1
       self.states[provider]?.error =
         "Could not start \(configuration.displayName) sign-in: \(error.localizedDescription)"
@@ -1299,7 +1420,7 @@ final class UsageStore {
     var problem: String?
     if !FileManager.default.isExecutableFile(atPath: executable) {
       problem = "\(configuration.displayName) could not be opened."
-    } else if provider == .anthropic {
+    } else if provider.isAnthropic {
       do { try ClaudeLoginBrowserPipe { _ in }.close() }
       catch { problem = error.localizedDescription }
     }
@@ -1370,8 +1491,8 @@ final class UsageStore {
   }
 
   func disconnect(_ provider: ProviderID) {
-    if provider == .anthropic, self.claudePassiveUpdatesEnabled {
-      do { try self.setClaudePassiveUpdatesEnabled(false) }
+    if provider.isAnthropic, self.claudePassiveUpdatesEnabled(for: provider) {
+      do { try self.setClaudePassiveUpdatesEnabled(false, for: provider) }
       catch {
         self.states[provider]?.error = "Claude’s shared updates could not be removed. \(error.localizedDescription)"
         self.changed()
@@ -1770,7 +1891,7 @@ final class UsageStore {
       }
     let openAIWindowMinutes: Int? = scenario == .unknown ? nil : 10_080
     let grokFetchedAt = now.addingTimeInterval(scenario == .stale ? -42 * 60 : -126)
-    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19, 24, 27, 3, 15, 21]) {
+    for (provider, day) in zip(ProviderID.allCases, [7, 12, 19, 24, 27, 3, 15, 21, 9]) {
       self.defaults.set(day, forKey: "subscription.renewalDay.\(provider.rawValue)")
     }
     self.states[.openAI] = ProviderViewState(
@@ -1838,6 +1959,30 @@ final class UsageStore {
         dailyTokens: Self.previewSeries(peak: 520_000_000, phase: 1.9, now: now)))
     self.states[.anthropic]?.serviceStatus = ProviderServiceStatus(
       provider: .anthropic, health: .operational, detail: "All systems operational",
+      pageURL: URL(string: "https://status.claude.com")!)
+    // The second Claude slot: a team account beside the personal one, same
+    // email, named by its organization. No local history is scanned for it.
+    self.states[.anthropicSecondary] = ProviderViewState(
+      provider: .anthropicSecondary,
+      snapshot: UsageSnapshot(
+        provider: .anthropicSecondary,
+        planName: "Team",
+        windows: [
+          UsageWindow(
+            id: "five-hour", label: "5 hours", usedPercent: 9,
+            windowMinutes: 300, resetsAt: now.addingTimeInterval(3.4 * 3600)),
+          UsageWindow(
+            id: "weekly", label: "Weekly", usedPercent: 22,
+            windowMinutes: 10080, resetsAt: now.addingTimeInterval(5.1 * 86400)),
+        ],
+        fetchedAt: now.addingTimeInterval(-61),
+        source: "Claude OAuth",
+        details: [
+          UsageDetail("Account", "preview@example.com", isPersonal: true),
+          UsageDetail("Organization", "Preview Co · Admin", isPersonal: true),
+        ]))
+    self.states[.anthropicSecondary]?.serviceStatus = ProviderServiceStatus(
+      provider: .anthropicSecondary, health: .operational, detail: "All systems operational",
       pageURL: URL(string: "https://status.claude.com")!)
     if scenario == .keychainAccess {
       self.states[.anthropic]?.snapshot = nil
@@ -1969,9 +2114,12 @@ final class UsageStore {
       // Gemini runs the Antigravity CLI, which signs in separately, so it is
       // opt-in like Cursor and Copilot even when agy is installed.
       "provider.gemini.enabled": false,
+      // The second Claude slot needs a chosen folder first, so it starts off.
+      "provider.anthropicSecondary.enabled": false,
       // Reading Claude Code's Keychain item is another application's OAuth
       // token, so it is opt-in and stays off until asked for.
       "anthropic.keychainReadAllowed": false,
+      "anthropicSecondary.keychainReadAllowed": false,
       "cursor.keychainReadAllowed": false,
       // Weekly quotas move slowly, and every sweep spawns a provider CLI that
       // costs far more than Reserve itself. Half-hourly is plenty; the interval
@@ -2091,10 +2239,7 @@ final class UsageStore {
   }
 
   private func cleanUpLogin(_ provider: ProviderID) {
-    if provider == .anthropic {
-      self.claudeBrowserPipe?.close()
-      self.claudeBrowserPipe = nil
-    }
+    self.claudeBrowserPipes.removeValue(forKey: provider)?.close()
     self.loginTimeoutTasks[provider]?.cancel()
     self.loginTimeoutTasks[provider] = nil
     self.loginHandoffTasks[provider]?.cancel()
@@ -2144,7 +2289,7 @@ final class UsageStore {
     // Claude prints a manual-code fallback to stdout. Its BROWSER handoff has
     // the loopback callback that can actually finish sign-in inside this app,
     // so stdout is used only once that handoff has missed its deadline.
-    if provider == .anthropic, self.claudeBrowserPipe != nil, !fromBrowser,
+    if provider.isAnthropic, self.claudeBrowserPipes[provider] != nil, !fromBrowser,
       !self.loginHandoffOverdue.contains(provider)
     { return }
     self.openLoginURLIfFound(in: output, for: provider)
@@ -2519,6 +2664,9 @@ final class UsageStore {
       }
     }
 
+    // Nothing to fetch, and no helper to launch, until the folder is chosen.
+    if self.noteMissingConfigDirectory(provider) { return }
+
     guard await self.subscriptionLimiter.acquire() else { return }
     defer { self.subscriptionLimiter.release() }
     guard isCurrent() else { return }
@@ -2527,11 +2675,13 @@ final class UsageStore {
     let fetcher: any UsageProvider =
       switch provider {
       case .openAI: OpenAIProvider(includeAccountActivity: includeInsights)
-      case .anthropic:
+      case .anthropic, .anthropicSecondary:
         AnthropicProvider(
-          allowKeychainRead: self.claudeKeychainReadAllowed,
+          id: provider,
+          configDirectory: self.claudeConfigDirectory(for: provider),
+          allowKeychainRead: self.keychainReadAllowed(for: provider),
           allowKeychainInteraction: allowKeychainInteraction,
-          passiveStatusline: self.claudePassiveUpdatesEnabled)
+          passiveStatusline: self.claudePassiveUpdatesEnabled(for: provider))
       case .grok: GrokProvider()
       case .cursor:
         CursorProvider(
@@ -2562,6 +2712,7 @@ final class UsageStore {
       self.states[provider]?.requiresInstallation = false
       self.states[provider]?.requiresUpdate = false
       self.states[provider]?.usageAccessDenied = false
+      self.states[provider]?.requiresConfigDirectory = false
       if let accountUsage = snapshot.accountUsage {
         self.states[provider]?.localUsage = accountUsage
       } else if self.states[provider]?.localUsage?.origin == .providerAccount {
@@ -2619,6 +2770,8 @@ final class UsageStore {
     } else {
       state.requiresKeychainAccess = false
     }
+    state.requiresConfigDirectory = providerError == AnthropicProvider.configDirectoryMissing
+    if state.requiresConfigDirectory { state.requiresConnection = false }
   }
 
   private func completeKeychainInteraction(for provider: ProviderID) {

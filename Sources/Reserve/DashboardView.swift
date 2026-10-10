@@ -2867,7 +2867,7 @@ private final class ProviderLogo: ReserveSurface {
     self.init(
       image: ProviderArtwork.image(for: provider),
       identifier: "provider-logo-\(provider.rawValue)",
-      tinted: provider != .anthropic,
+      tinted: !provider.isAnthropic,
       size: size,
       markSize: markSize)
   }

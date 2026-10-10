@@ -21,6 +21,10 @@ final class ProviderSetupCoordinator {
     /// A key-connected plan (Z.ai, Kimi) waits for a pasted API key, then
     /// checks usage with it while `savingKey`.
     case needsKey, savingKey
+    /// The second Claude slot has no configuration folder yet. Signing in
+    /// without one would land in the first slot's account, so the folder is
+    /// chosen here first.
+    case needsConfigDirectory
   }
 
   private let store: UsageStore
@@ -141,7 +145,7 @@ final class ProviderSetupCoordinator {
   /// `claude auth login` replaces the Claude Code sign-in on this Mac the
   /// moment it starts, so Claude's window explains that before it runs.
   static func asksBeforeSignIn(_ provider: ProviderID) -> Bool {
-    provider == .anthropic
+    provider.isAnthropic
   }
 
   /// Install comes before update everywhere (here and on the dashboard card):
@@ -150,6 +154,7 @@ final class ProviderSetupCoordinator {
     if ProviderDescriptor.forProvider(state.provider).usesAPIKey, state.requiresConnection {
       return .needsKey
     }
+    if state.requiresConfigDirectory { return .needsConfigDirectory }
     if state.requiresKeychainAccess { return .needsAccess }
     if state.requiresInstallation { return .needsInstall }
     if state.requiresUpdate { return .needsUpdate }
@@ -270,6 +275,16 @@ final class ProviderSetupCoordinator {
           self.panel?.showKeyError(message)
         }
       }
+    case .needsConfigDirectory:
+      ClaudeConfigDirectoryPicker.choose(
+        current: self.store.claudeConfigDirectory(for: provider), from: self.panel
+      ) { [weak self] url in
+        guard let self, self.generation == generation, let url else { return }
+        // The picker only returns absolute paths, so this cannot throw for a
+        // real choice; a refused one is simply checked again.
+        _ = try? self.store.setClaudeConfigDirectory(url.path, for: provider)
+        self.check()
+      }
     case .connected:
       self.close()
     case .signInNotSaved:
@@ -288,7 +303,7 @@ final class ProviderSetupCoordinator {
     let cancelledSetup = !self.wasEnabled && [Phase.checking, .needsInstall, .needsUpdate,
       .needsSignIn, .signingIn, .needsAccess, .grantingAccess, .accessNotGranted,
       .signInCouldNotStart, .waitingForManualSetup, .waitingForTerminalSignIn, .needsKey,
-      .savingKey].contains(self.phase)
+      .savingKey, .needsConfigDirectory].contains(self.phase)
     // A key that was rejected, or pasted here and never confirmed, is not
     // left behind in Keychain when the person gives up on it.
     let discardsKey = provider.map { provider in
@@ -350,7 +365,7 @@ final class ProviderSetupCoordinator {
     if let notice = self.notice { lines.append(notice) }
     switch phase {
     case .checking, .installing, .updating, .signingIn, .grantingAccess, .savingKey,
-      .connected, .needsKey:
+      .connected, .needsKey, .needsConfigDirectory:
       break
     default:
       let error = phase == .failed ? (self.failureMessage ?? self.store.states[provider]?.error)
@@ -512,6 +527,11 @@ final class ProviderConnectionPanel: NSPanel {
       self.message.stringValue = "Installing the provider's software. This can take a few minutes."
       self.privacy.stringValue = "Keep Reserve open until installation finishes."
       busy = true
+    case .needsConfigDirectory:
+      self.heading.stringValue = "Choose this account's Claude Code folder"
+      self.message.stringValue = "Claude Code keeps a separate sign-in for each configuration folder. Choose the folder for this account, for example ~/.claude-team. Reserve signs in there with CLAUDE_CONFIG_DIR set, so your other Claude account is left alone."
+      self.privacy.stringValue = "Both accounts can use the same email address; the folder is what keeps them apart. You can change it later in Settings > Providers."
+      action = "Choose folder…"
     case .needsSignIn:
       self.heading.stringValue = "Sign in to \(name)"
       self.message.stringValue = loginAttempted
@@ -551,7 +571,8 @@ final class ProviderConnectionPanel: NSPanel {
     case .accessNotGranted:
       // A denial is fixed by allowing access, not by signing in again, which
       // for Claude would replace the CLI's own sign-in.
-      let item = self.provider == .cursor ? "cursor-access-token" : "Claude Code-credentials"
+      let item = self.provider == .cursor ? "cursor-access-token"
+        : self.provider == .anthropicSecondary ? "Claude Code-credentials-…" : "Claude Code-credentials"
       self.heading.stringValue = "Usage access not allowed"
       self.message.stringValue = "Reserve does not have permission to use your saved \(name) sign-in. Choose Allow usage access, then approve the macOS prompt."
       self.privacy.stringValue = "If macOS does not ask, open Keychain Access, find “\(item)”, and allow Reserve under Access Control. Reserve never saves your sign-in."

@@ -1031,23 +1031,33 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         "Unofficial usage endpoint · the key can call models, so use a dedicated one",
         size: 11, color: .secondaryLabelColor))
     }
-    if provider == .anthropic || provider == .cursor {
+    if ProviderDescriptor.forProvider(provider).usesConfigDirectory {
+      rows.append(self.formRow("Folder:", self.configDirectoryControls(provider), labelWidth: 92))
+      rows.append(SettingsLabel(
+        "Claude Code keeps one sign-in per configuration folder · the same email on both is fine",
+        size: 11, color: .secondaryLabelColor))
+    }
+    if provider.isAnthropic || provider == .cursor {
       let checkbox = NSButton(
         checkboxWithTitle: "Allow access to my \(provider.displayName) usage",
         target: self, action: #selector(self.keychainChanged(_:)))
       checkbox.identifier = NSUserInterfaceItemIdentifier(
         "settings-keychain-\(provider.rawValue)")
       checkbox.state = self.store.keychainReadAllowed(for: provider) ? .on : .off
-      checkbox.isEnabled = provider != .anthropic || !self.store.claudePassiveUpdatesEnabled
+      checkbox.isEnabled = !provider.isAnthropic || !self.store.claudePassiveUpdatesEnabled(for: provider)
       checkbox.toolTip =
         "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
       rows.append(self.formRow("\(provider.displayName):", checkbox, labelWidth: 92))
     }
-    if provider == .anthropic {
+    if provider.isAnthropic {
       let passive = NSButton(checkboxWithTitle: "Get updates from Claude Code", target: self,
         action: #selector(self.claudePassiveUpdatesChanged(_:)))
-      passive.state = self.store.claudePassiveUpdatesEnabled ? .on : .off
-      passive.identifier = NSUserInterfaceItemIdentifier("settings-claude-passive")
+      passive.state = self.store.claudePassiveUpdatesEnabled(for: provider) ? .on : .off
+      passive.identifier = NSUserInterfaceItemIdentifier(Self.passiveUpdatesIdentifier(provider))
+      // The status line is installed in the slot's own folder, so it waits
+      // for that folder to be chosen.
+      passive.isEnabled = !ProviderDescriptor.forProvider(provider).usesConfigDirectory
+        || self.store.claudeConfigDirectory(for: provider) != nil
       passive.toolTip = "Shares limits after Claude Code responds, without reading your sign-in. Preserves your existing status line. Updates pause when you are not using Claude Code."
       rows.append(self.formRow("Updates:", passive, labelWidth: 92))
       rows.append(SettingsLabel("Updates after Claude Code responds. No sign-in access needed.",
@@ -1331,6 +1341,107 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     row.alignment = .centerY
     row.spacing = 8
     return row
+  }
+
+  /// The first slot keeps the identifier its self-tests and existing users know.
+  private static func passiveUpdatesIdentifier(_ provider: ProviderID) -> String {
+    provider == .anthropic ? "settings-claude-passive" : "settings-claude-passive-\(provider.rawValue)"
+  }
+
+  /// A plain path field with a Finder chooser beside it. The value is a folder
+  /// path, never a secret, so it stays visible and editable.
+  private func configDirectoryControls(_ provider: ProviderID) -> NSView {
+    let field = NSTextField()
+    field.identifier = NSUserInterfaceItemIdentifier("config-dir-\(provider.rawValue)")
+    field.stringValue = self.store.claudeConfigDirectory(for: provider)?.path ?? ""
+    field.placeholderString = "~/.claude-team"
+    field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    field.isBezeled = true
+    field.bezelStyle = .roundedBezel
+    field.lineBreakMode = .byTruncatingTail
+    field.cell?.wraps = false
+    field.cell?.isScrollable = true
+    field.maximumNumberOfLines = 1
+    field.target = self
+    field.delegate = self
+    field.action = #selector(self.configDirectorySubmitted(_:))
+    field.toolTip = "The folder Claude Code uses for this account (its CLAUDE_CONFIG_DIR). Return saves it."
+    field.setAccessibilityLabel("\(provider.displayName) configuration folder")
+    field.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let choose = self.apiRowButton(
+      title: "Choose…",
+      identifier: "config-dir-choose-\(provider.rawValue)",
+      action: #selector(self.chooseConfigDirectoryClicked(_:)), tag: 0,
+      toolTip: "Pick the folder in Finder. A new folder is filled in by Claude Code at sign-in.",
+      accessibility: "Choose the \(provider.displayName) configuration folder")
+    choose.setContentHuggingPriority(.required, for: .horizontal)
+    choose.setContentCompressionResistancePriority(.required, for: .horizontal)
+    let row = NSStackView(views: [field, choose])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 8
+    return row
+  }
+
+  private func configDirectoryProvider(for sender: NSControl) -> ProviderID? {
+    guard let raw = sender.identifier?.rawValue else { return nil }
+    for prefix in ["config-dir-choose-", "config-dir-"] where raw.hasPrefix(prefix) {
+      let provider = ProviderID(rawValue: String(raw.dropFirst(prefix.count)))
+      return provider.flatMap { ProviderDescriptor.forProvider($0).usesConfigDirectory ? $0 : nil }
+    }
+    return nil
+  }
+
+  private func textField(identifier: String) -> NSTextField? {
+    self.window?.contentView.flatMap { view in
+      Self.descendants(of: view).compactMap { $0 as? NSTextField }.first {
+        $0.identifier?.rawValue == identifier
+      }
+    }
+  }
+
+  @objc private func configDirectorySubmitted(_ sender: NSControl) {
+    guard let provider = self.configDirectoryProvider(for: sender),
+      let field = sender as? NSTextField
+    else { return }
+    self.saveConfigDirectory(field.stringValue, for: provider)
+  }
+
+  @objc private func chooseConfigDirectoryClicked(_ sender: NSButton) {
+    guard let provider = self.configDirectoryProvider(for: sender) else { return }
+    ClaudeConfigDirectoryPicker.choose(
+      current: self.store.claudeConfigDirectory(for: provider), from: self.window
+    ) { [weak self] url in
+      guard let self, let url else { return }
+      self.saveConfigDirectory(url.path, for: provider)
+    }
+  }
+
+  private func saveConfigDirectory(_ value: String, for provider: ProviderID) {
+    let field = self.textField(identifier: "config-dir-\(provider.rawValue)")
+    do {
+      let directory = try self.store.setClaudeConfigDirectory(value, for: provider)
+      field?.stringValue = directory?.path ?? ""
+      // The folder decides what the card offers next (a sign-in, the status
+      // line), so the card is rebuilt rather than just relabelled.
+      self.uiRefresh.coalesce { [weak self] in
+        guard let self else { return }
+        self.rememberScrollOffset()
+        self.applyPane(animated: false)
+      }
+    } catch {
+      field?.stringValue = self.store.claudeConfigDirectory(for: provider)?.path ?? ""
+      let alert = NSAlert()
+      alert.messageText = "That folder cannot be used"
+      alert.informativeText = error.localizedDescription
+      alert.addButton(withTitle: "OK")
+      if let window = self.window, window.isVisible {
+        alert.beginSheetModal(for: window, completionHandler: nil)
+      } else {
+        alert.runModal()
+      }
+    }
   }
 
   private func planKeyProvider(for sender: NSControl) -> ProviderID? {
@@ -1913,9 +2024,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func claudePassiveUpdatesChanged(_ sender: NSButton) {
-    do { try self.store.setClaudePassiveUpdatesEnabled(sender.state == .on) }
+    let raw = sender.identifier?.rawValue ?? ""
+    let provider = raw == "settings-claude-passive"
+      ? ProviderID.anthropic
+      : ProviderID(rawValue: raw.replacingOccurrences(of: "settings-claude-passive-", with: ""))
+        ?? .anthropic
+    do { try self.store.setClaudePassiveUpdatesEnabled(sender.state == .on, for: provider) }
     catch {
-      sender.state = self.store.claudePassiveUpdatesEnabled ? .on : .off
+      sender.state = self.store.claudePassiveUpdatesEnabled(for: provider) ? .on : .off
       let alert = NSAlert()
       alert.messageText = "Claude updates could not be changed"
       alert.informativeText = error.localizedDescription
@@ -2041,7 +2157,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(
       of: "settings-keychain-", with: "")
     guard let provider = ProviderID(rawValue: raw),
-      provider == .anthropic || provider == .cursor
+      provider.isAnthropic || provider == .cursor
     else { return }
     if sender.state == .on {
       sender.state = .off
@@ -2174,6 +2290,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.subscriptionCostChanged(field)
     } else if identifier.hasPrefix("renewal.") {
       self.renewalDayChanged(field)
+    } else if identifier.hasPrefix("config-dir-") {
+      self.configDirectorySubmitted(field)
     }
     // AppKit still owns the field editor while delivering this notification.
     // Apply deferred changes on the next turn, after it releases that editor.
@@ -2251,6 +2369,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
     // Setup and permission states are next steps, not capacity risk, so they
     // use the accent rather than the warning colour.
+    if state?.requiresConfigDirectory == true { return ("Folder needed", ReserveColor.accent) }
     if state?.requiresKeychainAccess == true { return ("Permission needed", ReserveColor.accent) }
     if state?.usageAccessDenied == true { return ("Usage access denied", ReserveColor.accent) }
     if state?.isConnecting == true { return ("Connecting", .secondaryLabelColor) }
@@ -2386,9 +2505,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           self.store.monthlySubscriptionCost(for: provider).map { String(format: "%.0f", $0) } ?? "")
         setText("renewal.\(provider.rawValue)", self.store.renewalDay(for: provider).map(String.init) ?? "")
         check("settings-keychain-\(provider.rawValue)", self.store.keychainReadAllowed(for: provider))
-        if provider == .anthropic {
-          check("settings-claude-passive", self.store.claudePassiveUpdatesEnabled)
-          button("settings-keychain-anthropic")?.isEnabled = !self.store.claudePassiveUpdatesEnabled
+        if provider.isAnthropic {
+          let passive = self.store.claudePassiveUpdatesEnabled(for: provider)
+          check(Self.passiveUpdatesIdentifier(provider), passive)
+          button("settings-keychain-\(provider.rawValue)")?.isEnabled = !passive
         }
         if let button = views.compactMap({ $0 as? NSButton }).first(where: {
           $0.identifier?.rawValue == provider.rawValue
@@ -3351,7 +3471,7 @@ private final class SettingsProviderLogo: NSView {
   }
 
   convenience init(provider: ProviderID) {
-    self.init(image: ProviderArtwork.image(for: provider), tinted: provider != .anthropic)
+    self.init(image: ProviderArtwork.image(for: provider), tinted: !provider.isAnthropic)
   }
 
   private init(image source: NSImage, tinted: Bool) {

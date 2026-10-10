@@ -10,8 +10,14 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   case zai
   case kimi
   case gemini
+  /// A second Claude sign-in, read from a chosen Claude Code configuration
+  /// directory so a personal and a team account can be tracked side by side.
+  case anthropicSecondary
 
   public var id: String { self.rawValue }
+
+  /// Both Claude slots share one adapter, one logo and one set of rules.
+  public var isAnthropic: Bool { self == .anthropic || self == .anthropicSecondary }
 
   public var displayName: String {
     ProviderDescriptor.forProvider(self).displayName
