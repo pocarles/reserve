@@ -92,6 +92,21 @@ struct PassiveQuotaAndMetadataTests {
     #expect(await ClaudeStatuslineBridge.forward(input: Data(), command: "/usr/bin/yes", timeout: 0.1) == nil)
   }
 
+  /// Two release runs failed when a loaded CI runner left no free worker in
+  /// the shared dispatch pool: the stdin write waited behind blocked work,
+  /// `cat` never saw EOF, and forwarding timed out. Pipe I/O runs on its own
+  /// threads now, so a starved pool cannot stall it.
+  @Test func forwardingDoesNotDependOnTheSharedDispatchPool() async {
+    let release = DispatchSemaphore(value: 0)
+    let blockers = 256
+    for _ in 0..<blockers {
+      DispatchQueue.global().async { release.wait() }
+    }
+    defer { for _ in 0..<blockers { release.signal() } }
+    let input = Data("pool starved".utf8)
+    #expect(await ClaudeStatuslineBridge.forward(input: input, command: "/bin/cat", timeout: 2) == input)
+  }
+
   @Test func execChildCannotRetainStatuslinePipeEnds() async {
     let holder = StatuslinePipeHolder()
     defer { holder.stop() }
