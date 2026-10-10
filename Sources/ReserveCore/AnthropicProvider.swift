@@ -23,6 +23,9 @@ public struct AnthropicProvider: UsageProvider {
   private let renewer: ClaudeSessionRenewalHook
   private let ineffectiveRenewal: ClaudeIneffectiveRenewalHook
   private let keychainCandidateLoader: ClaudeKeychainCandidateLoader?
+  /// Test seam for the no-prompt Keychain probe, so a test never reaches the
+  /// real Keychain even for an item that does not exist.
+  private let keychainItemExists: (@Sendable () -> Bool)?
   private let credentialFileURLs: [URL]?
   private let accountProfileURLs: [URL]
 
@@ -52,6 +55,7 @@ public struct AnthropicProvider: UsageProvider {
     self.renewer = ClaudeSessionRenewer.hook(for: id)
     self.ineffectiveRenewal = ClaudeSessionRenewer.ineffectiveRenewalHook(for: id)
     self.keychainCandidateLoader = nil
+    self.keychainItemExists = nil
     self.credentialFileURLs = configDirectory.map { [$0.credentialFileURL] }
     self.accountProfileURLs =
       configDirectory.map { [$0.accountProfileURL] }
@@ -72,7 +76,8 @@ public struct AnthropicProvider: UsageProvider {
     credentialFileURLs: [URL]? = nil,
     accountProfileURLs: [URL] = [],
     id: ProviderID = .anthropic,
-    configDirectory: ClaudeConfigDirectory? = nil
+    configDirectory: ClaudeConfigDirectory? = nil,
+    keychainItemExists: (@Sendable () -> Bool)? = nil
   ) {
     self.id = id
     self.configDirectory = configDirectory
@@ -87,6 +92,7 @@ public struct AnthropicProvider: UsageProvider {
     self.renewer = renewer ?? ClaudeSessionRenewer.hook(for: id)
     self.ineffectiveRenewal = ineffectiveRenewal ?? ClaudeSessionRenewer.ineffectiveRenewalHook(for: id)
     self.keychainCandidateLoader = keychainCandidateLoader
+    self.keychainItemExists = keychainItemExists
     self.credentialFileURLs = credentialFileURLs ?? configDirectory.map { [$0.credentialFileURL] }
     self.accountProfileURLs =
       accountProfileURLs.isEmpty ? (configDirectory.map { [$0.accountProfileURL] } ?? []) : accountProfileURLs
@@ -130,7 +136,9 @@ public struct AnthropicProvider: UsageProvider {
       }
     } catch UsageProviderError.unauthorized where !self.allowKeychainRead {
       #if canImport(Security)
-        if ClaudeCredentialLoader.keychainItemExistsWithoutPrompt(service: self.keychainService) {
+        if self.keychainItemExists?()
+          ?? ClaudeCredentialLoader.keychainItemExistsWithoutPrompt(service: self.keychainService)
+        {
           throw UsageProviderError.keychainConsentRequired(self.id)
         }
       #endif
@@ -205,6 +213,7 @@ public struct AnthropicProvider: UsageProvider {
       environment: self.environment, allowKeychainRead: self.allowKeychainRead,
       allowKeychainInteraction: self.allowKeychainInteraction,
       keychainCandidateLoader: self.keychainCandidateLoader,
+      keychainItemExists: self.keychainItemExists,
       credentialFileURLs: self.credentialFileURLs,
       renewer: self.renewer,
       ineffectiveRenewal: self.ineffectiveRenewal,
@@ -237,6 +246,12 @@ public struct AnthropicProvider: UsageProvider {
   /// Claude checks indefinitely.
   public static func clearPersistedRateLimitBlock() async {
     for gate in ClaudeRateLimitGate.all { await gate.clear() }
+  }
+
+  /// One slot's block only: a new folder for the second slot is a new
+  /// account, which the previous account's back-off must not hold back.
+  public static func clearPersistedRateLimitBlock(for provider: ProviderID) async {
+    await ClaudeRateLimitGate.gate(for: provider).clear()
   }
 
   /// Detects the item without reading its secret or presenting a prompt. The

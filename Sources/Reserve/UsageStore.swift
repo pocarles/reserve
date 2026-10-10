@@ -517,6 +517,15 @@ final class UsageStore {
     let settingsURL = try self.claudeStatuslineSettingsURL(for: provider)
     var watcher: QuotaFileWatcher?
     if enabled {
+      // One settings file can carry one Reserve status line. A folder whose
+      // settings.json is shared with the first account (a link, say) would
+      // silently take over that account's updates.
+      if ProviderDescriptor.forProvider(provider).usesConfigDirectory,
+        ClaudeConfigDirectory.sameFile(settingsURL, ClaudeStatuslineBridge.settingsURL())
+      {
+        throw UsageProviderError.unavailable(
+          "This folder shares its settings.json with the first Claude account, so only one of them can get updates from Claude Code.")
+      }
       watcher = try self.makeClaudeQuotaWatcher(for: provider)
       guard let executable = Bundle.main.executableURL else {
         throw UsageProviderError.unavailable("Reserve could not locate its app. Reopen it and try again.")
@@ -596,11 +605,16 @@ final class UsageStore {
     let current = self.claudeConfigDirectory(for: provider)
     guard directory != current else { return directory }
     // The status line is installed in the old folder's settings file, so it
-    // comes out before the folder changes.
+    // comes out before the folder changes, and its cached quotas go with it:
+    // they belong to the old account.
     if self.claudePassiveUpdatesEnabled(for: provider) {
       try self.setClaudePassiveUpdatesEnabled(false, for: provider)
     }
+    try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: provider))
     self.cancelConnection(provider)
+    // Back-off earned by the old account must not hold the new one back.
+    self.subscriptionSchedules[provider] = nil
+    Task { await AnthropicProvider.clearPersistedRateLimitBlock(for: provider) }
     // Consent was given for the old folder's Keychain item. The new item asks
     // again, exactly like a first connection.
     self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
@@ -615,6 +629,9 @@ final class UsageStore {
     self.notifications.clearStale(provider)
     self.notifications.clearIncident(provider)
     self.rebuildNotificationSchedules()
+    // A cleared folder is reported at once, without waiting for a refresh
+    // that the schedule might not admit yet.
+    _ = self.noteMissingConfigDirectory(provider)
     Task { await self.persistSnapshots() }
     self.changed()
     if self.isEnabled(provider) { self.refresh(provider, trigger: .connectionRecovery) }

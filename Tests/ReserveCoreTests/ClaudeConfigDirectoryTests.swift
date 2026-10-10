@@ -41,6 +41,32 @@ import Testing
     #expect(ClaudeConfigDirectory.defaultKeychainService == "Claude Code-credentials")
   }
 
+  @Test func anAliasOfTheDefaultHomeCountsAsTheDefaultHome() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("reserve-claude2-alias-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let home = root.appendingPathComponent("home", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: home.appendingPathComponent(".claude"), withIntermediateDirectories: true)
+    let alias = root.appendingPathComponent("team-link")
+    try FileManager.default.createSymbolicLink(
+      at: alias, withDestinationURL: home.appendingPathComponent(".claude"))
+    let linked = try #require(ClaudeConfigDirectory(path: alias.path))
+    // The chosen string stays what it is: the name and the launches use it.
+    #expect(linked.path == alias.path)
+    #expect(linked.keychainService() != ClaudeConfigDirectory.defaultKeychainService)
+    // But it is still the first account's folder underneath.
+    #expect(linked.isDefaultHome(homeDirectory: home))
+    let other = try #require(ClaudeConfigDirectory(path: root.appendingPathComponent("other").path))
+    #expect(!other.isDefaultHome(homeDirectory: home))
+    #expect(ClaudeConfigDirectory.sameFile(
+      alias.appendingPathComponent("settings.json"),
+      home.appendingPathComponent(".claude/settings.json")))
+    #expect(!ClaudeConfigDirectory.sameFile(
+      alias.appendingPathComponent("settings.json"),
+      root.appendingPathComponent("other/settings.json")))
+  }
+
   @Test func environmentAndFilesStayInsideTheFolder() throws {
     let dir = try #require(ClaudeConfigDirectory(path: "/tmp/claude-team"))
     let environment = dir.environment(from: ["PATH": "/usr/bin", "CLAUDE_CONFIG_DIR": "/elsewhere"])
@@ -95,11 +121,10 @@ import Testing
         requestHandler: handler,
         rateLimitGate: ClaudeRateLimitGate(defaults: nil),
         renewer: { _, _, _ in false },
-        // The folder's own Keychain item does not exist on this Mac; the
-        // probe for it is a metadata lookup that touches nothing.
         keychainCandidateLoader: { _ in nil },
         id: .anthropicSecondary,
-        configDirectory: teamDirectory)
+        configDirectory: teamDirectory,
+        keychainItemExists: { false })
     }
 
     // Nothing inside the team folder yet: the credentials next door, named by
@@ -158,7 +183,8 @@ import Testing
       },
       keychainCandidateLoader: { _ in nil },
       id: .anthropicSecondary,
-      configDirectory: directory)
+      configDirectory: directory,
+      keychainItemExists: { false })
     await #expect(throws: UsageProviderError.self) { try await provider.fetch() }
     #expect(await seen.environments.map { $0["CLAUDE_CONFIG_DIR"] } == [directory.path])
   }

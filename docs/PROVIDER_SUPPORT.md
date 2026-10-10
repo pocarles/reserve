@@ -53,7 +53,10 @@ the Keychain service `Claude Code-credentials`; launched with it, it uses
 `Claude Code-credentials-` followed by the first eight hex characters of the
 SHA-256 of the exact `CLAUDE_CONFIG_DIR` string, even when that string names
 `~/.claude` (checked against Claude Code 2.1.292 with a throwaway item). The
-second slot therefore refuses the default home. The folder also holds that
+second slot therefore refuses the default home, including a symbolic link to
+it (folders are compared by where they resolve; the chosen string is still
+what is hashed and launched with), and refuses to install its status line in a
+`settings.json` that resolves to the first account's. The folder also holds that
 account's `.claude.json` (email, organization), `settings.json` and legacy
 `.credentials.json`. The Claude 2 slot is defined by one such folder, chosen in
 Settings or in the Connect window, and normalised once (tilde expanded, `.`
@@ -71,7 +74,8 @@ organization from the folder's own `.claude.json`. The slot has its own
 rate-limit back-off, its own renewal cooldown, its own status-line cache
 (`claude-statusline-anthropicSecondary.json`) installed in the folder's
 `settings.json`, and its own usage-access consent; changing the folder resets
-the card, its consent and its passive updates. Nothing is read until a folder is
+the card, its consent, its passive updates and their cache file, and the
+back-off earned by the previous account. Nothing is read until a folder is
 chosen. Local history (activity from this Mac) is not scanned for this slot yet.
 
 ### Grok

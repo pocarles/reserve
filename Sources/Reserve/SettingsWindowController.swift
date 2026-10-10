@@ -1423,13 +1423,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     do {
       let directory = try self.store.setClaudeConfigDirectory(value, for: provider)
       field?.stringValue = directory?.path ?? ""
-      // The folder decides what the card offers next (a sign-in, the status
-      // line), so the card is rebuilt rather than just relabelled.
-      self.uiRefresh.coalesce { [weak self] in
-        guard let self else { return }
-        self.rememberScrollOffset()
-        self.applyPane(animated: false)
-      }
+      // The folder is part of the control structure, so the live update
+      // rebuilds the card once AppKit has released the field editor.
+      self.uiRefresh.coalesce { [weak self] in self?.applyLiveUpdate() }
     } catch {
       field?.stringValue = self.store.claudeConfigDirectory(for: provider)?.path ?? ""
       let alert = NSAlert()
@@ -2431,10 +2427,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           let reportedRenewal = state.snapshot?.billingRenewsAt != nil
           let planKey = ProviderDescriptor.forProvider(provider).usesAPIKey
           let savedKey = planKey ? String(describing: self.store.planKeyAvailability(for: provider)) : "-"
+          // The second Claude slot's folder decides which controls are live
+          // (its passive-updates checkbox waits for one).
+          let folder = ProviderDescriptor.forProvider(provider).usesConfigDirectory
+            ? (self.store.claudeConfigDirectory(for: provider) != nil ? "folder" : "no-folder") : "-"
           detail = [
             reportedRenewal ? "reported" : "manual",
             planKey ? "key" : "-",
             savedKey,
+            folder,
             setup?.buttonTitle ?? "-",
           ].joined(separator: ",")
         }

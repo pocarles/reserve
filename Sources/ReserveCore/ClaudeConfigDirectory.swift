@@ -39,6 +39,26 @@ public struct ClaudeConfigDirectory: Sendable, Equatable, Hashable {
 
   public var url: URL { URL(fileURLWithPath: self.path, isDirectory: true) }
 
+  /// Where the path really leads once symbolic links are followed. Used only
+  /// to tell folders apart: the Keychain name and every Claude Code launch
+  /// keep the string the person chose.
+  public var resolvedPath: String { Self.resolvedPath(of: self.url) }
+
+  /// Follows links in the part of the path that exists, then puts the missing
+  /// tail back: a `settings.json` that Claude Code has not written yet still
+  /// resolves through the folder it will be written in.
+  static func resolvedPath(of url: URL) -> String {
+    var missing: [String] = []
+    var existing = url.standardizedFileURL
+    while !FileManager.default.fileExists(atPath: existing.path), existing.path != "/" {
+      missing.insert(existing.lastPathComponent, at: 0)
+      existing = existing.deletingLastPathComponent()
+    }
+    var resolved = existing.resolvingSymlinksInPath()
+    for component in missing { resolved.appendPathComponent(component) }
+    return resolved.path
+  }
+
   /// Claude Code's own default home, which the first slot reads without
   /// setting `CLAUDE_CONFIG_DIR`. The second slot refuses it: pointed there,
   /// Claude Code would keep a second sign-in beside the first one's.
@@ -48,10 +68,20 @@ public struct ClaudeConfigDirectory: Sendable, Equatable, Hashable {
     ClaudeConfigDirectory(path: homeDirectory.appendingPathComponent(".claude").path)
   }
 
+  /// True when this folder is Claude Code's default home, or an alias of it:
+  /// a symbolic link to `~/.claude` would read the first account's files
+  /// while naming a different Keychain item.
   public func isDefaultHome(
     homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
   ) -> Bool {
-    self == Self.defaultHome(homeDirectory: homeDirectory)
+    guard let home = Self.defaultHome(homeDirectory: homeDirectory) else { return false }
+    return self == home || self.resolvedPath == home.resolvedPath
+  }
+
+  /// True when both point at the same file once links are followed, whether
+  /// or not the file exists yet.
+  public static func sameFile(_ lhs: URL, _ rhs: URL) -> Bool {
+    Self.resolvedPath(of: lhs) == Self.resolvedPath(of: rhs)
   }
 
   /// The Keychain service Claude Code stores this directory's sign-in under
