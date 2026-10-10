@@ -131,7 +131,7 @@ public enum ClaudeStatuslineBridge {
     let input = Capture()
     let readGroup = DispatchGroup()
     readGroup.enter()
-    DispatchQueue.global().async {
+    Self.onOwnThread {
       input.read(FileHandle.standardInput, maximumBytes: maximumInputBytes)
       readGroup.leave()
     }
@@ -190,11 +190,11 @@ public enum ClaudeStatuslineBridge {
     let output = Capture()
     let outputGroup = DispatchGroup()
     outputGroup.enter()
-    DispatchQueue.global().async {
+    Self.onOwnThread {
       output.read(stdout.read, maximumBytes: maximumInputBytes)
       outputGroup.leave()
     }
-    DispatchQueue.global().async {
+    Self.onOwnThread {
       try? stdin.write.write(contentsOf: input)
       try? stdin.write.close()
     }
@@ -257,6 +257,17 @@ public enum ClaudeStatuslineBridge {
         lock.lock(); captured = result; lock.unlock()
       } catch { return }
     }
+  }
+
+  /// Pipe reads and writes block until the other side acts. Each gets its
+  /// own thread so it never waits for a free worker in a busy shared pool:
+  /// a stdin write stuck behind blocked work left the forwarded command
+  /// without EOF until its deadline.
+  private static func onOwnThread(_ work: @escaping @Sendable () -> Void) {
+    let thread = Thread { work() }
+    thread.qualityOfService = .utility
+    thread.stackSize = 512 * 1024
+    thread.start()
   }
 
   private static func settingsData(at url: URL) throws -> Data {
