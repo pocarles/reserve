@@ -212,6 +212,15 @@ import Testing
     await second.block(until: Date().addingTimeInterval(20 * 60))
     #expect(await first.activeBlock() == nil)
     #expect(await second.activeBlock() != nil)
+    // A block raised by a pass that started before the gate was cleared (a
+    // folder change, a new sign-in) is dropped; a current one still lands.
+    let generation = await second.currentGeneration
+    await second.clear()
+    #expect(await second.activeBlock() == nil)
+    await second.block(until: Date().addingTimeInterval(20 * 60), generation: generation)
+    #expect(await second.activeBlock() == nil)
+    await second.block(until: Date().addingTimeInterval(20 * 60), generation: await second.currentGeneration)
+    #expect(await second.activeBlock() != nil)
   }
 
   @Test func statuslineBridgeKeepsOneCachePerAccount() throws {

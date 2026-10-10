@@ -43,6 +43,10 @@ final class ProviderSetupCoordinator {
   private var keepsWindowVisible = false
   /// Why another provider's Connect did not start its own flow.
   private var notice: String?
+  /// The account name the window was last drawn with. An added account's
+  /// name can change under an open window (renamed, or masked while personal
+  /// information is hidden), and a stationary screen must follow.
+  private var presentedName: String?
   /// What the installer said when installation or an update failed.
   private var failureMessage: String?
   /// A key pasted in this window that has not yet been confirmed by a check.
@@ -103,6 +107,8 @@ final class ProviderSetupCoordinator {
       // Access was turned off in Settings mid-check. The window offers to
       // allow it again; it never turns into a sign-in.
       self.present(.accessNotGranted)
+    } else if self.presentedName != provider.displayName {
+      self.present(self.phase)
     }
   }
 
@@ -345,6 +351,7 @@ final class ProviderSetupCoordinator {
   private func present(_ phase: Phase) {
     self.phase = phase
     guard let provider = self.activeProvider else { return }
+    self.presentedName = provider.displayName
     self.panel?.update(
       phase: phase, canReopenBrowser: self.store.canReopenLoginBrowser(provider),
       isReadingUsage: self.store.states[provider]?.isRefreshing == true

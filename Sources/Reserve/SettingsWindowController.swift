@@ -942,7 +942,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     // The logo carries the brand; the name stays in the system label colour.
     // An added account shows its own name: the logo already says which kind.
     let nameLabel = SettingsLabel(
-      provider.isAdded ? (self.store.accountLabel(for: provider) ?? provider.displayName) : provider.displayName,
+      provider.isAdded ? (self.store.accountShownLabel(for: provider) ?? provider.displayName) : provider.displayName,
       size: 13, weight: .medium, color: .labelColor)
     nameLabel.setAccessibilityLabel(ReserveBetaBadge.accessibilityName(for: provider))
     let name: NSView
@@ -1418,8 +1418,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   private func accountNameControls(_ provider: ProviderID) -> NSView {
     let field = NSTextField()
     field.identifier = NSUserInterfaceItemIdentifier("account-name-\(provider.rawValue)")
-    field.stringValue = self.store.accountLabel(for: provider) ?? ""
+    field.stringValue = self.store.accountShownLabel(for: provider) ?? ""
     field.placeholderString = "Team, personal, client…"
+    // The name is often an organization: while personal information is
+    // hidden, the field shows the neutral name and waits.
+    field.isEnabled = !self.store.hidesPersonalInfo
     field.isBezeled = true
     field.bezelStyle = .roundedBezel
     field.lineBreakMode = .byTruncatingTail
@@ -1441,10 +1444,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func accountNameSubmitted(_ sender: NSControl) {
-    guard let provider = self.accountNameProvider(for: sender), let field = sender as? NSTextField
+    guard let provider = self.accountNameProvider(for: sender), let field = sender as? NSTextField,
+      !self.store.hidesPersonalInfo
     else { return }
     self.store.setAccountLabel(field.stringValue, for: provider)
-    field.stringValue = self.store.accountLabel(for: provider) ?? ""
+    field.stringValue = self.store.accountShownLabel(for: provider) ?? ""
     self.uiRefresh.coalesce { [weak self] in self?.applyLiveUpdate() }
   }
 

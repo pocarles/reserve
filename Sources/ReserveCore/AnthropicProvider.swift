@@ -116,6 +116,10 @@ public struct AnthropicProvider: UsageProvider {
       }
       return snapshot
     }
+    // A block raised by this pass only counts if the gate was not cleared in
+    // the meantime: a folder change is a new sign-in, and a late answer to
+    // the old one must not hold it back.
+    let gateGeneration = await self.rateLimitGate.currentGeneration
     if let retryAt = await self.rateLimitGate.activeBlock(), retryAt > Date() {
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     }
@@ -124,14 +128,16 @@ public struct AnthropicProvider: UsageProvider {
     do {
       let stored = try await self.loadCredentials()
       do {
-        response = try await self.fetchUsage(accessToken: stored.accessToken)
+        response = try await self.fetchUsage(
+          accessToken: stored.accessToken, gateGeneration: gateGeneration)
         credentials = stored
       } catch UsageProviderError.unauthorized {
         // The stored token can be rejected before its recorded expiry, for
         // example after Claude Code rotated it elsewhere. Let Claude Code renew
         // its own session once, then retry exactly once.
         let renewed = try await self.renewedCredentials(after: stored)
-        response = try await self.fetchUsage(accessToken: renewed.accessToken)
+        response = try await self.fetchUsage(
+          accessToken: renewed.accessToken, gateGeneration: gateGeneration)
         credentials = renewed
       }
     } catch UsageProviderError.unauthorized where !self.allowKeychainRead {
@@ -254,14 +260,14 @@ public struct AnthropicProvider: UsageProvider {
     await ClaudeRateLimitGate.gate(for: provider).clear()
   }
 
-  /// Drops everything kept in memory for an added account's sign-in: its
-  /// rate-limit block and its renewal cooldown. Called when the account's
-  /// folder changes or the account is removed, so the next sign-in starts
-  /// with a clean clock.
+  /// Drops everything kept for an added account's sign-in: its rate-limit
+  /// block and its renewal cooldown. Called when the account's folder changes
+  /// or the account is removed, so the next sign-in starts with a clean clock.
+  /// The gate itself stays: clearing it moves its generation on, which is
+  /// what makes a late answer to the old sign-in harmless.
   public static func forgetAccount(_ provider: ProviderID) async {
     guard provider.isAdded else { return }
     await ClaudeRateLimitGate.gate(for: provider).clear()
-    ClaudeRateLimitGate.forget(provider)
     ClaudeSessionRenewer.forget(provider)
   }
 
@@ -279,7 +285,9 @@ public struct AnthropicProvider: UsageProvider {
     #endif
   }
 
-  private func fetchUsage(accessToken: String) async throws -> ClaudeUsageResponse {
+  private func fetchUsage(
+    accessToken: String, gateGeneration: Int? = nil
+  ) async throws -> ClaudeUsageResponse {
     guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
       throw UsageProviderError.invalidResponse("invalid Anthropic endpoint")
     }
@@ -316,7 +324,7 @@ public struct AnthropicProvider: UsageProvider {
     case 429:
       let retryAt = Self.conservativeRetryDate(
         retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
-      await self.rateLimitGate.block(until: retryAt)
+      await self.rateLimitGate.block(until: retryAt, generation: gateGeneration)
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     default:
       throw UsageProviderError.unavailable(
@@ -362,6 +370,9 @@ actor ClaudeRateLimitGate {
   private let defaults: UserDefaults?
   private let key: String
   private var memoryBlock: Date?
+  /// Moves on at every `clear()`. A block raised for an earlier generation
+  /// belongs to a sign-in that is gone and is dropped.
+  private(set) var currentGeneration = 0
 
   init(
     defaults: UserDefaults? = UserDefaults(suiteName: "com.pocarles.reserve") ?? .standard,
@@ -381,12 +392,6 @@ actor ClaudeRateLimitGate {
     return gate
   }
 
-  static func forget(_ provider: ProviderID) {
-    self.registryLock.lock()
-    defer { self.registryLock.unlock() }
-    self.registry.removeValue(forKey: provider.rawValue)
-  }
-
   func activeBlock(now: Date = Date()) -> Date? {
     let date = self.defaults?.object(forKey: self.key) as? Date ?? self.memoryBlock
     guard let date else { return nil }
@@ -400,7 +405,8 @@ actor ClaudeRateLimitGate {
     return date
   }
 
-  func block(until date: Date) {
+  func block(until date: Date, generation: Int? = nil) {
+    if let generation, generation != self.currentGeneration { return }
     let now = Date()
     let capped = min(
       max(now, date), now.addingTimeInterval(AnthropicProvider.maximumRetryDelay))
@@ -411,6 +417,7 @@ actor ClaudeRateLimitGate {
   func clear() {
     self.memoryBlock = nil
     self.defaults?.removeObject(forKey: self.key)
+    self.currentGeneration += 1
   }
 }
 

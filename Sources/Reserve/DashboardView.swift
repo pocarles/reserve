@@ -1157,6 +1157,9 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
   private var meter: ReserveMeter?
   private var stateIcon: NSImageView?
   private var stateLabel: ReserveLabel?
+  /// An added account's name can change: renamed, organization learned, or
+  /// masked while personal information is hidden.
+  private var nameLabel: ReserveLabel?
   private var selectedMark: NSImageView?
   private var pinMark: NSImageView?
   private var showsMeter = false
@@ -1187,6 +1190,7 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
       summary.provider.displayName,
       font: ReserveFont.sans(ReserveType.providerName, .semibold), color: ReserveColor.text
     ).flexible()
+    self.nameLabel = name
     let selectedMark = NSImageView(
       image: NSImage(
         systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil) ?? NSImage())
@@ -1336,10 +1340,13 @@ final class ProviderOverviewTile: NSView, ReserveClockUpdating {
       systemSymbolName: summary.setupAction == nil
         ? summary.paceState.symbol : "person.crop.circle.badge.plus",
       accessibilityDescription: nil)
+    self.nameLabel?.setDisplayedText(summary.provider.displayName, color: ReserveColor.text)
+    self.toolTip = "Show \(summary.provider.displayName) details"
     self.setAccessibilityLabel(
       "\(summary.provider.displayName) provider"
         + (isPinnedForMenuBar ? ", shown in the menu bar" : ""))
     self.setAccessibilityValue(ProviderDashboardCard.spokenState(summary: summary, now: now))
+    self.setAccessibilityHelp("Shows \(summary.provider.displayName) details below")
     self.spokenClock = { date in
       ProviderDashboardCard.spokenState(summary: summary.at(date), now: date)
     }

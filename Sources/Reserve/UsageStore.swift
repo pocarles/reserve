@@ -522,12 +522,37 @@ final class UsageStore {
     let accounts = (defaults.stringArray(forKey: Self.addedAccountsKey) ?? [])
       .compactMap(ProviderID.init(rawValue:))
       .filter { $0.isAdded && $0.kind.supportsAddedAccounts && seen.insert($0).inserted }
-    for (index, account) in accounts.enumerated() {
-      let ordinal = defaults.object(forKey: "\(account.rawValue).ordinal") as? Int
-        ?? accounts.prefix(index).filter { $0.kind == account.kind }.count + 2
-      ProviderAccountLabels.setNeutralLabel("Account \(ordinal)", for: account)
+    // Ordinals: the saved ones first, then the lowest free number for any
+    // account that has none, saved so it stays the same next time.
+    var taken: [ProviderKind: Set<Int>] = [:]
+    for account in accounts {
+      if let ordinal = defaults.object(forKey: "\(account.rawValue).ordinal") as? Int {
+        taken[account.kind, default: []].insert(ordinal)
+      }
+    }
+    for account in accounts {
+      var ordinal = defaults.object(forKey: "\(account.rawValue).ordinal") as? Int
+      if ordinal == nil {
+        var candidate = 2
+        while taken[account.kind, default: []].contains(candidate) { candidate += 1 }
+        taken[account.kind, default: []].insert(candidate)
+        defaults.set(candidate, forKey: "\(account.rawValue).ordinal")
+        ordinal = candidate
+      }
+      ProviderAccountLabels.setNeutralLabel("Account \(ordinal ?? 2)", for: account)
       ProviderAccountLabels.set(
-        defaults.string(forKey: "\(account.rawValue).label") ?? "Account \(ordinal)", for: account)
+        defaults.string(forKey: "\(account.rawValue).label") ?? "Account \(ordinal ?? 2)", for: account)
+    }
+    // Two accounts on one folder would sign in over each other. The later
+    // one loses its folder and asks for a new one; nothing else of it changes.
+    var folders: Set<String> = []
+    for account in accounts {
+      guard let path = defaults.string(forKey: Self.configDirectoryKey(account)),
+        let directory = ClaudeConfigDirectory(path: path)
+      else { continue }
+      if !folders.insert(directory.resolvedPath).inserted {
+        defaults.removeObject(forKey: Self.configDirectoryKey(account))
+      }
     }
     return accounts
   }
@@ -641,6 +666,15 @@ final class UsageStore {
   func accountLabel(for account: ProviderID) -> String? {
     guard account.isAdded else { return nil }
     return ProviderAccountLabels.label(for: account)
+  }
+
+  /// The label as it may appear on screen right now: the neutral one while
+  /// personal information is hidden.
+  func accountShownLabel(for account: ProviderID) -> String? {
+    guard account.isAdded else { return nil }
+    return self.hidesPersonalInfo
+      ? ProviderAccountLabels.neutralLabel(for: account)
+      : ProviderAccountLabels.label(for: account) ?? ProviderAccountLabels.neutralLabel(for: account)
   }
 
   /// A name the person typed. An empty name goes back to the automatic one.
@@ -777,7 +811,10 @@ final class UsageStore {
       // Pointed at the default home, Claude Code would keep a second sign-in
       // beside the first account's, in a differently named Keychain item.
       // The first Claude card already covers that folder.
-      guard !parsed.isDefaultHome() else {
+      // The default account also reads a folder named by the environment
+      // Reserve was launched with, when there is one.
+      let environmentHome = ClaudeConfigDirectory.resolve(environment: ProcessInfo.processInfo.environment)
+      guard !parsed.isDefaultHome(), parsed.resolvedPath != environmentHome?.resolvedPath else {
         throw UsageProviderError.unavailable(
           "That is the first Claude account's folder. Choose a different folder for this account, such as ~/.claude-team.")
       }
@@ -967,8 +1004,10 @@ final class UsageStore {
     set {
       self.defaults.set(newValue, forKey: "privacy.hidePersonalInfo")
       // Added accounts are named after their organization; that name is
-      // personal too and goes neutral with the rest.
+      // personal too and goes neutral with the rest, including in the
+      // notifications already scheduled under the old name.
       ProviderAccountLabels.masksPersonalLabels = newValue
+      self.rebuildNotificationSchedules()
       self.changed()
     }
   }
