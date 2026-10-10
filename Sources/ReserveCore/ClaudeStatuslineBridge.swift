@@ -5,6 +5,7 @@ import Foundation
 /// cache; paths, session identifiers, prompts, and token details are discarded.
 public enum ClaudeStatuslineBridge {
   public static let maximumInputBytes = 65_536
+  static let outputDrainSeconds: TimeInterval = 1
   private static let marker = "reserveStatusline"
   // Pipe reads and semaphore waits must not occupy Swift's cooperative pool.
   // The receiver is a short-lived command, so one utility worker is sufficient.
@@ -203,7 +204,12 @@ public enum ClaudeStatuslineBridge {
       try? stdout.read.close()
       return nil
     }
-    guard outputGroup.wait(timeout: .now() + 0.2) == .success, let result = output.data else {
+    // The command has exited; its output only needs draining. Descriptors are
+    // close-on-exec, so EOF cannot be held open by an unrelated process, and
+    // a loaded machine can take well over 0.2 s to schedule the reader.
+    guard outputGroup.wait(timeout: .now() + Self.outputDrainSeconds) == .success,
+      let result = output.data
+    else {
       try? stdout.read.close()
       return nil
     }
