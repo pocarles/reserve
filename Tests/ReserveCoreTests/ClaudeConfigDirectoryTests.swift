@@ -265,11 +265,31 @@ import Testing
     // Dictionaries keyed by account keep the shape the history index is stored in.
     let keyed = try JSONEncoder().encode([ProviderID.anthropic: 1])
     #expect(String(decoding: keyed, as: UTF8.self) == #"["anthropic",1]"#)
-    // The display name carries the account's label once it is known.
+    // The display name carries the account's label once it is known; the
+    // neutral name never carries an organization, and hiding personal info
+    // falls back to it everywhere.
+    ProviderAccountLabels.setNeutralLabel("Account 2", for: Self.team)
     ProviderAccountLabels.set("Nimbus", for: Self.team)
-    defer { ProviderAccountLabels.set(nil, for: Self.team) }
+    defer {
+      ProviderAccountLabels.set(nil, for: Self.team)
+      ProviderAccountLabels.setNeutralLabel(nil, for: Self.team)
+      ProviderAccountLabels.masksPersonalLabels = false
+    }
     #expect(Self.team.displayName == "Claude · Nimbus")
+    #expect(Self.team.neutralDisplayName == "Claude · Account 2")
     #expect(ProviderID.anthropic.displayName == "Claude")
+    ProviderAccountLabels.masksPersonalLabels = true
+    #expect(Self.team.displayName == "Claude · Account 2")
+    ProviderAccountLabels.masksPersonalLabels = false
+    // A share card leaves the Mac, so it carries the neutral name only.
+    let card = UsageShareCardBuilder.model(
+      provider: Self.team, planName: "Team", windows: [], tokensUsed: nil, tokenPeriodDays: nil,
+      tokensCheckedAt: nil, estimatedAPIEquivalentUSD: nil, generatedAt: Date(), hidingPersonal: false)
+    #expect(card.providerName == "Claude · Account 2")
+    // No local history is scanned for an added account, so it does not
+    // promise any.
+    #expect(!descriptor.capabilities.contains(.localHistory))
+    #expect(ProviderDescriptor.forProvider(.anthropic).capabilities.contains(.localHistory))
   }
 }
 

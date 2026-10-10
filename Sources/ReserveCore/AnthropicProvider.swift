@@ -254,6 +254,17 @@ public struct AnthropicProvider: UsageProvider {
     await ClaudeRateLimitGate.gate(for: provider).clear()
   }
 
+  /// Drops everything kept in memory for an added account's sign-in: its
+  /// rate-limit block and its renewal cooldown. Called when the account's
+  /// folder changes or the account is removed, so the next sign-in starts
+  /// with a clean clock.
+  public static func forgetAccount(_ provider: ProviderID) async {
+    guard provider.isAdded else { return }
+    await ClaudeRateLimitGate.gate(for: provider).clear()
+    ClaudeRateLimitGate.forget(provider)
+    ClaudeSessionRenewer.forget(provider)
+  }
+
   /// Detects the item without reading its secret or presenting a prompt. An
   /// added account passes its directory so the probe names that directory's
   /// own Keychain item.
@@ -368,6 +379,12 @@ actor ClaudeRateLimitGate {
     let gate = ClaudeRateLimitGate(key: "\(provider.rawValue).rateLimitBlockedUntil")
     self.registry[provider.rawValue] = gate
     return gate
+  }
+
+  static func forget(_ provider: ProviderID) {
+    self.registryLock.lock()
+    defer { self.registryLock.unlock() }
+    self.registry.removeValue(forKey: provider.rawValue)
   }
 
   func activeBlock(now: Date = Date()) -> Date? {
@@ -821,6 +838,13 @@ actor ClaudeSessionRenewer {
     let renewer = ClaudeSessionRenewer()
     self.registry[provider.rawValue] = renewer
     return renewer
+  }
+
+  /// The next `instance(for:)` starts a fresh clock.
+  static func forget(_ provider: ProviderID) {
+    self.registryLock.lock()
+    defer { self.registryLock.unlock() }
+    self.registry.removeValue(forKey: provider.rawValue)
   }
 
   static func hook(for provider: ProviderID) -> ClaudeSessionRenewalHook {

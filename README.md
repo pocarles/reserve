@@ -59,7 +59,8 @@ Open the Claude card in **Settings > Providers** and choose **Add Claude
 account**. Reserve gives the new account a folder of its own under
 `~/.claude-accounts/`, opens the usual browser sign-in with that folder set as
 Claude Code's `CLAUDE_CONFIG_DIR`, and names the card after the organization
-it finds ("Claude · Nimbus"); you can rename it in the card. Claude Code keeps
+it finds ("Claude · Nimbus"); you can rename it in the card, and **Hide
+personal info** shows a neutral "Account 2" instead. Claude Code keeps
 a separate sign-in per configuration folder, so each added account has its
 own Keychain item and the first account is left untouched. Pick the
 organization for the account on Claude's sign-in page.

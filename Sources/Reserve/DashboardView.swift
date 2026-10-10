@@ -116,6 +116,8 @@ final class DashboardViewController: NSViewController {
     for summary in summaries {
       parts.append(summary.provider.rawValue)
       parts.append(summary.planName)
+      // An added account's name can change (renamed, organization learned).
+      parts.append(summary.provider.displayName)
       parts.append(summary.paceState.label)
       parts.append(summary.observationTimeKnown ? "observed" : "observation-unknown")
       parts.append(summary.subscriptionCostLabel ?? "-")

@@ -40,7 +40,7 @@ public struct ProviderDescriptor: Sendable {
   public let statusURL: URL?
   public let statusFeedURL: URL?
   public let statusFormat: StatusFormat
-  public let capabilities: Capabilities
+  public private(set) var capabilities: Capabilities
   public let authenticationStrategy: AuthenticationStrategy
   public let installationStrategy: InstallationStrategy
   public let loginArguments: [String]
@@ -65,9 +65,13 @@ public struct ProviderDescriptor: Sendable {
   }
   public var usesAPIKey: Bool { self.authenticationStrategy == .apiKey }
 
-  /// Every account of a kind shares the kind's descriptor.
+  /// Every account of a kind shares the kind's descriptor. An added account's
+  /// session transcripts are not scanned yet, so it reports no local history
+  /// rather than waiting for activity that never arrives.
   public static func forProvider(_ id: ProviderID) -> Self {
-    self.forKind(id.kind)
+    var descriptor = self.forKind(id.kind)
+    if id.isAdded { descriptor.capabilities.remove(.localHistory) }
+    return descriptor
   }
 
   public static func forKind(_ kind: ProviderKind) -> Self {

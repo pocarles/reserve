@@ -1480,10 +1480,22 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     alert.addButton(withTitle: "Cancel")
     let remove = { [weak self] in
       guard let self else { return }
-      self.store.removeAccount(provider)
-      self.expandedProviders.remove(provider)
-      self.rememberScrollOffset()
-      self.applyPane(animated: false)
+      do {
+        try self.store.removeAccount(provider)
+        self.expandedProviders.remove(provider)
+        self.rememberScrollOffset()
+        self.applyPane(animated: false)
+      } catch {
+        let failure = NSAlert()
+        failure.messageText = "The account could not be removed"
+        failure.informativeText = error.localizedDescription
+        failure.addButton(withTitle: "OK")
+        if let window = self.window, window.isVisible {
+          failure.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+          failure.runModal()
+        }
+      }
     }
     if let window = self.window, window.isVisible {
       alert.beginSheetModal(for: window) { response in
@@ -2516,6 +2528,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.pane.rawValue,
       ReserveAppearance.current.rawValue,
       ReserveAppearance.resolvedAppearance.name.rawValue,
+      // Account names appear in row titles and the menu-bar pin popup, and
+      // an added account's name can change under them.
+      self.store.accounts.map(\.displayName).joined(separator: ","),
     ]
     switch self.pane {
     case .providers:

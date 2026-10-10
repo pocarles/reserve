@@ -76,15 +76,22 @@ account's.
 
 An added account reads only its folder: no fallback to the default home for
 the credential file, the account profile, or the Keychain item, so a personal
-and a team account that share one email address stay apart. The account is
-named after the organization in its folder's `.claude.json` until the person
-renames it; a personal account, whose organization is its own name, keeps
-"Account N". Each account has its own rate-limit back-off, its own renewal
+and a team account that share one email address stay apart. A folder that
+resolves to another Claude account's folder is refused as well, so two cards
+never sign in over each other. The account is named after the organization in
+its folder's `.claude.json` until the person renames it; a personal account,
+whose organization is its own name, keeps a neutral "Account N" (N is never
+reused). The organization name is personal information: **Hide personal
+info** shows the neutral name everywhere, and share cards carry the neutral
+name regardless of that setting. Each account has its own rate-limit back-off, its own renewal
 cooldown, its own status-line cache (`claude-statusline-anthropic-<instance>.json`)
 installed in the folder's `settings.json`, and its own usage-access consent;
 changing the folder resets the card, its consent, its passive updates and their
-cache file, and the back-off earned by the previous sign-in. Removing an
-account forgets its settings and caches; its folder and sign-in stay on disk.
+cache file, its automatic name, and the back-off and renewal cooldown earned
+by the previous sign-in. Removing an account forgets its settings and caches;
+its folder and sign-in stay on disk. Removal is refused when the account's
+status line cannot be taken out of its `settings.json`, so no hook is left
+behind for an account Reserve no longer knows.
 Nothing is read until a folder is set. Local history (activity from this Mac)
 is not scanned for added accounts yet.
 

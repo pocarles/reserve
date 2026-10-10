@@ -435,6 +435,7 @@ final class UsageStore {
       defaults: defaults, active: notificationsActive ?? startAutomatically)
     let addedAccounts = Self.loadAddedAccounts(from: defaults)
     self.addedAccounts = addedAccounts
+    ProviderAccountLabels.masksPersonalLabels = defaults.bool(forKey: "privacy.hidePersonalInfo")
     self.states = Dictionary(
       uniqueKeysWithValues: Self.orderedAccounts(added: addedAccounts).map {
         ($0, ProviderViewState(provider: $0))
@@ -517,13 +518,33 @@ final class UsageStore {
   var claudeProviders: [ProviderID] { self.accounts.filter(\.isAnthropic) }
 
   private static func loadAddedAccounts(from defaults: UserDefaults) -> [ProviderID] {
+    var seen: Set<ProviderID> = []
     let accounts = (defaults.stringArray(forKey: Self.addedAccountsKey) ?? [])
       .compactMap(ProviderID.init(rawValue:))
-      .filter { $0.isAdded && $0.kind.supportsAddedAccounts }
-    for account in accounts {
-      ProviderAccountLabels.set(defaults.string(forKey: "\(account.rawValue).label"), for: account)
+      .filter { $0.isAdded && $0.kind.supportsAddedAccounts && seen.insert($0).inserted }
+    for (index, account) in accounts.enumerated() {
+      let ordinal = defaults.object(forKey: "\(account.rawValue).ordinal") as? Int
+        ?? accounts.prefix(index).filter { $0.kind == account.kind }.count + 2
+      ProviderAccountLabels.setNeutralLabel("Account \(ordinal)", for: account)
+      ProviderAccountLabels.set(
+        defaults.string(forKey: "\(account.rawValue).label") ?? "Account \(ordinal)", for: account)
     }
     return accounts
+  }
+
+  /// The lowest number not carried by another account of the kind, so
+  /// "Account 3" is never handed out twice.
+  private func nextAccountOrdinal(for kind: ProviderKind) -> Int {
+    let taken = Set(self.addedAccounts.filter { $0.kind == kind }.compactMap {
+      self.defaults.object(forKey: "\($0.rawValue).ordinal") as? Int
+    })
+    var ordinal = 2
+    while taken.contains(ordinal) { ordinal += 1 }
+    return ordinal
+  }
+
+  private func neutralLabel(for account: ProviderID) -> String {
+    ProviderAccountLabels.neutralLabel(for: account) ?? "Account"
   }
 
   private func persistAddedAccounts() {
@@ -558,9 +579,11 @@ final class UsageStore {
       at: directory.url, withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o700])
     self.defaults.set(directory.path, forKey: Self.configDirectoryKey(account))
-    let ordinal = self.accounts.filter { $0.kind == kind }.count + 1
+    let ordinal = self.nextAccountOrdinal(for: kind)
+    self.defaults.set(ordinal, forKey: "\(account.rawValue).ordinal")
     self.defaults.set("Account \(ordinal)", forKey: "\(account.rawValue).label")
     self.defaults.set(false, forKey: "\(account.rawValue).labelIsCustom")
+    ProviderAccountLabels.setNeutralLabel("Account \(ordinal)", for: account)
     ProviderAccountLabels.set("Account \(ordinal)", for: account)
     self.defaults.set(true, forKey: "provider.\(account.rawValue).enabled")
     self.defaults.set(false, forKey: "\(account.rawValue).keychainReadAllowed")
@@ -573,11 +596,13 @@ final class UsageStore {
 
   /// Forgets an added account: its checks, consent, status line, cached
   /// usage and settings. Its folder, and the Claude Code sign-in inside it,
-  /// stay on disk; Reserve never signs anyone out.
-  func removeAccount(_ account: ProviderID) {
+  /// stay on disk; Reserve never signs anyone out. Throws, and keeps the
+  /// account, when its status line cannot be taken out of Claude Code's
+  /// settings: a forgotten account must not leave a hook behind.
+  func removeAccount(_ account: ProviderID) throws {
     guard account.isAdded, self.addedAccounts.contains(account) else { return }
     if self.claudePassiveUpdatesEnabled(for: account) {
-      try? self.setClaudePassiveUpdatesEnabled(false, for: account)
+      try self.setClaudePassiveUpdatesEnabled(false, for: account)
     }
     self.disconnect(account)
     self.claudeQuotaWatchers.removeValue(forKey: account)?.stop()
@@ -588,6 +613,7 @@ final class UsageStore {
       "\(account.rawValue).passiveStatusline",
       "\(account.rawValue).label",
       "\(account.rawValue).labelIsCustom",
+      "\(account.rawValue).ordinal",
       "\(account.rawValue).rateLimitBlockedUntil",
       "subscription.monthlyCost.\(account.rawValue)",
       "subscription.renewalDay.\(account.rawValue)",
@@ -600,12 +626,13 @@ final class UsageStore {
     self.persistAddedAccounts()
     self.states.removeValue(forKey: account)
     ProviderAccountLabels.set(nil, for: account)
+    ProviderAccountLabels.setNeutralLabel(nil, for: account)
     if self.menuBarProvider == account { self.menuBarProvider = nil }
     if self.defaults.string(forKey: "dashboard.selectedProvider") == account.rawValue {
       self.expandedProvider = nil
     }
     Task {
-      await AnthropicProvider.clearPersistedRateLimitBlock(for: account)
+      await AnthropicProvider.forgetAccount(account)
       await self.persistSnapshots()
     }
     self.changed()
@@ -638,9 +665,9 @@ final class UsageStore {
     guard account.isAdded, !self.defaults.bool(forKey: "\(account.rawValue).labelIsCustom") else { return }
     guard let organization = snapshot?.details.first(where: { $0.label == "Organization" })?.value else {
       if force {
-        let ordinal = (self.accounts.filter { $0.kind == account.kind }.firstIndex(of: account) ?? 0) + 1
-        self.defaults.set("Account \(ordinal)", forKey: "\(account.rawValue).label")
-        ProviderAccountLabels.set("Account \(ordinal)", for: account)
+        let neutral = self.neutralLabel(for: account)
+        self.defaults.set(neutral, forKey: "\(account.rawValue).label")
+        ProviderAccountLabels.set(neutral, for: account)
       }
       return
     }
@@ -672,13 +699,15 @@ final class UsageStore {
     var watcher: QuotaFileWatcher?
     if enabled {
       // One settings file can carry one Reserve status line. A folder whose
-      // settings.json is shared with the first account (a link, say) would
-      // silently take over that account's updates.
-      if provider.isAdded,
-        ClaudeConfigDirectory.sameFile(settingsURL, ClaudeStatuslineBridge.settingsURL())
-      {
+      // settings.json is shared with another Claude account (a link, say)
+      // would silently take over that account's updates.
+      if let other = self.claudeProviders.first(where: { other in
+        guard other != provider, let otherURL = try? self.claudeStatuslineSettingsURL(for: other)
+        else { return false }
+        return ClaudeConfigDirectory.sameFile(settingsURL, otherURL)
+      }) {
         throw UsageProviderError.unavailable(
-          "This folder shares its settings.json with the first Claude account, so only one of them can get updates from Claude Code.")
+          "This folder shares its settings.json with \(other.displayName), so only one of them can get updates from Claude Code.")
       }
       watcher = try self.makeClaudeQuotaWatcher(for: provider)
       guard let executable = Bundle.main.executableURL else {
@@ -752,6 +781,15 @@ final class UsageStore {
         throw UsageProviderError.unavailable(
           "That is the first Claude account's folder. Choose a different folder for this account, such as ~/.claude-team.")
       }
+      // Two cards on one folder would sign in over each other and fight for
+      // its status line.
+      if let owner = self.claudeProviders.first(where: {
+        $0 != provider && $0.isAdded
+          && self.claudeConfigDirectory(for: $0)?.resolvedPath == parsed.resolvedPath
+      }) {
+        throw UsageProviderError.unavailable(
+          "That folder already belongs to \(owner.displayName). Choose a different folder for this account.")
+      }
       directory = parsed
     }
     let current = self.claudeConfigDirectory(for: provider)
@@ -764,9 +802,10 @@ final class UsageStore {
     }
     try? FileManager.default.removeItem(at: ClaudeStatuslineBridge.cacheURL(provider: provider))
     self.cancelConnection(provider)
-    // Back-off earned by the old account must not hold the new one back.
+    // Back-off and renewal cooldown earned by the old sign-in must not hold
+    // the new one back.
     self.subscriptionSchedules[provider] = nil
-    Task { await AnthropicProvider.clearPersistedRateLimitBlock(for: provider) }
+    Task { await AnthropicProvider.forgetAccount(provider) }
     // Consent was given for the old folder's Keychain item. The new item asks
     // again, exactly like a first connection.
     self.defaults.set(false, forKey: "\(provider.rawValue).keychainReadAllowed")
@@ -781,6 +820,9 @@ final class UsageStore {
     self.notifications.clearStale(provider)
     self.notifications.clearIncident(provider)
     self.rebuildNotificationSchedules()
+    // The old organization's name belongs to the old sign-in. A name the
+    // person typed stays.
+    self.adoptAutomaticLabel(for: provider, from: nil, force: true)
     // A cleared folder is reported at once, without waiting for a refresh
     // that the schedule might not admit yet.
     _ = self.noteMissingConfigDirectory(provider)
@@ -924,6 +966,9 @@ final class UsageStore {
     get { self.defaults.bool(forKey: "privacy.hidePersonalInfo") }
     set {
       self.defaults.set(newValue, forKey: "privacy.hidePersonalInfo")
+      // Added accounts are named after their organization; that name is
+      // personal too and goes neutral with the rest.
+      ProviderAccountLabels.masksPersonalLabels = newValue
       self.changed()
     }
   }

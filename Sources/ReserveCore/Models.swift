@@ -106,20 +106,48 @@ public struct ProviderID: Hashable, Codable, Sendable, Identifiable, RawRepresen
 
   /// The kind's name for its default account; an added account carries its
   /// label as well ("Claude · Nimbus"), so prompts, menus and notifications
-  /// name the right one.
+  /// name the right one. While personal information is hidden, the label is
+  /// the neutral one ("Account 2"): an organization name is personal.
   public var displayName: String {
     guard self.isAdded else { return self.kind.displayName }
-    let label = ProviderAccountLabels.label(for: self) ?? "added account"
-    return "\(self.kind.displayName) · \(label)"
+    let label = ProviderAccountLabels.masksPersonalLabels
+      ? ProviderAccountLabels.neutralLabel(for: self)
+      : ProviderAccountLabels.label(for: self) ?? ProviderAccountLabels.neutralLabel(for: self)
+    return "\(self.kind.displayName) · \(label ?? "added account")"
+  }
+
+  /// The name with nothing personal in it, for anything that leaves the Mac
+  /// such as a share card.
+  public var neutralDisplayName: String {
+    guard self.isAdded else { return self.kind.displayName }
+    return "\(self.kind.displayName) · \(ProviderAccountLabels.neutralLabel(for: self) ?? "added account")"
   }
 }
 
 /// The labels of added accounts, kept here so `ProviderID.displayName` can
 /// name an account anywhere without carrying the store around. The store
-/// loads them at launch and keeps them current.
+/// loads them at launch and keeps them current. Each account has a neutral
+/// label ("Account 2") beside its shown one, for surfaces that must not carry
+/// an organization or a person's name.
 public enum ProviderAccountLabels {
   private static let lock = NSLock()
   nonisolated(unsafe) private static var labels: [String: String] = [:]
+  nonisolated(unsafe) private static var neutralLabels: [String: String] = [:]
+  nonisolated(unsafe) private static var masks = false
+
+  /// Mirrors the "Hide personal info" setting.
+  public static var masksPersonalLabels: Bool {
+    get {
+      self.lock.lock()
+      defer { self.lock.unlock() }
+      return self.masks
+    }
+    set {
+      self.lock.lock()
+      defer { self.lock.unlock() }
+      self.masks = newValue
+    }
+  }
 
   public static func label(for provider: ProviderID) -> String? {
     self.lock.lock()
@@ -127,14 +155,30 @@ public enum ProviderAccountLabels {
     return self.labels[provider.rawValue]
   }
 
-  public static func set(_ label: String?, for provider: ProviderID) {
-    let trimmed = label?.trimmingCharacters(in: .whitespacesAndNewlines)
+  public static func neutralLabel(for provider: ProviderID) -> String? {
     self.lock.lock()
     defer { self.lock.unlock() }
+    return self.neutralLabels[provider.rawValue]
+  }
+
+  public static func set(_ label: String?, for provider: ProviderID) {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    Self.store(label, in: &self.labels, for: provider)
+  }
+
+  public static func setNeutralLabel(_ label: String?, for provider: ProviderID) {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    Self.store(label, in: &self.neutralLabels, for: provider)
+  }
+
+  private static func store(_ label: String?, in table: inout [String: String], for provider: ProviderID) {
+    let trimmed = label?.trimmingCharacters(in: .whitespacesAndNewlines)
     if let trimmed, !trimmed.isEmpty {
-      self.labels[provider.rawValue] = String(trimmed.prefix(64))
+      table[provider.rawValue] = String(trimmed.prefix(64))
     } else {
-      self.labels.removeValue(forKey: provider.rawValue)
+      table.removeValue(forKey: provider.rawValue)
     }
   }
 }
