@@ -965,7 +965,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     // The logo carries the brand; the name stays in the system label colour.
     // An added account shows its own name: the logo already says which kind.
     let nameLabel = SettingsLabel(
-      provider.isAdded ? (self.store.accountShownLabel(for: provider) ?? provider.displayName) : provider.displayName,
+      self.store.accountShownLabel(for: provider) ?? provider.displayName,
       size: 13, weight: .medium, color: .labelColor)
     nameLabel.setAccessibilityLabel(ReserveBetaBadge.accessibilityName(for: provider))
     let name: NSView
@@ -1057,8 +1057,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         "Unofficial usage endpoint · the key can call models, so use a dedicated one",
         size: 11, color: .secondaryLabelColor))
     }
-    if provider.isAdded {
+    if self.store.canNameAccount(provider) {
       rows.append(self.formRow("Name:", self.accountNameControls(provider), labelWidth: 92))
+    }
+    if provider.isAdded {
       rows.append(self.formRow("Folder:", self.configDirectoryControls(provider), labelWidth: 92))
       rows.append(SettingsLabel(
         "Claude Code keeps one sign-in per folder · the same email on several accounts is fine",
@@ -1442,7 +1444,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let field = NSTextField()
     field.identifier = NSUserInterfaceItemIdentifier("account-name-\(provider.rawValue)")
     field.stringValue = self.store.accountShownLabel(for: provider) ?? ""
-    field.placeholderString = "Team, personal, client…"
+    field.placeholderString = provider.isAdded ? "Team, client…" : "Personal…"
     field.isBezeled = true
     field.bezelStyle = .roundedBezel
     field.lineBreakMode = .byTruncatingTail
@@ -1452,23 +1454,58 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     field.target = self
     field.delegate = self
     field.action = #selector(self.accountNameSubmitted(_:))
-    field.toolTip = "Your name for this account, shown everywhere in Reserve. Leave empty to use its organization. Hide personal info masks only the automatic name."
+    field.toolTip = provider.isAdded
+      ? "Your name for this account, shown everywhere in Reserve. Leave empty to use its organization."
+      : "Your name for this account, shown everywhere in Reserve. Leave empty to show just \(provider.kind.displayName)."
     field.setAccessibilityLabel("\(provider.kind.displayName) account name")
     field.widthAnchor.constraint(equalToConstant: 220).isActive = true
-    return field
+    let save = self.apiRowButton(
+      title: "Saved",
+      identifier: "account-name-save-\(provider.rawValue)",
+      action: #selector(self.accountNameSubmitted(_:)), tag: 0,
+      toolTip: "Save this name",
+      accessibility: "Save the \(provider.kind.displayName) account name")
+    // Lights up as soon as the name differs from the saved one.
+    save.isEnabled = false
+    save.setContentHuggingPriority(.required, for: .horizontal)
+    let row = NSStackView(views: [field, save])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 8
+    return row
   }
 
   private func accountNameProvider(for sender: NSControl) -> ProviderID? {
-    guard let raw = sender.identifier?.rawValue, raw.hasPrefix("account-name-") else { return nil }
-    return ProviderID(rawValue: String(raw.dropFirst("account-name-".count))).flatMap { $0.isAdded ? $0 : nil }
+    guard let raw = sender.identifier?.rawValue else { return nil }
+    for prefix in ["account-name-save-", "account-name-"] where raw.hasPrefix(prefix) {
+      return ProviderID(rawValue: String(raw.dropFirst(prefix.count)))
+        .flatMap { self.store.canNameAccount($0) ? $0 : nil }
+    }
+    return nil
   }
 
+  /// Return, the Save button, or leaving the field all save the name.
   @objc private func accountNameSubmitted(_ sender: NSControl) {
-    guard let provider = self.accountNameProvider(for: sender), let field = sender as? NSTextField
+    guard let provider = self.accountNameProvider(for: sender),
+      let field = self.textField(identifier: "account-name-\(provider.rawValue)")
     else { return }
-    self.store.setAccountLabel(field.stringValue, for: provider)
+    let saved = self.store.accountShownLabel(for: provider) ?? ""
+    let typed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    if typed != saved { self.store.setAccountLabel(typed, for: provider) }
     field.stringValue = self.store.accountShownLabel(for: provider) ?? ""
+    if let save = self.button(identifier: "account-name-save-\(provider.rawValue)") {
+      save.title = "Saved"
+      save.isEnabled = false
+    }
     self.uiRefresh.coalesce { [weak self] in self?.applyLiveUpdate() }
+  }
+
+  private func button(identifier: String) -> NSButton? {
+    self.window?.contentView.flatMap { view in
+      Self.descendants(of: view).compactMap { $0 as? NSButton }.first {
+        $0.identifier?.rawValue == identifier
+      }
+    }
   }
 
   @objc private func addAccountClicked(_ sender: NSButton) {
@@ -2433,6 +2470,16 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   func controlTextDidChange(_ notification: Notification) {
+    if let field = notification.object as? NSTextField,
+      let provider = self.accountNameProvider(for: field),
+      let save = self.button(identifier: "account-name-save-\(provider.rawValue)")
+    {
+      let typed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+      let changed = typed != (self.store.accountShownLabel(for: provider) ?? "")
+      save.title = changed ? "Save" : "Saved"
+      save.isEnabled = changed
+      return
+    }
     guard let field = notification.object as? NSTextField,
       let identifier = field.identifier?.rawValue,
       identifier.hasPrefix("renewal.")

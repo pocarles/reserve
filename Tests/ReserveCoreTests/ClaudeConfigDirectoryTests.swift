@@ -290,6 +290,19 @@ import Testing
     ProviderAccountLabels.masksPersonalLabels = true
     #expect(Self.team.displayName == "Claude · Account 2")
     ProviderAccountLabels.masksPersonalLabels = false
+    // A default account shows a name only when the person gave it one, and
+    // a typed name stays visible while personal information is hidden.
+    #expect(ProviderID.anthropic.displayName == "Claude")
+    ProviderAccountLabels.set("Personal", for: .anthropic)
+    #expect(ProviderID.anthropic.displayName == "Claude")
+    ProviderAccountLabels.setCustom(true, for: .anthropic)
+    #expect(ProviderID.anthropic.displayName == "Claude · Personal")
+    ProviderAccountLabels.masksPersonalLabels = true
+    #expect(ProviderID.anthropic.displayName == "Claude · Personal")
+    #expect(ProviderID.anthropic.neutralDisplayName == "Claude")
+    ProviderAccountLabels.masksPersonalLabels = false
+    ProviderAccountLabels.setCustom(false, for: .anthropic)
+    ProviderAccountLabels.set(nil, for: .anthropic)
     // A share card leaves the Mac, so it carries the neutral name only.
     let card = UsageShareCardBuilder.model(
       provider: Self.team, planName: "Team", windows: [], tokensUsed: nil, tokenPeriodDays: nil,
