@@ -109,7 +109,12 @@ public struct ProviderID: Hashable, Codable, Sendable, Identifiable, RawRepresen
   /// name the right one. While personal information is hidden, the label is
   /// the neutral one ("Account 2"): an organization name is personal.
   public var displayName: String {
-    guard self.isAdded else { return self.kind.displayName }
+    guard self.isAdded else {
+      // A default account carries a name only when the person gave it one.
+      guard ProviderAccountLabels.isCustom(self), let label = ProviderAccountLabels.label(for: self)
+      else { return self.kind.displayName }
+      return "\(self.kind.displayName) · \(label)"
+    }
     // A name the person typed is theirs to show; only the automatic one,
     // taken from the organization, is masked.
     let masked = ProviderAccountLabels.masksPersonalLabels && !ProviderAccountLabels.isCustom(self)

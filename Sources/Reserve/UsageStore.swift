@@ -435,6 +435,14 @@ final class UsageStore {
       defaults: defaults, active: notificationsActive ?? startAutomatically)
     let addedAccounts = Self.loadAddedAccounts(from: defaults)
     self.addedAccounts = addedAccounts
+    // A default account of a kind that can hold several accounts can be
+    // named too, so it can be told apart from the added ones.
+    for kind in ProviderKind.allCases where kind.supportsAddedAccounts {
+      let account = ProviderID(kind: kind)
+      let custom = defaults.bool(forKey: "\(account.rawValue).labelIsCustom")
+      ProviderAccountLabels.setCustom(custom, for: account)
+      ProviderAccountLabels.set(custom ? defaults.string(forKey: "\(account.rawValue).label") : nil, for: account)
+    }
     ProviderAccountLabels.masksPersonalLabels = defaults.bool(forKey: "privacy.hidePersonalInfo")
     self.states = Dictionary(
       uniqueKeysWithValues: Self.orderedAccounts(added: addedAccounts).map {
@@ -666,14 +674,19 @@ final class UsageStore {
   }
 
   func accountLabel(for account: ProviderID) -> String? {
-    guard account.isAdded else { return nil }
+    guard account.kind.supportsAddedAccounts else { return nil }
     return ProviderAccountLabels.label(for: account)
   }
+
+  /// Accounts that take a name: every account of a kind that can hold several.
+  func canNameAccount(_ account: ProviderID) -> Bool { account.kind.supportsAddedAccounts }
 
   /// The label as it may appear on screen right now: the neutral one while
   /// personal information is hidden.
   func accountShownLabel(for account: ProviderID) -> String? {
-    guard account.isAdded else { return nil }
+    guard account.isAdded else {
+      return ProviderAccountLabels.isCustom(account) ? ProviderAccountLabels.label(for: account) : nil
+    }
     return self.hidesPersonalInfo && !ProviderAccountLabels.isCustom(account)
       ? ProviderAccountLabels.neutralLabel(for: account)
       : ProviderAccountLabels.label(for: account) ?? ProviderAccountLabels.neutralLabel(for: account)
@@ -681,12 +694,17 @@ final class UsageStore {
 
   /// A name the person typed. An empty name goes back to the automatic one.
   func setAccountLabel(_ label: String, for account: ProviderID) {
-    guard account.isAdded else { return }
+    guard self.canNameAccount(account) else { return }
     let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed.isEmpty {
       self.defaults.set(false, forKey: "\(account.rawValue).labelIsCustom")
       ProviderAccountLabels.setCustom(false, for: account)
-      self.adoptAutomaticLabel(for: account, from: self.states[account]?.snapshot, force: true)
+      if account.isAdded {
+        self.adoptAutomaticLabel(for: account, from: self.states[account]?.snapshot, force: true)
+      } else {
+        self.defaults.removeObject(forKey: "\(account.rawValue).label")
+        ProviderAccountLabels.set(nil, for: account)
+      }
     } else {
       self.defaults.set(String(trimmed.prefix(64)), forKey: "\(account.rawValue).label")
       self.defaults.set(true, forKey: "\(account.rawValue).labelIsCustom")
