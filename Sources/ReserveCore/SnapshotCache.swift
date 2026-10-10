@@ -43,7 +43,7 @@ public actor SnapshotCache {
   }
 
   public func save(_ snapshots: [ProviderID: UsageSnapshot]) throws {
-    let values = ProviderID.allCases.compactMap { snapshots[$0] }
+    let values = snapshots.keys.sorted().compactMap { snapshots[$0] }
     let data = try self.encoder.encode(values)
     guard data.count <= self.maximumBytes else {
       throw UsageProviderError.invalidResponse("snapshot cache exceeded 100 KB")

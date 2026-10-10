@@ -48,26 +48,31 @@ Reserve says so in a window where you can try again or cancel.
 Claude and Cursor require explicit **Allow usage access** before Reserve reads
 their protected sign-in. macOS may also ask you to approve access. That window
 closes on its own once Reserve reads fresh usage, or explains why it could not.
-Cursor, Copilot, Gemini, Z.ai, Kimi and Claude 2 start disabled. On first launch, the other providers
+Cursor, Copilot, Gemini, Z.ai and Kimi start disabled. On first launch, the other providers
 start enabled only when their helper is already installed. Saved choices are preserved.
 
-### A second Claude account
+### Several Claude accounts
 
-**Claude 2** tracks a second Claude subscription beside the first, for example
-a team account next to a personal one, even when both use the same email
-address. Claude Code keeps a separate sign-in for each configuration folder
-(its `CLAUDE_CONFIG_DIR`), so Claude 2 is defined by a folder you choose, such
-as `~/.claude-team`. Choose **Connect** on its card, pick the folder, and sign
-in: Reserve runs `claude auth login` with that folder set, Claude Code stores
-the sign-in under that folder's own Keychain item, and the first account is
-left untouched. Pick the organization for this account on Claude's sign-in
-page. Claude 2 reads only its folder, and `~/.claude` itself is refused since
-the first card already covers it, so the two cards can never show the same
-sign-in by accident. Changing the folder starts
-that card over, including its usage-access permission. To use that account in
-your own terminal, run Claude Code with `CLAUDE_CONFIG_DIR` pointing at the
-same folder, spelled the same way. Activity from this Mac is not yet counted
-for Claude 2.
+Reserve can track more than one Claude subscription, for example a team
+account next to a personal one, even when both use the same email address.
+Open the Claude card in **Settings > Providers** and choose **Add Claude
+account**. Reserve gives the new account a folder of its own under
+`~/.claude-accounts/`, opens the usual browser sign-in with that folder set as
+Claude Code's `CLAUDE_CONFIG_DIR`, and names the card after the organization
+it finds ("Claude · Nimbus"); you can rename it in the card. Claude Code keeps
+a separate sign-in per configuration folder, so each added account has its
+own Keychain item and the first account is left untouched. Pick the
+organization for the account on Claude's sign-in page.
+
+An added account reads only its folder: no fallback to `~/.claude`, which is
+refused as a folder since the first card already covers it. To attach an
+account you already signed in from a terminal, change the card's folder to
+that `CLAUDE_CONFIG_DIR`, spelled the same way; changing the folder starts the
+card over, including its usage-access permission. **Remove account** forgets
+the card and its settings but leaves the folder and its sign-in on disk. To
+use an added account in your own terminal, run Claude Code with
+`CLAUDE_CONFIG_DIR` pointing at its folder. Activity from this Mac is not yet
+counted for added accounts.
 
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
@@ -165,8 +170,8 @@ Claude can also share the limits in its documented status-line output. Enable
 quota-only local file and does not read Claude’s sign-in. Updates arrive after
 Claude Code responds, so they pause while it is idle. The existing status line
 is preserved; turning the option off restores it. No conversation text is saved.
-Claude 2 offers the same option once its folder is chosen; the status line is
-installed in that folder's `settings.json` and feeds its own cache file.
+Each added Claude account offers the same option; its status line is installed
+in that account's folder and feeds a cache file of its own.
 
 Local history is available by default and can be turned off with **Include
 activity from this Mac** in General. Only enabled providers are scanned, and
@@ -364,8 +369,8 @@ retained. Reserve never scans Cursor transcripts or prompt text. It may read
 honoured, in that order). To name the signed-in Claude account in a card's
 expanded details, Reserve also reads the account email, organization and
 subscription dates from Claude Code's `~/.claude.json` (or
-`$CLAUDE_CONFIG_DIR/.claude.json`); nothing else in that file is used. Claude 2
-reads the same files, and the Keychain item, inside its chosen folder only. Account
+`$CLAUDE_CONFIG_DIR/.claude.json`); nothing else in that file is used. An added
+Claude account reads the same files, and the Keychain item, inside its own folder only. Account
 emails and organization names are shown but never written to Reserve's cache.
 Turn on **Hide personal info** in the menu or Settings > General to mask them on
 screen. Share cards exclude those details regardless of that setting, along

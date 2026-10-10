@@ -1,6 +1,8 @@
 import Foundation
 
-public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
+/// The providers Reserve understands: one adapter, logo, descriptor and set
+/// of rules each. A kind is not an account; see `ProviderID`.
+public enum ProviderKind: String, Codable, CaseIterable, Sendable, Identifiable {
   case openAI
   case anthropic
   case grok
@@ -10,19 +12,131 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable, Identifiable {
   case zai
   case kimi
   case gemini
-  /// A second Claude sign-in, read from a chosen Claude Code configuration
-  /// directory so a personal and a team account can be tracked side by side.
-  case anthropicSecondary
 
   public var id: String { self.rawValue }
 
-  /// Both Claude slots share one adapter, one logo and one set of rules.
-  public var isAnthropic: Bool { self == .anthropic || self == .anthropicSecondary }
-
   public var displayName: String {
-    ProviderDescriptor.forProvider(self).displayName
+    ProviderDescriptor.forKind(self).displayName
   }
 
+  /// Kinds whose helper keeps one sign-in per configuration folder, so Reserve
+  /// can track several accounts of them side by side. Claude Code keys its
+  /// sign-in to `CLAUDE_CONFIG_DIR`.
+  public var supportsAddedAccounts: Bool { self == .anthropic }
+}
+
+/// One tracked account: a provider kind, and for an added account an instance
+/// name. The kind's default account (its own home folder) has no instance and
+/// keeps the kind's raw value, so every setting, cache and history key written
+/// before accounts existed still names the same thing. Added accounts are
+/// `kind@instance`, and their keys follow from that.
+public struct ProviderID: Hashable, Codable, Sendable, Identifiable, RawRepresentable, Comparable,
+  CustomStringConvertible
+{
+  public static let instanceSeparator: Character = "@"
+  public static let maximumInstanceCharacters = 32
+
+  public let kind: ProviderKind
+  public let instance: String?
+
+  public init(kind: ProviderKind) {
+    self.kind = kind
+    self.instance = nil
+  }
+
+  /// Nil for an instance that is empty, too long, or not plain ASCII letters,
+  /// digits and dashes: it ends up in defaults keys and file names.
+  public init?(kind: ProviderKind, instance: String) {
+    guard !instance.isEmpty, instance.count <= Self.maximumInstanceCharacters,
+      instance.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") })
+    else { return nil }
+    self.kind = kind
+    self.instance = instance
+  }
+
+  public init?(rawValue: String) {
+    guard let separator = rawValue.firstIndex(of: Self.instanceSeparator) else {
+      guard let kind = ProviderKind(rawValue: rawValue) else { return nil }
+      self.init(kind: kind)
+      return
+    }
+    guard let kind = ProviderKind(rawValue: String(rawValue[..<separator])) else { return nil }
+    self.init(kind: kind, instance: String(rawValue[rawValue.index(after: separator)...]))
+  }
+
+  public var rawValue: String {
+    self.instance.map { "\(self.kind.rawValue)\(Self.instanceSeparator)\($0)" } ?? self.kind.rawValue
+  }
+
+  public var id: String { self.rawValue }
+  public var description: String { self.rawValue }
+
+  /// The kind's own account, read from the helper's default home.
+  public var isDefault: Bool { self.instance == nil }
+  /// An account added beside the default one, read from its own folder.
+  public var isAdded: Bool { self.instance != nil }
+  public var isAnthropic: Bool { self.kind == .anthropic }
+
+  public static let openAI = ProviderID(kind: .openAI)
+  public static let anthropic = ProviderID(kind: .anthropic)
+  public static let grok = ProviderID(kind: .grok)
+  public static let cursor = ProviderID(kind: .cursor)
+  public static let copilot = ProviderID(kind: .copilot)
+  public static let zai = ProviderID(kind: .zai)
+  public static let kimi = ProviderID(kind: .kimi)
+  public static let gemini = ProviderID(kind: .gemini)
+
+  /// Every kind's default account, in the fixed provider order.
+  public static var defaults: [ProviderID] { ProviderKind.allCases.map(ProviderID.init(kind:)) }
+
+  /// Provider order first; within a kind the default account, then added
+  /// accounts by name.
+  public static func < (lhs: ProviderID, rhs: ProviderID) -> Bool {
+    let order = ProviderKind.allCases
+    let left = order.firstIndex(of: lhs.kind) ?? 0
+    let right = order.firstIndex(of: rhs.kind) ?? 0
+    if left != right { return left < right }
+    switch (lhs.instance, rhs.instance) {
+    case (nil, nil): return false
+    case (nil, _): return true
+    case (_, nil): return false
+    case (let l?, let r?): return l < r
+    }
+  }
+
+  /// The kind's name for its default account; an added account carries its
+  /// label as well ("Claude · Nimbus"), so prompts, menus and notifications
+  /// name the right one.
+  public var displayName: String {
+    guard self.isAdded else { return self.kind.displayName }
+    let label = ProviderAccountLabels.label(for: self) ?? "added account"
+    return "\(self.kind.displayName) · \(label)"
+  }
+}
+
+/// The labels of added accounts, kept here so `ProviderID.displayName` can
+/// name an account anywhere without carrying the store around. The store
+/// loads them at launch and keeps them current.
+public enum ProviderAccountLabels {
+  private static let lock = NSLock()
+  nonisolated(unsafe) private static var labels: [String: String] = [:]
+
+  public static func label(for provider: ProviderID) -> String? {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    return self.labels[provider.rawValue]
+  }
+
+  public static func set(_ label: String?, for provider: ProviderID) {
+    let trimmed = label?.trimmingCharacters(in: .whitespacesAndNewlines)
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    if let trimmed, !trimmed.isEmpty {
+      self.labels[provider.rawValue] = String(trimmed.prefix(64))
+    } else {
+      self.labels.removeValue(forKey: provider.rawValue)
+    }
+  }
 }
 
 public struct UsageWindow: Codable, Equatable, Sendable, Identifiable {

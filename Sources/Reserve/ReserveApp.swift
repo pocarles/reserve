@@ -779,7 +779,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         print("=== does the control drive a real refresh? ===")
-        let before = ProviderID.allCases.reduce(into: [ProviderID: Date?]()) {
+        let before = store.accounts.reduce(into: [ProviderID: Date?]()) {
           $0[$1] = store.states[$1]?.snapshot?.fetchedAt
         }
         print("  isRefreshingAll before = \(store.isRefreshingAll)")
@@ -817,7 +817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           try? await Task.sleep(for: .milliseconds(500))
         }
         print("  isRefreshingAll settled = \(store.isRefreshingAll)")
-        for provider in ProviderID.allCases where store.isEnabled(provider) {
+        for provider in store.accounts where store.isEnabled(provider) {
           let now = store.states[provider]?.snapshot?.fetchedAt
           let moved = (before[provider] ?? nil) != now
           let err = store.states[provider]?.error
@@ -829,7 +829,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       if CommandLine.arguments.contains("--diagnose") {
         print("=== disclosure geometry ===")
         LifecycleSelfTest.dumpGeometry("collapsed  ", store: store, controller: statusController)
-        for provider in ProviderID.allCases where store.isEnabled(provider) {
+        for provider in store.accounts where store.isEnabled(provider) {
           statusController.toggleProviderDetailForTesting(provider)
           try? await Task.sleep(for: .milliseconds(250))
           LifecycleSelfTest.dumpGeometry(
@@ -986,7 +986,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       store.appearanceMode = .dark
       store.appearanceTheme = .ocean
       await capture("disclosure-collapsed")
-      for provider in ProviderID.allCases where store.isEnabled(provider) {
+      for provider in store.accounts where store.isEnabled(provider) {
         statusController.toggleProviderDetailForTesting(provider)
         await capture("disclosure-open-\(provider.rawValue)")
         statusController.toggleProviderDetailForTesting(provider)

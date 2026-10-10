@@ -443,9 +443,8 @@ struct ReserveCoreTests {
   @Test
   func testProviderHelperCatalogUsesOnlyFixedOfficialHTTPSInstallers() throws {
     // Key-connected plans (Z.ai, Kimi) have no helper and nothing to install.
-    let helperProviders = ProviderID.allCases.filter { !ProviderDescriptor.forProvider($0).usesAPIKey }
-    XCTAssertEqual(
-      helperProviders, [.openAI, .anthropic, .grok, .cursor, .copilot, .gemini, .anthropicSecondary])
+    let helperProviders = ProviderID.defaults.filter { !ProviderDescriptor.forProvider($0).usesAPIKey }
+    XCTAssertEqual(helperProviders, [.openAI, .anthropic, .grok, .cursor, .copilot, .gemini])
     XCTAssertTrue(ProviderHelperCatalog.definition(for: .zai) == nil)
     XCTAssertTrue(ProviderHelperCatalog.definition(for: .kimi) == nil)
     let definitions = helperProviders.compactMap(ProviderHelperCatalog.definition)
@@ -496,8 +495,8 @@ struct ReserveCoreTests {
 
   @Test
   func testCursorIsFourthProviderAndStartsWithDistinctPools() throws {
-    XCTAssertEqual(ProviderID.allCases.count, 9)
-    XCTAssertEqual(ProviderID.allCases.firstIndex(of: .cursor), 3)
+    XCTAssertEqual(ProviderID.defaults.count, 8)
+    XCTAssertEqual(ProviderID.defaults.firstIndex(of: .cursor), 3)
     XCTAssertEqual(ProviderID.cursor.displayName, "Cursor")
     let data = Data(
       #"{"billingCycleStart":"1787616000000","billingCycleEnd":"1790294400000","planUsage":{"autoSpend":1800,"autoLimit":4000,"apiPercentUsed":72.5}}"#.utf8)

@@ -235,7 +235,7 @@ enum RefreshReliabilitySelfTest {
 
   private static func checkCanceledPlanProbeCanRestart(expect: (Bool, String) -> Void) async {
     let fixture = Fixture("plan-probe-cancel")
-    for provider in ProviderID.allCases {
+    for provider in ProviderID.defaults {
       fixture.defaults.set(false, forKey: "provider.\(provider.rawValue).enabled")
     }
     fixture.defaults.set(true, forKey: "provider.zai.enabled")
@@ -307,7 +307,7 @@ enum RefreshReliabilitySelfTest {
       "repeated manual refresh started another rate-limited request")
 
     let missingFixture = Fixture("missing-key-wake")
-    for provider in ProviderID.allCases {
+    for provider in ProviderID.defaults {
       missingFixture.defaults.set(false, forKey: "provider.\(provider.rawValue).enabled")
     }
     for provider in APIConsumptionProvider.allCases {

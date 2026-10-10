@@ -53,8 +53,8 @@ enum ProviderArtwork {
   }
 
   private static func bundledImage(for provider: ProviderID) -> NSImage? {
-    // Both Claude slots carry the same Claude mark.
-    let resource = provider.isAnthropic ? ProviderID.anthropic.rawValue : provider.rawValue
+    // Every account of a kind carries the kind's mark.
+    let resource = provider.kind.rawValue
     guard
       let url = Bundle.reserveResources?.url(
         forResource: resource,
@@ -70,9 +70,9 @@ enum ProviderArtwork {
 
   private static func fallbackImage(for provider: ProviderID) -> NSImage {
     let letter: String =
-      switch provider {
+      switch provider.kind {
       case .openAI: "O"
-      case .anthropic, .anthropicSecondary: "A"
+      case .anthropic: "A"
       case .grok: "G"
       case .cursor: "C"
       case .copilot: "C"

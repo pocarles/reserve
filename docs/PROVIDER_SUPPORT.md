@@ -45,7 +45,7 @@ browser sign-in is never proposed for a session Claude Code is still using.
 A rejected usage request triggers at most one renewal and one retry.
 [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
 
-#### Claude 2: a second account by configuration folder
+#### Added Claude accounts, by configuration folder
 
 Claude Code scopes its sign-in to the configuration folder named by
 `CLAUDE_CONFIG_DIR`. Launched without the variable it stores the sign-in under
@@ -53,30 +53,40 @@ the Keychain service `Claude Code-credentials`; launched with it, it uses
 `Claude Code-credentials-` followed by the first eight hex characters of the
 SHA-256 of the exact `CLAUDE_CONFIG_DIR` string, even when that string names
 `~/.claude` (checked against Claude Code 2.1.292 with a throwaway item). The
-second slot therefore refuses the default home, including a symbolic link to
-it (folders are compared by where they resolve; the chosen string is still
-what is hashed and launched with), and refuses to install its status line in a
-`settings.json` that resolves to the first account's. The folder also holds that
-account's `.claude.json` (email, organization), `settings.json` and legacy
-`.credentials.json`. The Claude 2 slot is defined by one such folder, chosen in
-Settings or in the Connect window, and normalised once (tilde expanded, `.`
-and `..` collapsed, trailing slash dropped) so the same folder always hashes to
-the same item. Reserve passes that exact string as `CLAUDE_CONFIG_DIR` to every
-Claude Code launch for the slot (browser sign-in and the non-interactive
-renewal) and derives the Keychain service from it, so the item Claude Code
-writes is the item Reserve reads. A folder used from a terminal must be
-spelled the same way.
+folder also holds that account's `.claude.json` (email, organization),
+`settings.json` and legacy `.credentials.json`.
 
-The slot reads only its folder: no fallback to the default home for the
-credential file, the account profile, or the Keychain item, so a personal and a
-team account that share one email address stay apart, and the card names the
-organization from the folder's own `.claude.json`. The slot has its own
-rate-limit back-off, its own renewal cooldown, its own status-line cache
-(`claude-statusline-anthropicSecondary.json`) installed in the folder's
-`settings.json`, and its own usage-access consent; changing the folder resets
-the card, its consent, its passive updates and their cache file, and the
-back-off earned by the previous account. Nothing is read until a folder is
-chosen. Local history (activity from this Mac) is not scanned for this slot yet.
+Accounts are `ProviderID` values: a kind plus, for an added account, an
+instance (`anthropic@1f3c9a2b`). The kind's default account keeps the bare
+raw value, so every setting, cache and history key written before accounts
+existed still names the same thing; added accounts derive their keys from
+their raw value. **Add Claude account** creates a folder under
+`~/.claude-accounts/<instance>` (mode 0700), stores it as the account's folder,
+and starts the connection; the folder can be changed to any absolute path,
+normalised once (tilde expanded, `.` and `..` collapsed, trailing slash
+dropped) so the same folder always hashes to the same item. Reserve passes
+that exact string as `CLAUDE_CONFIG_DIR` to every Claude Code launch for the
+account (browser sign-in and the non-interactive renewal) and derives the
+Keychain service from it, so the item Claude Code writes is the item Reserve
+reads. A folder used from a terminal must be spelled the same way. The default
+home is refused, including a symbolic link to it (folders are compared by where
+they resolve; the chosen string is still what is hashed and launched with),
+and so is a status line in a `settings.json` that resolves to the first
+account's.
+
+An added account reads only its folder: no fallback to the default home for
+the credential file, the account profile, or the Keychain item, so a personal
+and a team account that share one email address stay apart. The account is
+named after the organization in its folder's `.claude.json` until the person
+renames it; a personal account, whose organization is its own name, keeps
+"Account N". Each account has its own rate-limit back-off, its own renewal
+cooldown, its own status-line cache (`claude-statusline-anthropic-<instance>.json`)
+installed in the folder's `settings.json`, and its own usage-access consent;
+changing the folder resets the card, its consent, its passive updates and their
+cache file, and the back-off earned by the previous sign-in. Removing an
+account forgets its settings and caches; its folder and sign-in stay on disk.
+Nothing is read until a folder is set. Local history (activity from this Mac)
+is not scanned for added accounts yet.
 
 ### Grok
 

@@ -60,7 +60,7 @@ public struct ClaudeConfigDirectory: Sendable, Equatable, Hashable {
   }
 
   /// Claude Code's own default home, which the first slot reads without
-  /// setting `CLAUDE_CONFIG_DIR`. The second slot refuses it: pointed there,
+  /// setting `CLAUDE_CONFIG_DIR`. An added account refuses it: pointed there,
   /// Claude Code would keep a second sign-in beside the first one's.
   public static func defaultHome(
     homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser

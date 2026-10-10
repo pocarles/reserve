@@ -3,10 +3,12 @@ import Testing
 
 @testable import ReserveCore
 
-/// The second Claude slot: one chosen Claude Code configuration folder, its
+/// An added Claude account: one Claude Code configuration folder, its
 /// own Keychain item, and nothing read from the default home.
 @Suite struct ClaudeConfigDirectoryTests {
   private let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
+  /// An added Claude account, beside the default one.
+  static let team = ProviderID(kind: .anthropic, instance: "team")!
 
   @Test func pathsAreNormalisedWithoutChangingTheFolder() {
     #expect(ClaudeConfigDirectory(path: "/tmp/claude-team/")?.path == "/tmp/claude-team")
@@ -89,7 +91,7 @@ import Testing
       .appendingPathComponent("reserve-claude2-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
     // "other" stands in for the default home, where the first slot's
-    // credentials live. The second slot must never pick them up.
+    // credentials live. The added account must never pick them up.
     let other = root.appendingPathComponent("other", isDirectory: true)
     let team = root.appendingPathComponent("team", isDirectory: true)
     try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
@@ -122,7 +124,7 @@ import Testing
         rateLimitGate: ClaudeRateLimitGate(defaults: nil),
         renewer: { _, _, _ in false },
         keychainCandidateLoader: { _ in nil },
-        id: .anthropicSecondary,
+        id: Self.team,
         configDirectory: teamDirectory,
         keychainItemExists: { false })
     }
@@ -133,7 +135,7 @@ import Testing
 
     try credentials.write(to: team.appendingPathComponent(".credentials.json"))
     let snapshot = try await makeProvider().fetch()
-    #expect(snapshot.provider == .anthropicSecondary)
+    #expect(snapshot.provider == Self.team)
     #expect(snapshot.planName == "Team")
     #expect(snapshot.windows.map(\.usedPercent) == [12])
     #expect(snapshot.source == "Claude OAuth file")
@@ -155,7 +157,7 @@ import Testing
           data: Data(#"{"claudeAiOauth":{"accessToken":"first-slot","expiresAt":4102444800000}}"#.utf8),
           source: "Claude Keychain")
       },
-      id: .anthropicSecondary,
+      id: Self.team,
       configDirectory: nil)
     await #expect(throws: AnthropicProvider.configDirectoryMissing) { try await provider.fetch() }
   }
@@ -182,20 +184,23 @@ import Testing
         return false
       },
       keychainCandidateLoader: { _ in nil },
-      id: .anthropicSecondary,
+      id: Self.team,
       configDirectory: directory,
       keychainItemExists: { false })
     await #expect(throws: UsageProviderError.self) { try await provider.fetch() }
     #expect(await seen.environments.map { $0["CLAUDE_CONFIG_DIR"] } == [directory.path])
   }
 
-  @Test func eachSlotHasItsOwnRateLimitGateAndRenewer() async {
+  @Test func eachAccountHasItsOwnRateLimitGateAndRenewer() async throws {
+    let other = try #require(ProviderID(kind: .anthropic, instance: "other"))
     #expect(ClaudeRateLimitGate.gate(for: .anthropic) === ClaudeRateLimitGate.shared)
-    #expect(ClaudeRateLimitGate.gate(for: .anthropicSecondary) === ClaudeRateLimitGate.secondary)
-    #expect(ClaudeRateLimitGate.gate(for: .anthropicSecondary) !== ClaudeRateLimitGate.shared)
+    #expect(ClaudeRateLimitGate.gate(for: Self.team) === ClaudeRateLimitGate.gate(for: Self.team))
+    #expect(ClaudeRateLimitGate.gate(for: Self.team) !== ClaudeRateLimitGate.shared)
+    #expect(ClaudeRateLimitGate.gate(for: Self.team) !== ClaudeRateLimitGate.gate(for: other))
     #expect(ClaudeSessionRenewer.instance(for: .anthropic) === ClaudeSessionRenewer.shared)
-    #expect(ClaudeSessionRenewer.instance(for: .anthropicSecondary) === ClaudeSessionRenewer.secondary)
-    #expect(ClaudeSessionRenewer.instance(for: .anthropicSecondary) !== ClaudeSessionRenewer.shared)
+    #expect(ClaudeSessionRenewer.instance(for: Self.team) === ClaudeSessionRenewer.instance(for: Self.team))
+    #expect(ClaudeSessionRenewer.instance(for: Self.team) !== ClaudeSessionRenewer.shared)
+    #expect(ClaudeSessionRenewer.instance(for: Self.team) !== ClaudeSessionRenewer.instance(for: other))
     // A block on one slot's key never shows up on the other's.
     let suite = "reserve.tests.claude-gates.\(UUID().uuidString)"
     defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
@@ -203,17 +208,17 @@ import Testing
     // across isolation boundaries.
     let first = ClaudeRateLimitGate(defaults: UserDefaults(suiteName: suite))
     let second = ClaudeRateLimitGate(
-      defaults: UserDefaults(suiteName: suite), key: "anthropicSecondary.rateLimitBlockedUntil")
+      defaults: UserDefaults(suiteName: suite), key: "anthropic@team.rateLimitBlockedUntil")
     await second.block(until: Date().addingTimeInterval(20 * 60))
     #expect(await first.activeBlock() == nil)
     #expect(await second.activeBlock() != nil)
   }
 
-  @Test func statuslineBridgeKeepsOneCachePerSlot() throws {
+  @Test func statuslineBridgeKeepsOneCachePerAccount() throws {
     #expect(ClaudeStatuslineBridge.cacheURL(provider: .anthropic).lastPathComponent == "claude-statusline.json")
     #expect(
-      ClaudeStatuslineBridge.cacheURL(provider: .anthropicSecondary).lastPathComponent
-        == "claude-statusline-anthropicSecondary.json")
+      ClaudeStatuslineBridge.cacheURL(provider: Self.team).lastPathComponent
+        == "claude-statusline-anthropic-team.json")
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("reserve-claude2-statusline-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -224,28 +229,47 @@ import Testing
       #"{"rate_limits":{"five_hour":{"used_percentage":24,"resets_at":1800000300}}}"#.utf8)
     #expect(try ClaudeStatuslineBridge.ingest(input, cacheURL: cache, now: now))
     let snapshot = try #require(
-      ClaudeStatuslineBridge.read(cacheURL: cache, provider: .anthropicSecondary, now: now))
-    #expect(snapshot.provider == .anthropicSecondary)
+      ClaudeStatuslineBridge.read(cacheURL: cache, provider: Self.team, now: now))
+    #expect(snapshot.provider == Self.team)
     #expect(ClaudeStatuslineBridge.read(cacheURL: cache, now: now)?.provider == .anthropic)
   }
 
-  @Test func descriptorMirrorsClaudeAndAsksForAFolder() {
-    let first = ProviderDescriptor.forProvider(.anthropic)
-    let second = ProviderDescriptor.forProvider(.anthropicSecondary)
-    #expect(second.displayName == "Claude 2")
-    #expect(second.usesConfigDirectory && !first.usesConfigDirectory)
-    #expect(!second.capabilities.contains(.localHistory))
-    #expect(second.capabilities.contains(.liveAllowance))
-    #expect(second.helper?.executable == first.helper?.executable)
-    #expect(second.loginArguments == first.loginArguments)
-    #expect(second.trustedLoginHosts == first.trustedLoginHosts)
-    #expect(second.authenticationStrategy == .protectedSession)
-    #expect(!second.isBeta)
-    #expect(ProviderID.anthropicSecondary.isAnthropic && ProviderID.anthropic.isAnthropic)
-    #expect(!ProviderID.cursor.isAnthropic)
-    // Appended, so every earlier persisted raw value keeps its meaning.
-    #expect(ProviderID.allCases.last == .anthropicSecondary)
-    #expect(ProviderID.anthropicSecondary.rawValue == "anthropicSecondary")
+  @Test func anAddedAccountSharesItsKindAndKeepsItsOwnIdentity() throws {
+    // Same descriptor, helper, sign-in and logo as the kind's default account.
+    let descriptor = ProviderDescriptor.forProvider(Self.team)
+    #expect(descriptor.id == .anthropic)
+    #expect(descriptor.displayName == "Claude")
+    #expect(descriptor.helper?.executable == "claude")
+    #expect(Self.team.isAnthropic && Self.team.isAdded && !Self.team.isDefault)
+    #expect(ProviderID.anthropic.isDefault && !ProviderID.cursor.isAnthropic)
+    #expect(ProviderKind.anthropic.supportsAddedAccounts && !ProviderKind.cursor.supportsAddedAccounts)
+    // Raw values: the default account keeps the bare kind, so every setting
+    // and cache written before accounts existed still names the same thing.
+    #expect(ProviderID.anthropic.rawValue == "anthropic")
+    #expect(Self.team.rawValue == "anthropic@team")
+    #expect(ProviderID(rawValue: "anthropic@team") == Self.team)
+    #expect(ProviderID(rawValue: "anthropic") == .anthropic)
+    #expect(ProviderID(rawValue: "anthropic@") == nil)
+    #expect(ProviderID(rawValue: "anthropic@bad name") == nil)
+    #expect(ProviderID(rawValue: "nope@team") == nil)
+    #expect(ProviderID(kind: .anthropic, instance: String(repeating: "a", count: 33)) == nil)
+    #expect(ProviderID.defaults.map(\.rawValue)
+      == ["openAI", "anthropic", "grok", "cursor", "copilot", "zai", "kimi", "gemini"])
+    // Order: provider order, then the default account before added ones.
+    let other = try #require(ProviderID(kind: .anthropic, instance: "aaa"))
+    #expect([Self.team, .grok, other, .anthropic, .openAI].sorted() == [.openAI, .anthropic, other, Self.team, .grok])
+    // Codable through the raw value, like the enum it replaces.
+    let encoded = try JSONEncoder().encode([Self.team, .anthropic])
+    #expect(String(decoding: encoded, as: UTF8.self) == #"["anthropic@team","anthropic"]"#)
+    #expect(try JSONDecoder().decode([ProviderID].self, from: encoded) == [Self.team, .anthropic])
+    // Dictionaries keyed by account keep the shape the history index is stored in.
+    let keyed = try JSONEncoder().encode([ProviderID.anthropic: 1])
+    #expect(String(decoding: keyed, as: UTF8.self) == #"["anthropic",1]"#)
+    // The display name carries the account's label once it is known.
+    ProviderAccountLabels.set("Nimbus", for: Self.team)
+    defer { ProviderAccountLabels.set(nil, for: Self.team) }
+    #expect(Self.team.displayName == "Claude · Nimbus")
+    #expect(ProviderID.anthropic.displayName == "Claude")
   }
 }
 

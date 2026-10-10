@@ -1,7 +1,7 @@
 import AppKit
 import ReserveCore
 
-/// The folder chooser for the second Claude slot, shared by Settings and the
+/// The folder chooser for an added Claude account, shared by Settings and the
 /// Connect window. Hidden folders are shown because Claude Code's configuration
 /// homes are dot-folders by convention, and a folder may be created on the spot:
 /// Claude Code fills it in at the first sign-in.

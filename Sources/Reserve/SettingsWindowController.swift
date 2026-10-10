@@ -375,12 +375,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   private func providersPane() -> NSView {
     var rows: [NSView] = []
-    for provider in ProviderID.allCases {
+    for provider in self.store.accounts {
       rows.append(self.providerRow(provider))
       if self.expandedProviders.contains(provider) {
         rows.append(self.providerDetail(provider))
       }
-      if provider != ProviderID.allCases.last {
+      if provider != self.store.accounts.last {
         rows.append(SettingsSeparator(width: SettingsLayout.contentWidth))
       }
     }
@@ -472,7 +472,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     states: [ProviderViewState], published: [(ProviderViewState, InsightHistorySeries)],
     totalText: String, activityFooter: String
   ) {
-    let states = ProviderID.allCases.compactMap { self.store.states[$0] }
+    let states = self.store.accounts.compactMap { self.store.states[$0] }
       .filter { self.store.isEnabled($0.provider) }
     let rangeDays = self.store.insightHistoryDays
     let published = states.map { state -> (ProviderViewState, InsightHistorySeries) in
@@ -522,7 +522,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func insightsPane() -> NSView {
-    let rows = ProviderID.allCases.filter { self.store.isEnabled($0) }.map(self.insightRow)
+    let rows = self.store.accounts.filter { self.store.isEnabled($0) }.map(self.insightRow)
     let facts = self.insightsFacts()
     let states = facts.states
     let published = facts.published
@@ -848,9 +848,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let popup = NSPopUpButton()
     popup.identifier = NSUserInterfaceItemIdentifier("menu-bar-provider")
     popup.addItems(
-      withTitles: ["Automatic"] + ProviderID.allCases.map { "Pinned: \($0.displayName)" })
+      withTitles: ["Automatic"] + self.store.accounts.map { "Pinned: \($0.displayName)" })
     let selection =
-      self.store.menuBarProvider.flatMap { ProviderID.allCases.firstIndex(of: $0) }
+      self.store.menuBarProvider.flatMap { self.store.accounts.firstIndex(of: $0) }
       .map { $0 + 1 } ?? 0
     popup.selectItem(at: selection)
     popup.target = self
@@ -940,7 +940,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
     let logo = SettingsProviderLogo(provider: provider)
     // The logo carries the brand; the name stays in the system label colour.
-    let nameLabel = SettingsLabel(provider.displayName, size: 13, weight: .medium, color: .labelColor)
+    // An added account shows its own name: the logo already says which kind.
+    let nameLabel = SettingsLabel(
+      provider.isAdded ? (self.store.accountLabel(for: provider) ?? provider.displayName) : provider.displayName,
+      size: 13, weight: .medium, color: .labelColor)
     nameLabel.setAccessibilityLabel(ReserveBetaBadge.accessibilityName(for: provider))
     let name: NSView
     if ProviderDescriptor.forProvider(provider).isBeta {
@@ -1031,10 +1034,11 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         "Unofficial usage endpoint · the key can call models, so use a dedicated one",
         size: 11, color: .secondaryLabelColor))
     }
-    if ProviderDescriptor.forProvider(provider).usesConfigDirectory {
+    if provider.isAdded {
+      rows.append(self.formRow("Name:", self.accountNameControls(provider), labelWidth: 92))
       rows.append(self.formRow("Folder:", self.configDirectoryControls(provider), labelWidth: 92))
       rows.append(SettingsLabel(
-        "Claude Code keeps one sign-in per configuration folder · the same email on both is fine",
+        "Claude Code keeps one sign-in per folder · the same email on several accounts is fine",
         size: 11, color: .secondaryLabelColor))
     }
     if provider.isAnthropic || provider == .cursor {
@@ -1054,10 +1058,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         action: #selector(self.claudePassiveUpdatesChanged(_:)))
       passive.state = self.store.claudePassiveUpdatesEnabled(for: provider) ? .on : .off
       passive.identifier = NSUserInterfaceItemIdentifier(Self.passiveUpdatesIdentifier(provider))
-      // The status line is installed in the slot's own folder, so it waits
-      // for that folder to be chosen.
-      passive.isEnabled = !ProviderDescriptor.forProvider(provider).usesConfigDirectory
-        || self.store.claudeConfigDirectory(for: provider) != nil
+      // The status line is installed in the account's own folder, so it
+      // waits for that folder to be chosen.
+      passive.isEnabled = !provider.isAdded || self.store.claudeConfigDirectory(for: provider) != nil
       passive.toolTip = "Shares limits after Claude Code responds, without reading your sign-in. Preserves your existing status line. Updates pause when you are not using Claude Code."
       rows.append(self.formRow("Updates:", passive, labelWidth: 92))
       rows.append(SettingsLabel("Updates after Claude Code responds. No sign-in access needed.",
@@ -1074,6 +1077,23 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       setup.bezelStyle = .rounded
       setup.toolTip = setupAction.toolTip(for: provider)
       rows.append(self.formRow("", setup, labelWidth: 92))
+    }
+    if provider.isDefault, provider.kind.supportsAddedAccounts {
+      let add = NSButton(
+        title: "Add \(provider.displayName) account", target: self,
+        action: #selector(self.addAccountClicked(_:)))
+      add.identifier = NSUserInterfaceItemIdentifier("provider-add-account-\(provider.rawValue)")
+      add.bezelStyle = .rounded
+      add.toolTip = "Track another \(provider.displayName) subscription beside this one. Reserve gives it a folder of its own and signs it in there, so this account stays untouched."
+      rows.append(self.formRow("", add, labelWidth: 92))
+    }
+    if provider.isAdded {
+      let remove = NSButton(
+        title: "Remove account", target: self, action: #selector(self.removeAccountClicked(_:)))
+      remove.identifier = NSUserInterfaceItemIdentifier("provider-remove-account-\(provider.rawValue)")
+      remove.bezelStyle = .rounded
+      remove.toolTip = "Stops tracking this account and forgets its settings. Its folder and sign-in stay on disk."
+      rows.append(self.formRow("", remove, labelWidth: 92))
     }
     // A key-connected plan disconnects by removing its key, next to the field.
     if !ProviderDescriptor.forProvider(provider).usesAPIKey,
@@ -1388,9 +1408,90 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     guard let raw = sender.identifier?.rawValue else { return nil }
     for prefix in ["config-dir-choose-", "config-dir-"] where raw.hasPrefix(prefix) {
       let provider = ProviderID(rawValue: String(raw.dropFirst(prefix.count)))
-      return provider.flatMap { ProviderDescriptor.forProvider($0).usesConfigDirectory ? $0 : nil }
+      return provider.flatMap { $0.isAdded && $0.isAnthropic ? $0 : nil }
     }
     return nil
+  }
+
+  /// The person's own name for an added account. Return or leaving the field
+  /// saves it; an empty name goes back to the automatic one.
+  private func accountNameControls(_ provider: ProviderID) -> NSView {
+    let field = NSTextField()
+    field.identifier = NSUserInterfaceItemIdentifier("account-name-\(provider.rawValue)")
+    field.stringValue = self.store.accountLabel(for: provider) ?? ""
+    field.placeholderString = "Team, personal, client…"
+    field.isBezeled = true
+    field.bezelStyle = .roundedBezel
+    field.lineBreakMode = .byTruncatingTail
+    field.cell?.wraps = false
+    field.cell?.isScrollable = true
+    field.maximumNumberOfLines = 1
+    field.target = self
+    field.delegate = self
+    field.action = #selector(self.accountNameSubmitted(_:))
+    field.toolTip = "How this account is named in Reserve. Filled in from its organization until you change it."
+    field.setAccessibilityLabel("\(provider.kind.displayName) account name")
+    field.widthAnchor.constraint(equalToConstant: 220).isActive = true
+    return field
+  }
+
+  private func accountNameProvider(for sender: NSControl) -> ProviderID? {
+    guard let raw = sender.identifier?.rawValue, raw.hasPrefix("account-name-") else { return nil }
+    return ProviderID(rawValue: String(raw.dropFirst("account-name-".count))).flatMap { $0.isAdded ? $0 : nil }
+  }
+
+  @objc private func accountNameSubmitted(_ sender: NSControl) {
+    guard let provider = self.accountNameProvider(for: sender), let field = sender as? NSTextField
+    else { return }
+    self.store.setAccountLabel(field.stringValue, for: provider)
+    field.stringValue = self.store.accountLabel(for: provider) ?? ""
+    self.uiRefresh.coalesce { [weak self] in self?.applyLiveUpdate() }
+  }
+
+  @objc private func addAccountClicked(_ sender: NSButton) {
+    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(of: "provider-add-account-", with: "")
+    guard let provider = ProviderID(rawValue: raw), provider.kind.supportsAddedAccounts else { return }
+    do {
+      let account = try self.store.addClaudeAccount()
+      self.expandedProviders.insert(account)
+      self.rememberScrollOffset()
+      self.applyPane(animated: false)
+      self.setupProvider(account)
+    } catch {
+      let alert = NSAlert()
+      alert.messageText = "The account could not be added"
+      alert.informativeText = error.localizedDescription
+      alert.addButton(withTitle: "OK")
+      if let window = self.window, window.isVisible {
+        alert.beginSheetModal(for: window, completionHandler: nil)
+      } else {
+        alert.runModal()
+      }
+    }
+  }
+
+  @objc private func removeAccountClicked(_ sender: NSButton) {
+    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(of: "provider-remove-account-", with: "")
+    guard let provider = ProviderID(rawValue: raw), provider.isAdded else { return }
+    let alert = NSAlert()
+    alert.messageText = "Remove \(provider.displayName) from Reserve?"
+    alert.informativeText = "Reserve stops tracking it and forgets its settings. The account's folder and its Claude Code sign-in stay on this Mac."
+    alert.addButton(withTitle: "Remove")
+    alert.addButton(withTitle: "Cancel")
+    let remove = { [weak self] in
+      guard let self else { return }
+      self.store.removeAccount(provider)
+      self.expandedProviders.remove(provider)
+      self.rememberScrollOffset()
+      self.applyPane(animated: false)
+    }
+    if let window = self.window, window.isVisible {
+      alert.beginSheetModal(for: window) { response in
+        if response == .alertFirstButtonReturn { remove() }
+      }
+    } else if alert.runModal() == .alertFirstButtonReturn {
+      remove()
+    }
   }
 
   private func textField(identifier: String) -> NSTextField? {
@@ -2213,8 +2314,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   @objc private func menuBarProviderChanged(_ sender: NSPopUpButton) {
     let providerIndex = sender.indexOfSelectedItem - 1
     self.store.menuBarProvider =
-      ProviderID.allCases.indices.contains(providerIndex)
-      ? ProviderID.allCases[providerIndex] : nil
+      self.store.accounts.indices.contains(providerIndex)
+      ? self.store.accounts[providerIndex] : nil
     self.applyPane(animated: false)
   }
 
@@ -2288,6 +2389,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.renewalDayChanged(field)
     } else if identifier.hasPrefix("config-dir-") {
       self.configDirectorySubmitted(field)
+    } else if identifier.hasPrefix("account-name-") {
+      self.accountNameSubmitted(field)
     }
     // AppKit still owns the field editor while delivering this notification.
     // Apply deferred changes on the next turn, after it releases that editor.
@@ -2416,7 +2519,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     ]
     switch self.pane {
     case .providers:
-      for provider in ProviderID.allCases {
+      for provider in self.store.accounts {
         let enabled = self.store.isEnabled(provider)
         let state = self.store.states[provider] ?? ProviderViewState(provider: provider)
         let setup = AllowanceBuilder.setupAction(for: state)
@@ -2427,9 +2530,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           let reportedRenewal = state.snapshot?.billingRenewsAt != nil
           let planKey = ProviderDescriptor.forProvider(provider).usesAPIKey
           let savedKey = planKey ? String(describing: self.store.planKeyAvailability(for: provider)) : "-"
-          // The second Claude slot's folder decides which controls are live
-          // (its passive-updates checkbox waits for one).
-          let folder = ProviderDescriptor.forProvider(provider).usesConfigDirectory
+          // An added account's folder decides which controls are live (its
+          // passive-updates checkbox waits for one).
+          let folder = provider.isAdded
             ? (self.store.claudeConfigDirectory(for: provider) != nil ? "folder" : "no-folder") : "-"
           detail = [
             reportedRenewal ? "reported" : "manual",
@@ -2447,7 +2550,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         parts.append("\(provider.rawValue):\(self.store.apiConsumptionKeyAvailability(provider))")
       }
     case .insights:
-      let enabled = ProviderID.allCases.filter { self.store.isEnabled($0) }
+      let enabled = self.store.accounts.filter { self.store.isEnabled($0) }
       parts.append(enabled.map(\.rawValue).joined(separator: ","))
       parts.append(String(self.store.insightHistoryDays))
       let keys = Set(InsightHistoryRange.dayKeys(count: self.store.insightHistoryDays, now: Date()))
@@ -2491,7 +2594,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
     switch self.pane {
     case .providers:
-      for provider in ProviderID.allCases {
+      for provider in self.store.accounts {
         let status = self.providerStatus(provider)
         setText(
           "settings-plan-\(provider.rawValue)",
@@ -2546,7 +2649,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       check("menu-bar-reset", self.store.menuBarShowsReset)
       select("settings-refresh-interval", Self.refreshIntervalMinutes.firstIndex(of: self.store.refreshIntervalMinutes) ?? 0)
       select("settings-dashboard-hotkey", DashboardHotKeyChoice.allCases.firstIndex(of: self.store.dashboardHotKey) ?? 0)
-      select("menu-bar-provider", self.store.menuBarProvider.flatMap { ProviderID.allCases.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+      select("menu-bar-provider", self.store.menuBarProvider.flatMap { self.store.accounts.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
       setText("settings-hotkey-status", self.hotKeyStatusText())
       if let preview = views.first(where: { $0.identifier?.rawValue == "menu-bar-preview" })
         as? MenuBarPreview
@@ -2851,7 +2954,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.pane = .providers
     self.applyPane(animated: false)
     let providerIDs = identifiers()
-    let providerRowsPresent = ProviderID.allCases.allSatisfy {
+    let providerRowsPresent = self.store.accounts.allSatisfy {
       providerIDs.contains("settings-provider-\($0.rawValue)")
         && providerIDs.contains("provider-disclose-\($0.rawValue)")
     }
@@ -3015,7 +3118,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let insightIDs = identifiers()
     let insightLabels = descendants().compactMap { ($0 as? NSTextField)?.stringValue }
     let insightsSuccess =
-      ProviderID.allCases.allSatisfy { insightIDs.contains("insight-\($0.rawValue)") }
+      self.store.accounts.allSatisfy { insightIDs.contains("insight-\($0.rawValue)") }
       && insightIDs.contains("insights-total")
       && Self.insightsTotalFits(window: window)
       && insightIDs.contains("insights-history-range")

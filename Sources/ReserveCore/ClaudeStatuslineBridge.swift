@@ -10,10 +10,12 @@ public enum ClaudeStatuslineBridge {
   // The receiver is a short-lived command, so one utility worker is sufficient.
   private static let receiverQueue = DispatchQueue(label: "com.pocarles.reserve.statusline", qos: .utility)
 
-  /// One cache per Claude slot. The first slot keeps its original file name,
-  /// so an existing passive connection carries on after an update.
+  /// One cache per Claude account. The default account keeps its original
+  /// file name, so an existing passive connection carries on after an update.
   public static func cacheURL(provider: ProviderID = .anthropic) -> URL {
-    let name = provider == .anthropic ? "claude-statusline.json" : "claude-statusline-\(provider.rawValue).json"
+    let name = provider.isDefault
+      ? "claude-statusline.json"
+      : "claude-statusline-\(provider.kind.rawValue)-\(provider.instance ?? "").json"
     return FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Library/Application Support/Reserve/\(name)")
   }

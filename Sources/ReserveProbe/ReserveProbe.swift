@@ -21,7 +21,8 @@ struct ReserveProbe {
     switch argument?.lowercased() {
     case "openai": selected = [.openAI]
     case "anthropic", "claude": selected = [.anthropic]
-    case "anthropic2", "claude2": selected = [.anthropicSecondary]
+    // An added Claude account, read from the folder named by --claude-config-dir.
+    case "anthropic2", "claude2": selected = [ProviderID(kind: .anthropic, instance: "probe")!]
     case "grok": selected = [.grok]
     case "cursor": selected = [.cursor]
     case "copilot": selected = [.copilot]
@@ -31,7 +32,7 @@ struct ReserveProbe {
     case nil, "all":
       // Key-connected plans are probed only when a key is saved, so "all"
       // does not report an unconfigured plan as a failure.
-      selected = ProviderID.allCases.filter {
+      selected = ProviderID.defaults.filter {
         !ProviderDescriptor.forProvider($0).usesAPIKey || PlanKeyKeychain.hasKey(for: $0)
       }
     default:
@@ -44,20 +45,16 @@ struct ReserveProbe {
     var failures: [String: String] = [:]
     for provider in selected {
       let fetcher: any UsageProvider =
-        switch provider {
+        switch provider.kind {
         case .openAI: OpenAIProvider(includeAccountActivity: includeInsights)
-        case .anthropic: AnthropicProvider(allowKeychainRead: allowClaudeKeychainRead)
-        case .anthropicSecondary:
-          // The second slot's directory comes from the flag, else from what
-          // the app saved in Settings.
+        case .anthropic:
           AnthropicProvider(
-            id: .anthropicSecondary,
-            configDirectory: arguments.first(where: { $0.hasPrefix("--claude-config-dir=") })
-              .map { String($0.dropFirst("--claude-config-dir=".count)) }
-              .flatMap(ClaudeConfigDirectory.init(path:))
-              ?? UserDefaults(suiteName: "com.pocarles.reserve")?
-              .string(forKey: "\(ProviderID.anthropicSecondary.rawValue).configDirectory")
-              .flatMap(ClaudeConfigDirectory.init(path:)),
+            id: provider,
+            configDirectory: provider.isAdded
+              ? arguments.first(where: { $0.hasPrefix("--claude-config-dir=") })
+                .map { String($0.dropFirst("--claude-config-dir=".count)) }
+                .flatMap(ClaudeConfigDirectory.init(path:))
+              : nil,
             allowKeychainRead: allowClaudeKeychainRead)
         case .grok: GrokProvider()
         case .cursor: CursorProvider(allowKeychainRead: allowCursorKeychainRead, includeAccountUsage: includeInsights)
@@ -89,7 +86,7 @@ struct ReserveProbe {
       let encoder = JSONEncoder()
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
       encoder.dateEncodingStrategy = .iso8601
-      let values = ProviderID.allCases.compactMap { summaries[$0] }
+      let values = summaries.keys.sorted().compactMap { summaries[$0] }
       FileHandle.standardOutput.write(try encoder.encode(values))
       FileHandle.standardOutput.write(Data([0x0A]))
     } catch {

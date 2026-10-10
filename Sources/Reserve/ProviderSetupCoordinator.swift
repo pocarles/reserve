@@ -21,7 +21,7 @@ final class ProviderSetupCoordinator {
     /// A key-connected plan (Z.ai, Kimi) waits for a pasted API key, then
     /// checks usage with it while `savingKey`.
     case needsKey, savingKey
-    /// The second Claude slot has no configuration folder yet. Signing in
+    /// An added Claude account has no configuration folder yet. Signing in
     /// without one would land in the first slot's account, so the folder is
     /// chosen here first.
     case needsConfigDirectory
@@ -143,9 +143,11 @@ final class ProviderSetupCoordinator {
   }
 
   /// `claude auth login` replaces the Claude Code sign-in on this Mac the
-  /// moment it starts, so Claude's window explains that before it runs.
+  /// moment it starts, so Claude's window explains that before it runs. An
+  /// added account signs in inside its own folder and replaces nothing, so it
+  /// goes straight to the browser like any other provider.
   static func asksBeforeSignIn(_ provider: ProviderID) -> Bool {
-    provider.isAnthropic
+    provider.isAnthropic && provider.isDefault
   }
 
   /// Install comes before update everywhere (here and on the dashboard card):
@@ -572,7 +574,7 @@ final class ProviderConnectionPanel: NSPanel {
       // A denial is fixed by allowing access, not by signing in again, which
       // for Claude would replace the CLI's own sign-in.
       let item = self.provider == .cursor ? "cursor-access-token"
-        : self.provider == .anthropicSecondary ? "Claude Code-credentials-…" : "Claude Code-credentials"
+        : self.provider.isAdded ? "Claude Code-credentials-…" : "Claude Code-credentials"
       self.heading.stringValue = "Usage access not allowed"
       self.message.stringValue = "Reserve does not have permission to use your saved \(name) sign-in. Choose Allow usage access, then approve the macOS prompt."
       self.privacy.stringValue = "If macOS does not ask, open Keychain Access, find “\(item)”, and allow Reserve under Access Control. Reserve never saves your sign-in."

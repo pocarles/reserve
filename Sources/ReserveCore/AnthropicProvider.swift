@@ -8,10 +8,10 @@ import Foundation
 public struct AnthropicProvider: UsageProvider {
   public static let maximumRetryDelay: TimeInterval = 24 * 60 * 60
   public let id: ProviderID
-  /// The second Claude slot reads one chosen configuration directory and
-  /// nothing else: that directory's own Keychain item and files, with no
-  /// fallback to the default home, so it can never show the first slot's
-  /// account. Nil on the first slot, which keeps Claude Code's default home.
+  /// An added Claude account reads one configuration directory and nothing
+  /// else: that directory's own Keychain item and files, with no fallback to
+  /// the default home, so it can never show the default account. Nil on the
+  /// default account, which keeps Claude Code's default home.
   private let configDirectory: ClaudeConfigDirectory?
   private let keychainService: String
   private let environment: [String: String]
@@ -98,12 +98,12 @@ public struct AnthropicProvider: UsageProvider {
       accountProfileURLs.isEmpty ? (configDirectory.map { [$0.accountProfileURL] } ?? []) : accountProfileURLs
   }
 
-  /// The second slot has nothing to read until its directory is chosen.
+  /// An added account has nothing to read until its directory is chosen.
   public static let configDirectoryMissing = UsageProviderError.credentialsNotFound(
     "Choose this account's Claude Code configuration directory in Settings > Providers.")
 
   public func fetch() async throws -> UsageSnapshot {
-    if self.id != .anthropic, self.configDirectory == nil {
+    if self.id.isAdded, self.configDirectory == nil {
       throw Self.configDirectoryMissing
     }
     if self.passiveStatusline {
@@ -248,14 +248,14 @@ public struct AnthropicProvider: UsageProvider {
     for gate in ClaudeRateLimitGate.all { await gate.clear() }
   }
 
-  /// One slot's block only: a new folder for the second slot is a new
-  /// account, which the previous account's back-off must not hold back.
+  /// One account's block only: a new folder for an added account is a new
+  /// sign-in, which the previous one's back-off must not hold back.
   public static func clearPersistedRateLimitBlock(for provider: ProviderID) async {
     await ClaudeRateLimitGate.gate(for: provider).clear()
   }
 
-  /// Detects the item without reading its secret or presenting a prompt. The
-  /// second slot passes its directory so the probe names that directory's
+  /// Detects the item without reading its secret or presenting a prompt. An
+  /// added account passes its directory so the probe names that directory's
   /// own Keychain item.
   public static func keychainCredentialIsAvailableWithoutPrompt(
     configDirectory: ClaudeConfigDirectory? = nil
@@ -339,10 +339,15 @@ public struct AnthropicProvider: UsageProvider {
 
 actor ClaudeRateLimitGate {
   static let shared = ClaudeRateLimitGate()
-  /// The second slot holds its own token, so Anthropic rate limits it on its
-  /// own and one slot's back-off never silences the other.
-  static let secondary = ClaudeRateLimitGate(key: "anthropicSecondary.rateLimitBlockedUntil")
-  static var all: [ClaudeRateLimitGate] { [self.shared, self.secondary] }
+  /// Each added account holds its own token, so Anthropic rate limits it on
+  /// its own and one account's back-off never silences another.
+  private static let registryLock = NSLock()
+  nonisolated(unsafe) private static var registry: [String: ClaudeRateLimitGate] = [:]
+  static var all: [ClaudeRateLimitGate] {
+    self.registryLock.lock()
+    defer { self.registryLock.unlock() }
+    return [self.shared] + self.registry.values
+  }
   private let defaults: UserDefaults?
   private let key: String
   private var memoryBlock: Date?
@@ -356,7 +361,13 @@ actor ClaudeRateLimitGate {
   }
 
   static func gate(for provider: ProviderID) -> ClaudeRateLimitGate {
-    provider == .anthropicSecondary ? self.secondary : self.shared
+    guard provider.isAdded else { return self.shared }
+    self.registryLock.lock()
+    defer { self.registryLock.unlock() }
+    if let gate = self.registry[provider.rawValue] { return gate }
+    let gate = ClaudeRateLimitGate(key: "\(provider.rawValue).rateLimitBlockedUntil")
+    self.registry[provider.rawValue] = gate
+    return gate
   }
 
   func activeBlock(now: Date = Date()) -> Date? {
@@ -778,9 +789,10 @@ struct ClaudeOAuthCredential: Decodable {
 /// revoked session cannot turn every refresh into a helper launch.
 actor ClaudeSessionRenewer {
   static let shared = ClaudeSessionRenewer()
-  /// Each slot renews on its own clock: the cooldown and back-off protect one
-  /// sign-in, and the two directories hold two sign-ins.
-  static let secondary = ClaudeSessionRenewer()
+  /// Each account renews on its own clock: the cooldown and back-off protect
+  /// one sign-in, and every directory holds its own.
+  private static let registryLock = NSLock()
+  nonisolated(unsafe) private static var registry: [String: ClaudeSessionRenewer] = [:]
   static let defaultScopes = [
     "user:file_upload", "user:inference", "user:mcp_servers", "user:profile",
     "user:sessions:claude_code",
@@ -802,7 +814,13 @@ actor ClaudeSessionRenewer {
   }
 
   static func instance(for provider: ProviderID) -> ClaudeSessionRenewer {
-    provider == .anthropicSecondary ? self.secondary : self.shared
+    guard provider.isAdded else { return self.shared }
+    self.registryLock.lock()
+    defer { self.registryLock.unlock() }
+    if let renewer = self.registry[provider.rawValue] { return renewer }
+    let renewer = ClaudeSessionRenewer()
+    self.registry[provider.rawValue] = renewer
+    return renewer
   }
 
   static func hook(for provider: ProviderID) -> ClaudeSessionRenewalHook {

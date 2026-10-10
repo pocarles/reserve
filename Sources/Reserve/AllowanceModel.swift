@@ -158,7 +158,7 @@ enum ProviderSetupAction: String, Equatable {
   case allowAccess
   /// Key-connected plans (Z.ai, Kimi) connect by pasting an API key.
   case addKey
-  /// The second Claude slot first needs its Claude Code configuration folder.
+  /// An added Claude account first needs its Claude Code configuration folder.
   case chooseFolder
 
   var buttonTitle: String {

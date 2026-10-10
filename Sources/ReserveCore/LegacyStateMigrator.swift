@@ -81,7 +81,7 @@ public enum LegacyStateMigrator {
         guard let value = oldDefaults.string(forKey: key), allowed.contains(value) else { continue }
         pendingPreferences.append((key, value))
       }
-      for provider in ProviderID.allCases {
+      for provider in ProviderID.defaults {
         let costKey = "subscription.monthlyCost.\(provider.rawValue)"
         if newDefaults.object(forKey: costKey) == nil,
           let number = oldDefaults.object(forKey: costKey) as? NSNumber,

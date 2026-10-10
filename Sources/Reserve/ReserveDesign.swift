@@ -105,10 +105,10 @@ enum ReserveColor {
   /// Brand colour for the provider mark, adapted so it stays legible in both
   /// appearances. It belongs on the logo, not on the data.
   static func providerAccent(_ provider: ProviderID) -> NSColor {
-    switch provider {
+    switch provider.kind {
     case .openAI:
       return Self.dynamic(light: 0x10_10_0F, dark: 0xED_ED_EA)
-    case .anthropic, .anthropicSecondary:
+    case .anthropic:
       return Self.dynamic(light: 0xC2_5B_36, dark: 0xE8_70_45)
     case .grok:
       return Self.dynamic(light: 0x1F_63_92, dark: 0x6B_AE_EE)
