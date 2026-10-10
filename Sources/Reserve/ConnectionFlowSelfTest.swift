@@ -911,7 +911,7 @@ enum ConnectionFlowSelfTest {
     let suite = "Reserve.LocalHistoryRefresh.\(name).\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defaults.removePersistentDomain(forName: suite)
-    for provider in ProviderID.allCases {
+    for provider in ProviderID.defaults {
       defaults.set(provider == .openAI, forKey: "provider.\(provider.rawValue).enabled")
     }
     for provider in APIConsumptionProvider.allCases {
@@ -1032,7 +1032,7 @@ enum ConnectionFlowSelfTest {
         planKeys: PlanKeyStorage(
           hasKey: { _ in true }, save: { _, _ in }, delete: { _ in },
           availability: { _ in .present }))
-      for provider in ProviderID.allCases {
+      for provider in store.accounts {
         store.setEnabled(provider, enabled: false, refreshImmediately: false)
       }
       if scenario == "interactive-sweep" {
@@ -1084,7 +1084,7 @@ enum ConnectionFlowSelfTest {
           failures.append("account history survived a newer snapshot without account history")
         }
       }
-      for provider in ProviderID.allCases { store.cancelConnection(provider) }
+      for provider in store.accounts { store.cancelConnection(provider) }
     }
     return failures
   }
@@ -1197,7 +1197,7 @@ enum ConnectionFlowSelfTest {
       loginCommandOverride: { _ in ("/bin/sh", [script.path]) },
       openLoginURL: { _ in failures.append("completions: unexpectedly opened sign-in"); return false },
       planKeys: PlanKeyStorage(hasKey: { _ in false }, save: { _, _ in }, delete: { _ in }))
-    for provider in ProviderID.allCases { store.setEnabled(provider, enabled: false, refreshImmediately: false) }
+    for provider in store.accounts { store.setEnabled(provider, enabled: false, refreshImmediately: false) }
 
     var counts: [String: Int] = [:]
     store.refresh(.openAI) { counts["refresh-disabled", default: 0] += 1 }
@@ -1216,7 +1216,7 @@ enum ConnectionFlowSelfTest {
     if store.loginLaunchCount(for: .grok) != 1 {
       failures.append("completions: a second Connect launched a second sign-in helper")
     }
-    for provider in ProviderID.allCases { store.cancelConnection(provider) }
+    for provider in store.accounts { store.cancelConnection(provider) }
     return failures
   }
 

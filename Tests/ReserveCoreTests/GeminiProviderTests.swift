@@ -373,7 +373,7 @@ import Testing
     #expect(descriptor.capabilities == [.liveAllowance, .limitMeters])
     #expect(!descriptor.usesAPIKey)
     // Every other helper keeps its own sign-in command.
-    for provider in ProviderID.allCases where provider != .gemini {
+    for provider in ProviderID.defaults where provider != .gemini {
       #expect(!ProviderDescriptor.forProvider(provider).signsInFromTerminal)
     }
   }

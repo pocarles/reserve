@@ -596,7 +596,7 @@ public actor LocalUsageScanner {
       }
     }
     try Self.checkDeadline(deadline, budget: budget)
-    return ProviderID.allCases.reduce(into: [:]) { result, provider in
+    return ProviderID.defaults.reduce(into: [:]) { result, provider in
       let byDay = totals[provider] ?? [:]
       result[provider] = keys.map {
         DailyUsage(day: $0, tokens: byDay[$0]?.totalTokens(provider: provider) ?? 0)
@@ -1876,7 +1876,7 @@ public actor LocalUsageScanner {
     ledger: ScanLedger,
     budget: ScanBudget
   ) throws {
-    switch provider {
+    switch provider.kind {
     case .openAI:
       _ = try self.scanCodex(
         cutoff: cutoff, cutoffKey: cutoffKey, box: box, ledger: ledger, budget: budget,
@@ -2139,7 +2139,7 @@ public actor LocalUsageScanner {
   }
 
   private func root(for provider: ProviderID) -> URL {
-    switch provider {
+    switch provider.kind {
     case .openAI: self.roots.codex
     case .anthropic: self.roots.claude
     case .grok: self.roots.grok
@@ -2639,7 +2639,7 @@ private enum Pricing {
   }
 
   private static func rates(provider: ProviderID, model: String) -> Rates? {
-    switch provider {
+    switch provider.kind {
     // Copilot, Z.ai, Kimi and Gemini have no local session history to price.
     case .copilot, .zai, .kimi, .gemini: return nil
     case .openAI:

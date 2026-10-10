@@ -51,6 +51,30 @@ closes on its own once Reserve reads fresh usage, or explains why it could not.
 Cursor, Copilot, Gemini, Z.ai and Kimi start disabled. On first launch, the other providers
 start enabled only when their helper is already installed. Saved choices are preserved.
 
+### Several Claude accounts
+
+Reserve can track more than one Claude subscription, for example a team
+account next to a personal one, even when both use the same email address.
+Open the Claude card in **Settings > Providers** and choose **Add Claude
+account**. Reserve gives the new account a folder of its own under
+`~/.claude-accounts/`, opens the usual browser sign-in with that folder set as
+Claude Code's `CLAUDE_CONFIG_DIR`, and names the card after the organization
+it finds ("Claude · Nimbus"); you can rename it in the card, and **Hide
+personal info** shows a neutral "Account 2" instead. Claude Code keeps
+a separate sign-in per configuration folder, so each added account has its
+own Keychain item and the first account is left untouched. Pick the
+organization for the account on Claude's sign-in page.
+
+An added account reads only its folder: no fallback to `~/.claude`, which is
+refused as a folder since the first card already covers it. To attach an
+account you already signed in from a terminal, change the card's folder to
+that `CLAUDE_CONFIG_DIR`, spelled the same way; changing the folder starts the
+card over, including its usage-access permission. **Remove account** forgets
+the card and its settings but leaves the folder and its sign-in on disk. To
+use an added account in your own terminal, run Claude Code with
+`CLAUDE_CONFIG_DIR` pointing at its folder. Activity from this Mac is not yet
+counted for added accounts.
+
 - `codex`, signed into an OpenAI subscription;
 - `claude`, signed into an Anthropic subscription;
 - Grok Build 1.0.0 or newer, signed into an X.AI subscription;
@@ -142,11 +166,17 @@ app-server JSON-RPC. Provider changes can temporarily break a refresh even when
 the local app is healthy; the last valid snapshot remains visible and is marked
 stale.
 
-Claude can also share the limits in its documented status-line output. Enable
-**Get updates from Claude Code** in its provider details. Reserve then reads a
-quota-only local file and does not read Claude’s sign-in. Updates arrive after
-Claude Code responds, so they pause while it is idle. The existing status line
-is preserved; turning the option off restores it. No conversation text is saved.
+Claude Code in a terminal can also share the limits in its documented
+status-line output. Enable **Also use Claude Code's status line in Terminal**
+in its provider details. Reserve then reads a quota-only local file that
+updates after each Claude Code response. The Claude desktop app does not send
+these updates. With usage access allowed, a reading from the last ten minutes
+wins and Reserve otherwise reads the sign-in as usual; without usage access,
+the status line is the only source and Reserve never reads the sign-in. The
+existing status line is preserved; turning the option off restores it. No
+conversation text is saved.
+Each added Claude account offers the same option; its status line is installed
+in that account's folder and feeds a cache file of its own.
 
 Local history is available by default and can be turned off with **Include
 activity from this Mac** in General. Only enabled providers are scanned, and
@@ -344,7 +374,8 @@ retained. Reserve never scans Cursor transcripts or prompt text. It may read
 honoured, in that order). To name the signed-in Claude account in a card's
 expanded details, Reserve also reads the account email, organization and
 subscription dates from Claude Code's `~/.claude.json` (or
-`$CLAUDE_CONFIG_DIR/.claude.json`); nothing else in that file is used. Account
+`$CLAUDE_CONFIG_DIR/.claude.json`); nothing else in that file is used. An added
+Claude account reads the same files, and the Keychain item, inside its own folder only. Account
 emails and organization names are shown but never written to Reserve's cache.
 Turn on **Hide personal info** in the menu or Settings > General to mask them on
 screen. Share cards exclude those details regardless of that setting, along

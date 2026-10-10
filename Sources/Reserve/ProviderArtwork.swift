@@ -53,22 +53,24 @@ enum ProviderArtwork {
   }
 
   private static func bundledImage(for provider: ProviderID) -> NSImage? {
+    // Every account of a kind carries the kind's mark.
+    let resource = provider.kind.rawValue
     guard
       let url = Bundle.reserveResources?.url(
-        forResource: provider.rawValue,
+        forResource: resource,
         withExtension: "svg",
         subdirectory: "ProviderLogos"),
       let image = NSImage(contentsOf: url), image.isValid
     else { return nil }
     // OpenAI and xAI publish monochrome marks. Template rendering supplies the
     // surrounding label colour without changing their first-party geometry.
-    image.isTemplate = provider != .anthropic
+    image.isTemplate = !provider.isAnthropic
     return image
   }
 
   private static func fallbackImage(for provider: ProviderID) -> NSImage {
     let letter: String =
-      switch provider {
+      switch provider.kind {
       case .openAI: "O"
       case .anthropic: "A"
       case .grok: "G"

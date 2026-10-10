@@ -19,9 +19,12 @@ five-hour and seven-day windows. It stores percentages, reset times, and the
 observation time only. The receiver preserves an existing status-line command
 and forwards its original input and output within size and time limits. Turning
 the option off restores the previous setting and respects later user edits.
-This is a passive source: it updates after Claude Code responds and becomes
-stale while Claude Code is idle. It does not fall back to reading credentials
-when the passive option is selected. The documented feed is limited to supported
+This is a passive source: it updates after Claude Code responds in a terminal
+and becomes stale while Claude Code is idle; the Claude desktop app does not
+run status lines. With usage access allowed, a reading less than ten minutes
+old is used and the direct connection covers the rest. Without usage access
+the status line is the only source and credentials are never read. The
+documented feed is limited to supported
 Pro/Max accounts. [Status-line documentation](https://code.claude.com/docs/en/statusline)
 
 The direct connection remains available. Reserve retains explicit consent when
@@ -44,6 +47,56 @@ because the item was locked; the access request stays the answer there, and a
 browser sign-in is never proposed for a session Claude Code is still using.
 A rejected usage request triggers at most one renewal and one retry.
 [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+
+#### Added Claude accounts, by configuration folder
+
+Claude Code scopes its sign-in to the configuration folder named by
+`CLAUDE_CONFIG_DIR`. Launched without the variable it stores the sign-in under
+the Keychain service `Claude Code-credentials`; launched with it, it uses
+`Claude Code-credentials-` followed by the first eight hex characters of the
+SHA-256 of the exact `CLAUDE_CONFIG_DIR` string, even when that string names
+`~/.claude` (checked against Claude Code 2.1.292 with a throwaway item). The
+folder also holds that account's `.claude.json` (email, organization),
+`settings.json` and legacy `.credentials.json`.
+
+Accounts are `ProviderID` values: a kind plus, for an added account, an
+instance (`anthropic@1f3c9a2b`). The kind's default account keeps the bare
+raw value, so every setting, cache and history key written before accounts
+existed still names the same thing; added accounts derive their keys from
+their raw value. **Add Claude account** creates a folder under
+`~/.claude-accounts/<instance>` (mode 0700), stores it as the account's folder,
+and starts the connection; the folder can be changed to any absolute path,
+normalised once (tilde expanded, `.` and `..` collapsed, trailing slash
+dropped) so the same folder always hashes to the same item. Reserve passes
+that exact string as `CLAUDE_CONFIG_DIR` to every Claude Code launch for the
+account (browser sign-in and the non-interactive renewal) and derives the
+Keychain service from it, so the item Claude Code writes is the item Reserve
+reads. A folder used from a terminal must be spelled the same way. The default
+home is refused, including a symbolic link to it (folders are compared by where
+they resolve; the chosen string is still what is hashed and launched with),
+and so is a status line in a `settings.json` that resolves to the first
+account's.
+
+An added account reads only its folder: no fallback to the default home for
+the credential file, the account profile, or the Keychain item, so a personal
+and a team account that share one email address stay apart. A folder that
+resolves to another Claude account's folder is refused as well, so two cards
+never sign in over each other. The account is named after the organization in
+its folder's `.claude.json` until the person renames it; a personal account,
+whose organization is its own name, keeps a neutral "Account N" (N is never
+reused). The organization name is personal information: **Hide personal
+info** shows the neutral name everywhere, and share cards carry the neutral
+name regardless of that setting. Each account has its own rate-limit back-off, its own renewal
+cooldown, its own status-line cache (`claude-statusline-anthropic-<instance>.json`)
+installed in the folder's `settings.json`, and its own usage-access consent;
+changing the folder resets the card, its consent, its passive updates and their
+cache file, its automatic name, and the back-off and renewal cooldown earned
+by the previous sign-in. Removing an account forgets its settings and caches;
+its folder and sign-in stay on disk. Removal is refused when the account's
+status line cannot be taken out of its `settings.json`, so no hook is left
+behind for an account Reserve no longer knows.
+Nothing is read until a folder is set. Local history (activity from this Mac)
+is not scanned for added accounts yet.
 
 ### Grok
 

@@ -105,7 +105,7 @@ enum ReserveColor {
   /// Brand colour for the provider mark, adapted so it stays legible in both
   /// appearances. It belongs on the logo, not on the data.
   static func providerAccent(_ provider: ProviderID) -> NSColor {
-    switch provider {
+    switch provider.kind {
     case .openAI:
       return Self.dynamic(light: 0x10_10_0F, dark: 0xED_ED_EA)
     case .anthropic:
@@ -781,7 +781,7 @@ final class ReserveProviderLogo: ReserveSurface {
     let accent = ReserveColor.providerAccent(provider)
     super.init(fill: accent, fillAlpha: 0.14, radius: size <= 26 ? 8 : ReserveRadius.logo)
     let image = NSImageView(image: ProviderArtwork.image(for: provider))
-    image.contentTintColor = provider != .anthropic ? ReserveColor.text : nil
+    image.contentTintColor = !provider.isAnthropic ? ReserveColor.text : nil
     image.imageScaling = .scaleProportionallyUpOrDown
     // The mark repeats the row's own label, so it stays silent.
     image.setAccessibilityElement(false)

@@ -94,6 +94,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     window.toolbarStyle = .preference
     window.level = .floating
     window.hidesOnDeactivate = false
+    // Opening Settings from another Space brings the window to that Space
+    // instead of switching back to the one it was left on.
+    window.collectionBehavior.insert(.moveToActiveSpace)
     window.center()
     super.init(window: window)
     window.delegate = self
@@ -154,11 +157,31 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   required init?(coder: NSCoder) { nil }
 
+  /// Settings opens on the screen the person is working on: the one with the
+  /// pointer, which is where the menu-bar window they just used is. A window
+  /// left on another display moves over, centred, keeping its size.
+  private func moveToPresentingScreen() {
+    guard let window = self.window else { return }
+    let mouse = NSEvent.mouseLocation
+    guard let target = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
+      ?? NSScreen.main,
+      window.screen != target
+    else { return }
+    let visible = target.visibleFrame
+    var frame = window.frame
+    frame.size.width = min(frame.width, visible.width)
+    frame.size.height = min(frame.height, visible.height)
+    frame.origin.x = visible.midX - frame.width / 2
+    frame.origin.y = visible.midY - frame.height / 2
+    window.setFrame(frame, display: false)
+  }
+
   override func showWindow(_ sender: Any?) {
     // The current pane is already live. Rebuilding it on every reopen retained
     // a complete control tree until the next AppKit autorelease drain.
     if self.window?.contentView == nil { self.applyPane(animated: false) }
     self.store.insightsVisible = self.pane == .insights
+    self.moveToPresentingScreen()
     super.showWindow(sender)
     self.window?.makeKeyAndOrderFront(nil)
     self.window?.orderFrontRegardless()
@@ -375,12 +398,12 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   private func providersPane() -> NSView {
     var rows: [NSView] = []
-    for provider in ProviderID.allCases {
+    for provider in self.store.accounts {
       rows.append(self.providerRow(provider))
       if self.expandedProviders.contains(provider) {
         rows.append(self.providerDetail(provider))
       }
-      if provider != ProviderID.allCases.last {
+      if provider != self.store.accounts.last {
         rows.append(SettingsSeparator(width: SettingsLayout.contentWidth))
       }
     }
@@ -472,7 +495,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     states: [ProviderViewState], published: [(ProviderViewState, InsightHistorySeries)],
     totalText: String, activityFooter: String
   ) {
-    let states = ProviderID.allCases.compactMap { self.store.states[$0] }
+    let states = self.store.accounts.compactMap { self.store.states[$0] }
       .filter { self.store.isEnabled($0.provider) }
     let rangeDays = self.store.insightHistoryDays
     let published = states.map { state -> (ProviderViewState, InsightHistorySeries) in
@@ -522,7 +545,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   private func insightsPane() -> NSView {
-    let rows = ProviderID.allCases.filter { self.store.isEnabled($0) }.map(self.insightRow)
+    let rows = self.store.accounts.filter { self.store.isEnabled($0) }.map(self.insightRow)
     let facts = self.insightsFacts()
     let states = facts.states
     let published = facts.published
@@ -848,9 +871,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let popup = NSPopUpButton()
     popup.identifier = NSUserInterfaceItemIdentifier("menu-bar-provider")
     popup.addItems(
-      withTitles: ["Automatic"] + ProviderID.allCases.map { "Pinned: \($0.displayName)" })
+      withTitles: ["Automatic"] + self.store.accounts.map { "Pinned: \($0.displayName)" })
     let selection =
-      self.store.menuBarProvider.flatMap { ProviderID.allCases.firstIndex(of: $0) }
+      self.store.menuBarProvider.flatMap { self.store.accounts.firstIndex(of: $0) }
       .map { $0 + 1 } ?? 0
     popup.selectItem(at: selection)
     popup.target = self
@@ -940,7 +963,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
     let logo = SettingsProviderLogo(provider: provider)
     // The logo carries the brand; the name stays in the system label colour.
-    let nameLabel = SettingsLabel(provider.displayName, size: 13, weight: .medium, color: .labelColor)
+    // An added account shows its own name: the logo already says which kind.
+    let nameLabel = SettingsLabel(
+      provider.isAdded ? (self.store.accountShownLabel(for: provider) ?? provider.displayName) : provider.displayName,
+      size: 13, weight: .medium, color: .labelColor)
     nameLabel.setAccessibilityLabel(ReserveBetaBadge.accessibilityName(for: provider))
     let name: NSView
     if ProviderDescriptor.forProvider(provider).isBeta {
@@ -1031,26 +1057,36 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         "Unofficial usage endpoint · the key can call models, so use a dedicated one",
         size: 11, color: .secondaryLabelColor))
     }
-    if provider == .anthropic || provider == .cursor {
+    if provider.isAdded {
+      rows.append(self.formRow("Name:", self.accountNameControls(provider), labelWidth: 92))
+      rows.append(self.formRow("Folder:", self.configDirectoryControls(provider), labelWidth: 92))
+      rows.append(SettingsLabel(
+        "Claude Code keeps one sign-in per folder · the same email on several accounts is fine",
+        size: 11, color: .secondaryLabelColor))
+    }
+    if provider.isAnthropic || provider == .cursor {
       let checkbox = NSButton(
         checkboxWithTitle: "Allow access to my \(provider.displayName) usage",
         target: self, action: #selector(self.keychainChanged(_:)))
       checkbox.identifier = NSUserInterfaceItemIdentifier(
         "settings-keychain-\(provider.rawValue)")
       checkbox.state = self.store.keychainReadAllowed(for: provider) ? .on : .off
-      checkbox.isEnabled = provider != .anthropic || !self.store.claudePassiveUpdatesEnabled
       checkbox.toolTip =
         "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
       rows.append(self.formRow("\(provider.displayName):", checkbox, labelWidth: 92))
     }
-    if provider == .anthropic {
-      let passive = NSButton(checkboxWithTitle: "Get updates from Claude Code", target: self,
+    if provider.isAnthropic {
+      let passive = NSButton(checkboxWithTitle: "Also use Claude Code's status line in Terminal", target: self,
         action: #selector(self.claudePassiveUpdatesChanged(_:)))
-      passive.state = self.store.claudePassiveUpdatesEnabled ? .on : .off
-      passive.identifier = NSUserInterfaceItemIdentifier("settings-claude-passive")
-      passive.toolTip = "Shares limits after Claude Code responds, without reading your sign-in. Preserves your existing status line. Updates pause when you are not using Claude Code."
+      passive.state = self.store.claudePassiveUpdatesEnabled(for: provider) ? .on : .off
+      passive.identifier = NSUserInterfaceItemIdentifier(Self.passiveUpdatesIdentifier(provider))
+      // The status line is installed in the account's own folder, so it
+      // waits for that folder to be chosen.
+      passive.isEnabled = !provider.isAdded || self.store.claudeConfigDirectory(for: provider) != nil
+      passive.toolTip = "Claude Code in a terminal shares your limits after each response, which updates Reserve right away. Your existing status line is kept. The Claude desktop app does not send these updates."
       rows.append(self.formRow("Updates:", passive, labelWidth: 92))
-      rows.append(SettingsLabel("Updates after Claude Code responds. No sign-in access needed.",
+      rows.append(SettingsLabel(
+        "Faster updates while you use Claude Code in Terminal. Not sent by the desktop app.",
         size: 11, color: .secondaryLabelColor))
     }
     if let setupAction = AllowanceBuilder.setupAction(
@@ -1064,6 +1100,23 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       setup.bezelStyle = .rounded
       setup.toolTip = setupAction.toolTip(for: provider)
       rows.append(self.formRow("", setup, labelWidth: 92))
+    }
+    if provider.isDefault, provider.kind.supportsAddedAccounts {
+      let add = NSButton(
+        title: "Add \(provider.displayName) account", target: self,
+        action: #selector(self.addAccountClicked(_:)))
+      add.identifier = NSUserInterfaceItemIdentifier("provider-add-account-\(provider.rawValue)")
+      add.bezelStyle = .rounded
+      add.toolTip = "Track another \(provider.displayName) subscription beside this one. Reserve gives it a folder of its own and signs it in there, so this account stays untouched."
+      rows.append(self.formRow("", add, labelWidth: 92))
+    }
+    if provider.isAdded {
+      let remove = NSButton(
+        title: "Remove account", target: self, action: #selector(self.removeAccountClicked(_:)))
+      remove.identifier = NSUserInterfaceItemIdentifier("provider-remove-account-\(provider.rawValue)")
+      remove.bezelStyle = .rounded
+      remove.toolTip = "Stops tracking this account and forgets its settings. Its folder and sign-in stay on disk."
+      rows.append(self.formRow("", remove, labelWidth: 92))
     }
     // A key-connected plan disconnects by removing its key, next to the field.
     if !ProviderDescriptor.forProvider(provider).usesAPIKey,
@@ -1331,6 +1384,196 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     row.alignment = .centerY
     row.spacing = 8
     return row
+  }
+
+  /// The first slot keeps the identifier its self-tests and existing users know.
+  private static func passiveUpdatesIdentifier(_ provider: ProviderID) -> String {
+    provider == .anthropic ? "settings-claude-passive" : "settings-claude-passive-\(provider.rawValue)"
+  }
+
+  /// A plain path field with a Finder chooser beside it. The value is a folder
+  /// path, never a secret, so it stays visible and editable.
+  private func configDirectoryControls(_ provider: ProviderID) -> NSView {
+    let field = NSTextField()
+    field.identifier = NSUserInterfaceItemIdentifier("config-dir-\(provider.rawValue)")
+    field.stringValue = self.store.claudeConfigDirectory(for: provider)?.path ?? ""
+    field.placeholderString = "~/.claude-team"
+    field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    field.isBezeled = true
+    field.bezelStyle = .roundedBezel
+    field.lineBreakMode = .byTruncatingTail
+    field.cell?.wraps = false
+    field.cell?.isScrollable = true
+    field.maximumNumberOfLines = 1
+    field.target = self
+    field.delegate = self
+    field.action = #selector(self.configDirectorySubmitted(_:))
+    field.toolTip = "The folder Claude Code uses for this account (its CLAUDE_CONFIG_DIR). Return saves it."
+    field.setAccessibilityLabel("\(provider.displayName) configuration folder")
+    field.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let choose = self.apiRowButton(
+      title: "Choose…",
+      identifier: "config-dir-choose-\(provider.rawValue)",
+      action: #selector(self.chooseConfigDirectoryClicked(_:)), tag: 0,
+      toolTip: "Pick the folder in Finder. A new folder is filled in by Claude Code at sign-in.",
+      accessibility: "Choose the \(provider.displayName) configuration folder")
+    choose.setContentHuggingPriority(.required, for: .horizontal)
+    choose.setContentCompressionResistancePriority(.required, for: .horizontal)
+    let row = NSStackView(views: [field, choose])
+    row.orientation = .horizontal
+    row.alignment = .centerY
+    row.spacing = 8
+    return row
+  }
+
+  private func configDirectoryProvider(for sender: NSControl) -> ProviderID? {
+    guard let raw = sender.identifier?.rawValue else { return nil }
+    for prefix in ["config-dir-choose-", "config-dir-"] where raw.hasPrefix(prefix) {
+      let provider = ProviderID(rawValue: String(raw.dropFirst(prefix.count)))
+      return provider.flatMap { $0.isAdded && $0.isAnthropic ? $0 : nil }
+    }
+    return nil
+  }
+
+  /// The person's own name for an added account. Return or leaving the field
+  /// saves it; an empty name goes back to the automatic one.
+  private func accountNameControls(_ provider: ProviderID) -> NSView {
+    let field = NSTextField()
+    field.identifier = NSUserInterfaceItemIdentifier("account-name-\(provider.rawValue)")
+    field.stringValue = self.store.accountShownLabel(for: provider) ?? ""
+    field.placeholderString = "Team, personal, client…"
+    field.isBezeled = true
+    field.bezelStyle = .roundedBezel
+    field.lineBreakMode = .byTruncatingTail
+    field.cell?.wraps = false
+    field.cell?.isScrollable = true
+    field.maximumNumberOfLines = 1
+    field.target = self
+    field.delegate = self
+    field.action = #selector(self.accountNameSubmitted(_:))
+    field.toolTip = "Your name for this account, shown everywhere in Reserve. Leave empty to use its organization. Hide personal info masks only the automatic name."
+    field.setAccessibilityLabel("\(provider.kind.displayName) account name")
+    field.widthAnchor.constraint(equalToConstant: 220).isActive = true
+    return field
+  }
+
+  private func accountNameProvider(for sender: NSControl) -> ProviderID? {
+    guard let raw = sender.identifier?.rawValue, raw.hasPrefix("account-name-") else { return nil }
+    return ProviderID(rawValue: String(raw.dropFirst("account-name-".count))).flatMap { $0.isAdded ? $0 : nil }
+  }
+
+  @objc private func accountNameSubmitted(_ sender: NSControl) {
+    guard let provider = self.accountNameProvider(for: sender), let field = sender as? NSTextField
+    else { return }
+    self.store.setAccountLabel(field.stringValue, for: provider)
+    field.stringValue = self.store.accountShownLabel(for: provider) ?? ""
+    self.uiRefresh.coalesce { [weak self] in self?.applyLiveUpdate() }
+  }
+
+  @objc private func addAccountClicked(_ sender: NSButton) {
+    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(of: "provider-add-account-", with: "")
+    guard let provider = ProviderID(rawValue: raw), provider.kind.supportsAddedAccounts else { return }
+    do {
+      let account = try self.store.addClaudeAccount()
+      self.expandedProviders.insert(account)
+      self.rememberScrollOffset()
+      self.applyPane(animated: false)
+      self.setupProvider(account)
+    } catch {
+      let alert = NSAlert()
+      alert.messageText = "The account could not be added"
+      alert.informativeText = error.localizedDescription
+      alert.addButton(withTitle: "OK")
+      if let window = self.window, window.isVisible {
+        alert.beginSheetModal(for: window, completionHandler: nil)
+      } else {
+        alert.runModal()
+      }
+    }
+  }
+
+  @objc private func removeAccountClicked(_ sender: NSButton) {
+    let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(of: "provider-remove-account-", with: "")
+    guard let provider = ProviderID(rawValue: raw), provider.isAdded else { return }
+    let alert = NSAlert()
+    alert.messageText = "Remove \(provider.displayName) from Reserve?"
+    alert.informativeText = "Reserve stops tracking it and forgets its settings. The account's folder and its Claude Code sign-in stay on this Mac."
+    alert.addButton(withTitle: "Remove")
+    alert.addButton(withTitle: "Cancel")
+    let remove = { [weak self] in
+      guard let self else { return }
+      do {
+        try self.store.removeAccount(provider)
+        self.expandedProviders.remove(provider)
+        self.rememberScrollOffset()
+        self.applyPane(animated: false)
+      } catch {
+        let failure = NSAlert()
+        failure.messageText = "The account could not be removed"
+        failure.informativeText = error.localizedDescription
+        failure.addButton(withTitle: "OK")
+        if let window = self.window, window.isVisible {
+          failure.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+          failure.runModal()
+        }
+      }
+    }
+    if let window = self.window, window.isVisible {
+      alert.beginSheetModal(for: window) { response in
+        if response == .alertFirstButtonReturn { remove() }
+      }
+    } else if alert.runModal() == .alertFirstButtonReturn {
+      remove()
+    }
+  }
+
+  private func textField(identifier: String) -> NSTextField? {
+    self.window?.contentView.flatMap { view in
+      Self.descendants(of: view).compactMap { $0 as? NSTextField }.first {
+        $0.identifier?.rawValue == identifier
+      }
+    }
+  }
+
+  @objc private func configDirectorySubmitted(_ sender: NSControl) {
+    guard let provider = self.configDirectoryProvider(for: sender),
+      let field = sender as? NSTextField
+    else { return }
+    self.saveConfigDirectory(field.stringValue, for: provider)
+  }
+
+  @objc private func chooseConfigDirectoryClicked(_ sender: NSButton) {
+    guard let provider = self.configDirectoryProvider(for: sender) else { return }
+    ClaudeConfigDirectoryPicker.choose(
+      current: self.store.claudeConfigDirectory(for: provider), from: self.window
+    ) { [weak self] url in
+      guard let self, let url else { return }
+      self.saveConfigDirectory(url.path, for: provider)
+    }
+  }
+
+  private func saveConfigDirectory(_ value: String, for provider: ProviderID) {
+    let field = self.textField(identifier: "config-dir-\(provider.rawValue)")
+    do {
+      let directory = try self.store.setClaudeConfigDirectory(value, for: provider)
+      field?.stringValue = directory?.path ?? ""
+      // The folder is part of the control structure, so the live update
+      // rebuilds the card once AppKit has released the field editor.
+      self.uiRefresh.coalesce { [weak self] in self?.applyLiveUpdate() }
+    } catch {
+      field?.stringValue = self.store.claudeConfigDirectory(for: provider)?.path ?? ""
+      let alert = NSAlert()
+      alert.messageText = "That folder cannot be used"
+      alert.informativeText = error.localizedDescription
+      alert.addButton(withTitle: "OK")
+      if let window = self.window, window.isVisible {
+        alert.beginSheetModal(for: window, completionHandler: nil)
+      } else {
+        alert.runModal()
+      }
+    }
   }
 
   private func planKeyProvider(for sender: NSControl) -> ProviderID? {
@@ -1913,9 +2156,14 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func claudePassiveUpdatesChanged(_ sender: NSButton) {
-    do { try self.store.setClaudePassiveUpdatesEnabled(sender.state == .on) }
+    let raw = sender.identifier?.rawValue ?? ""
+    let provider = raw == "settings-claude-passive"
+      ? ProviderID.anthropic
+      : ProviderID(rawValue: raw.replacingOccurrences(of: "settings-claude-passive-", with: ""))
+        ?? .anthropic
+    do { try self.store.setClaudePassiveUpdatesEnabled(sender.state == .on, for: provider) }
     catch {
-      sender.state = self.store.claudePassiveUpdatesEnabled ? .on : .off
+      sender.state = self.store.claudePassiveUpdatesEnabled(for: provider) ? .on : .off
       let alert = NSAlert()
       alert.messageText = "Claude updates could not be changed"
       alert.informativeText = error.localizedDescription
@@ -2041,7 +2289,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let raw = (sender.identifier?.rawValue ?? "").replacingOccurrences(
       of: "settings-keychain-", with: "")
     guard let provider = ProviderID(rawValue: raw),
-      provider == .anthropic || provider == .cursor
+      provider.isAnthropic || provider == .cursor
     else { return }
     if sender.state == .on {
       sender.state = .off
@@ -2101,8 +2349,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   @objc private func menuBarProviderChanged(_ sender: NSPopUpButton) {
     let providerIndex = sender.indexOfSelectedItem - 1
     self.store.menuBarProvider =
-      ProviderID.allCases.indices.contains(providerIndex)
-      ? ProviderID.allCases[providerIndex] : nil
+      self.store.accounts.indices.contains(providerIndex)
+      ? self.store.accounts[providerIndex] : nil
     self.applyPane(animated: false)
   }
 
@@ -2174,6 +2422,10 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.subscriptionCostChanged(field)
     } else if identifier.hasPrefix("renewal.") {
       self.renewalDayChanged(field)
+    } else if identifier.hasPrefix("config-dir-") {
+      self.configDirectorySubmitted(field)
+    } else if identifier.hasPrefix("account-name-") {
+      self.accountNameSubmitted(field)
     }
     // AppKit still owns the field editor while delivering this notification.
     // Apply deferred changes on the next turn, after it releases that editor.
@@ -2251,6 +2503,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
     // Setup and permission states are next steps, not capacity risk, so they
     // use the accent rather than the warning colour.
+    if state?.requiresConfigDirectory == true { return ("Folder needed", ReserveColor.accent) }
     if state?.requiresKeychainAccess == true { return ("Permission needed", ReserveColor.accent) }
     if state?.usageAccessDenied == true { return ("Usage access denied", ReserveColor.accent) }
     if state?.isConnecting == true { return ("Connecting", .secondaryLabelColor) }
@@ -2298,10 +2551,13 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       self.pane.rawValue,
       ReserveAppearance.current.rawValue,
       ReserveAppearance.resolvedAppearance.name.rawValue,
+      // Account names appear in row titles and the menu-bar pin popup, and
+      // an added account's name can change under them.
+      self.store.accounts.map(\.displayName).joined(separator: ","),
     ]
     switch self.pane {
     case .providers:
-      for provider in ProviderID.allCases {
+      for provider in self.store.accounts {
         let enabled = self.store.isEnabled(provider)
         let state = self.store.states[provider] ?? ProviderViewState(provider: provider)
         let setup = AllowanceBuilder.setupAction(for: state)
@@ -2312,10 +2568,15 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           let reportedRenewal = state.snapshot?.billingRenewsAt != nil
           let planKey = ProviderDescriptor.forProvider(provider).usesAPIKey
           let savedKey = planKey ? String(describing: self.store.planKeyAvailability(for: provider)) : "-"
+          // An added account's folder decides which controls are live (its
+          // passive-updates checkbox waits for one).
+          let folder = provider.isAdded
+            ? (self.store.claudeConfigDirectory(for: provider) != nil ? "folder" : "no-folder") : "-"
           detail = [
             reportedRenewal ? "reported" : "manual",
             planKey ? "key" : "-",
             savedKey,
+            folder,
             setup?.buttonTitle ?? "-",
           ].joined(separator: ",")
         }
@@ -2327,7 +2588,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         parts.append("\(provider.rawValue):\(self.store.apiConsumptionKeyAvailability(provider))")
       }
     case .insights:
-      let enabled = ProviderID.allCases.filter { self.store.isEnabled($0) }
+      let enabled = self.store.accounts.filter { self.store.isEnabled($0) }
       parts.append(enabled.map(\.rawValue).joined(separator: ","))
       parts.append(String(self.store.insightHistoryDays))
       let keys = Set(InsightHistoryRange.dayKeys(count: self.store.insightHistoryDays, now: Date()))
@@ -2371,7 +2632,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     }
     switch self.pane {
     case .providers:
-      for provider in ProviderID.allCases {
+      for provider in self.store.accounts {
         let status = self.providerStatus(provider)
         setText(
           "settings-plan-\(provider.rawValue)",
@@ -2386,9 +2647,8 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
           self.store.monthlySubscriptionCost(for: provider).map { String(format: "%.0f", $0) } ?? "")
         setText("renewal.\(provider.rawValue)", self.store.renewalDay(for: provider).map(String.init) ?? "")
         check("settings-keychain-\(provider.rawValue)", self.store.keychainReadAllowed(for: provider))
-        if provider == .anthropic {
-          check("settings-claude-passive", self.store.claudePassiveUpdatesEnabled)
-          button("settings-keychain-anthropic")?.isEnabled = !self.store.claudePassiveUpdatesEnabled
+        if provider.isAnthropic {
+          check(Self.passiveUpdatesIdentifier(provider), self.store.claudePassiveUpdatesEnabled(for: provider))
         }
         if let button = views.compactMap({ $0 as? NSButton }).first(where: {
           $0.identifier?.rawValue == provider.rawValue
@@ -2425,7 +2685,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       check("menu-bar-reset", self.store.menuBarShowsReset)
       select("settings-refresh-interval", Self.refreshIntervalMinutes.firstIndex(of: self.store.refreshIntervalMinutes) ?? 0)
       select("settings-dashboard-hotkey", DashboardHotKeyChoice.allCases.firstIndex(of: self.store.dashboardHotKey) ?? 0)
-      select("menu-bar-provider", self.store.menuBarProvider.flatMap { ProviderID.allCases.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+      select("menu-bar-provider", self.store.menuBarProvider.flatMap { self.store.accounts.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
       setText("settings-hotkey-status", self.hotKeyStatusText())
       if let preview = views.first(where: { $0.identifier?.rawValue == "menu-bar-preview" })
         as? MenuBarPreview
@@ -2730,7 +2990,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     self.pane = .providers
     self.applyPane(animated: false)
     let providerIDs = identifiers()
-    let providerRowsPresent = ProviderID.allCases.allSatisfy {
+    let providerRowsPresent = self.store.accounts.allSatisfy {
       providerIDs.contains("settings-provider-\($0.rawValue)")
         && providerIDs.contains("provider-disclose-\($0.rawValue)")
     }
@@ -2894,7 +3154,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     let insightIDs = identifiers()
     let insightLabels = descendants().compactMap { ($0 as? NSTextField)?.stringValue }
     let insightsSuccess =
-      ProviderID.allCases.allSatisfy { insightIDs.contains("insight-\($0.rawValue)") }
+      self.store.accounts.allSatisfy { insightIDs.contains("insight-\($0.rawValue)") }
       && insightIDs.contains("insights-total")
       && Self.insightsTotalFits(window: window)
       && insightIDs.contains("insights-history-range")
@@ -3351,7 +3611,7 @@ private final class SettingsProviderLogo: NSView {
   }
 
   convenience init(provider: ProviderID) {
-    self.init(image: ProviderArtwork.image(for: provider), tinted: provider != .anthropic)
+    self.init(image: ProviderArtwork.image(for: provider), tinted: !provider.isAnthropic)
   }
 
   private init(image source: NSImage, tinted: Bool) {

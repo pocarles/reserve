@@ -40,7 +40,7 @@ public struct ProviderDescriptor: Sendable {
   public let statusURL: URL?
   public let statusFeedURL: URL?
   public let statusFormat: StatusFormat
-  public let capabilities: Capabilities
+  public private(set) var capabilities: Capabilities
   public let authenticationStrategy: AuthenticationStrategy
   public let installationStrategy: InstallationStrategy
   public let loginArguments: [String]
@@ -65,8 +65,18 @@ public struct ProviderDescriptor: Sendable {
   }
   public var usesAPIKey: Bool { self.authenticationStrategy == .apiKey }
 
+  /// Every account of a kind shares the kind's descriptor. An added account's
+  /// session transcripts are not scanned yet, so it reports no local history
+  /// rather than waiting for activity that never arrives.
   public static func forProvider(_ id: ProviderID) -> Self {
-    switch id {
+    var descriptor = self.forKind(id.kind)
+    if id.isAdded { descriptor.capabilities.remove(.localHistory) }
+    return descriptor
+  }
+
+  public static func forKind(_ kind: ProviderKind) -> Self {
+    let id = ProviderID(kind: kind)
+    return switch kind {
     case .openAI:
       Self(id: id, displayName: "OpenAI", executable: "codex", helperName: "Codex helper",
         installer: "https://chatgpt.com/codex/install.sh", account: "https://chatgpt.com/codex/settings/usage",

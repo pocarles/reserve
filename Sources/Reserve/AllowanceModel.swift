@@ -158,10 +158,13 @@ enum ProviderSetupAction: String, Equatable {
   case allowAccess
   /// Key-connected plans (Z.ai, Kimi) connect by pasting an API key.
   case addKey
+  /// An added Claude account first needs its Claude Code configuration folder.
+  case chooseFolder
 
   var buttonTitle: String {
     switch self {
     case .addKey: "Add key"
+    case .chooseFolder: "Choose folder"
     case .install: "Set up"
     case .update: "Update"
     case .signIn: "Sign in"
@@ -176,6 +179,7 @@ enum ProviderSetupAction: String, Equatable {
     case .signIn: "Sign in to \(provider.displayName) to show plan limits"
     case .allowAccess: "Waiting for permission to read usage"
     case .addKey: "Add a \(provider.displayName) API key to show plan limits"
+    case .chooseFolder: "Choose this account's Claude Code folder to show plan limits"
     }
   }
 
@@ -203,6 +207,8 @@ enum ProviderSetupAction: String, Equatable {
       "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
     case .addKey:
       "Paste a \(provider.displayName) API key. Reserve keeps it in the macOS Keychain."
+    case .chooseFolder:
+      "Pick the Claude Code configuration folder this account signs in with, such as ~/.claude-team"
     }
   }
 }
@@ -356,6 +362,7 @@ enum AllowanceBuilder {
       return .addKey
     }
     // Same order as the Connect window: a missing helper cannot be updated.
+    if state.requiresConfigDirectory { return .chooseFolder }
     if state.requiresKeychainAccess { return .allowAccess }
     if state.requiresInstallation { return .install }
     if state.requiresUpdate { return .update }

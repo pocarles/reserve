@@ -412,10 +412,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let labels = descendants.compactMap { ($0 as? NSTextField)?.stringValue }
     let dashboardTypographyIsReadable = descendants.compactMap { ($0 as? NSTextField)?.font }
       .allSatisfy { $0.pointSize >= 8 }
-    let providerTiles = ProviderID.allCases.filter {
+    let providerTiles = self.store.accounts.filter {
       identifiers.contains("provider-tile-\($0.rawValue)")
     }.count
-    let providerCards = ProviderID.allCases.filter {
+    let providerCards = self.store.accounts.filter {
       identifiers.contains("provider-card-\($0.rawValue)")
     }.count
     let actionsPresent =
@@ -428,10 +428,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       descendants.compactMap { $0 as? DashboardMenuButton }.first.map {
         $0.makeMenu().items.contains { $0.title == "Quit Reserve" }
       } ?? false
-    let logosPresent = ProviderID.allCases.allSatisfy {
+    let logosPresent = self.store.accounts.allSatisfy {
       identifiers.contains("provider-logo-\($0.rawValue)")
     }
-    let bundledProviderArtworkPresent = ProviderID.allCases.allSatisfy {
+    let bundledProviderArtworkPresent = self.store.accounts.allSatisfy {
       // Copilot uses a system symbol; Z.ai, Kimi and Gemini use a neutral initial.
       if [.copilot, .zai, .kimi, .gemini].contains($0) {
         let image = ProviderArtwork.image(for: $0)
@@ -629,7 +629,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     // Keyboard: overview tiles take focus and both Space and Return navigate.
     let keyboardReachable =
-      descendants.compactMap { $0 as? ProviderOverviewTile }.count == ProviderID.allCases.count
+      descendants.compactMap { $0 as? ProviderOverviewTile }.count == self.store.accounts.count
       && descendants.compactMap { $0 as? ProviderOverviewTile }.allSatisfy {
         $0.acceptsFirstResponder && $0.canBecomeKeyView
       }
@@ -664,7 +664,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     let liveDescendants = Self.descendants(of: dashboardController.view)
     let spokenRows = liveDescendants.compactMap { $0 as? ProviderOverviewTile }
     let rowsAreSpoken =
-      spokenRows.count == ProviderID.allCases.count
+      spokenRows.count == self.store.accounts.count
       && spokenRows.allSatisfy { row in
         let summary = previewSummaries.first {
           row.identifier?.rawValue == "provider-tile-\($0.provider.rawValue)"
@@ -734,7 +734,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // present, and the old per-row accordion controls are gone.
     let overviewNavigationPresent =
       identifiers.contains("provider-overview")
-      && providerTiles == ProviderID.allCases.count
+      && providerTiles == self.store.accounts.count
       && providerCards == 1
       && !identifiers.contains { $0.hasPrefix("disclose-") }
     let originalExpansion = self.store.expandedProvider
@@ -898,7 +898,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
       return titles.contains("Share usage…") && titles.contains("Hide personal info")
         && actionableItemsHaveIcons
     } ?? false
-    guard providerTiles == ProviderID.allCases.count, providerCards == 1,
+    guard providerTiles == self.store.accounts.count, providerCards == 1,
       actionsPresent, quitRemainsReachable,
       logosPresent, bundledProviderArtworkPresent, scrollingMatchesAvailableSpace, contentFits,
       dashboardFits, fifthProviderReachable, headlinePresent,
@@ -927,7 +927,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     else {
       return (
         false,
-        "dashboard fifthProviderReachable=\(fifthProviderReachable), tiles=\(providerTiles)/\(ProviderID.allCases.count), detailCards=\(providerCards), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), overviewNavigation=\(overviewNavigationPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(descendants.filter { ($0.identifier?.rawValue ?? "").hasPrefix("secondary-") }.count)/\(expectedSecondaryWindows), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), explicitPin=\(explicitMenuBarSelectionWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork), expandRequestsDetails=\(expandRequestsDetails), selectionPersists=\(dashboardSelectionPersists), historyPlaceholders=\(historyPlaceholdersAreHonest), apiDetails=\(apiDetailsOpen), hotKey=\(hotKeyOpensDashboard), sharePrivate=\(shareCardStaysPrivate), privacyToggle=\(privacyToggleRestores), menuShare=\(menuOffersShareAndPrivacy)"
+        "dashboard fifthProviderReachable=\(fifthProviderReachable), tiles=\(providerTiles)/\(self.store.accounts.count), detailCards=\(providerCards), actions=\(actionsPresent), quitReachable=\(quitRemainsReachable), logos=\(logosPresent), bundledArtwork=\(bundledProviderArtworkPresent), scroll=\(hasScrollView), adaptiveScroll=\(scrollingMatchesAvailableSpace), fits=\(contentFits), size=\(dashboardFits) (\(Int(size.width))×\(Int(size.height))), headline=\(headlinePresent), activityGone=\(activityMetricsAreGone), labelledPercentages=\(percentagesAreLabelled), forecasts=\(forecastsPresent) (\(forecastCount)/\(allowanceCount)), forecastRenewalGap=\(deficitForecastUsesRenewalGap), exhaustionTruth=\(exhaustionAndMissingForecastAreTruthful), clockDisclosure=\(clockAndDisclosureUpdatesWork), primaryNonShare=\(primaryWindowIgnoresComponentShares), urgentPrimary=\(urgentWindowBecomesPrimary), compactMoney=\(compactMoneyKeepsCurrency), localizedTime=\(localizedTimeUsesRegionalClock), overviewNavigation=\(overviewNavigationPresent), detailLayers=\(detailLayersPresent), keyboard=\(keyboardReachable), space=\(spaceSelectsProvider), return=\(returnOpensDetail), spokenRows=\(rowsAreSpoken), silentDecoration=\(decorationIsSilent), spokenMeters=\(metersAreSpoken), meterSemantics=\(meterSemanticsWork), chartScale=\(chartScaleWorks), motion=\(motionIsPurposeful), staleFreshness=\(staleFreshnessIsVisible), freshUnknown=\(freshWithoutForecastDoesNotLookStale), statusExceptionOnly=\(serviceStatusIsExceptionOnly), secondary=\(descendants.filter { ($0.identifier?.rawValue ?? "").hasPrefix("secondary-") }.count)/\(expectedSecondaryWindows), quietSelection=\(selectionIsQuiet), providerStatus=\(providerStatusWorks), explicitPin=\(explicitMenuBarSelectionWorks), directSelection=\(directProviderSelectionWorks), fullCardHitTarget=\(fullCardSelectionHitTargetWorks), firstClick=\(firstClickSelectionWorks), footerPadding=\(footerButtonsArePadded), providerPadding=\(providerButtonsArePadded), refreshPadding=\(refreshButtonIsPadded), readableType=\(dashboardTypographyIsReadable), oauthURL=\(oauthURLParsingIsSafe), outsideDismissal=\(outsideClickDismissalWorks), updateMigration=\(updateMigrationWorks), scheduledRefresh=\(scheduledRefreshWorks), automatic=\(automaticSourceWorks), pinned=\(pinnedModelWorks), aggregate=\(aggregateCopyWorks), semanticColors=\(semanticColorsWork), minuteClock=\(minuteClockIsCoordinated), resumeRefresh=\(resumeRefreshDecisionsWork), expandRequestsDetails=\(expandRequestsDetails), selectionPersists=\(dashboardSelectionPersists), historyPlaceholders=\(historyPlaceholdersAreHonest), apiDetails=\(apiDetailsOpen), hotKey=\(hotKeyOpensDashboard), sharePrivate=\(shareCardStaysPrivate), privacyToggle=\(privacyToggleRestores), menuShare=\(menuOffersShareAndPrivacy)"
       )
     }
     return (
@@ -1443,7 +1443,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
   /// Opens the sanitized card for the selected provider. The model never
   /// includes account, organization, email, path, or raw error text.
   private func shareSelectedUsage() {
-    let provider = self.store.expandedProvider ?? ProviderID.allCases.first { self.store.isEnabled($0) }
+    let provider = self.store.expandedProvider ?? self.store.accounts.first { self.store.isEnabled($0) }
     guard let provider, let state = self.store.states[provider] else { return }
     let usage = state.snapshot?.accountUsage ?? state.localUsage
     let model = UsageShareCardBuilder.model(

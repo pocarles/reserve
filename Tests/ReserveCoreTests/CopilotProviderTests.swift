@@ -211,7 +211,7 @@ import Testing
 
 @Suite struct ProviderDescriptorTests {
   @Test func everyProviderHasOneCompleteDescriptor() {
-    for provider in ProviderID.allCases {
+    for provider in ProviderID.defaults {
       let descriptor = ProviderDescriptor.forProvider(provider)
       #expect(descriptor.id == provider)
       #expect(!descriptor.displayName.isEmpty)

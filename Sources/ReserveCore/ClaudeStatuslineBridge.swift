@@ -10,9 +10,14 @@ public enum ClaudeStatuslineBridge {
   // The receiver is a short-lived command, so one utility worker is sufficient.
   private static let receiverQueue = DispatchQueue(label: "com.pocarles.reserve.statusline", qos: .utility)
 
-  public static func cacheURL(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
-    FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent("Library/Application Support/Reserve/claude-statusline.json")
+  /// One cache per Claude account. The default account keeps its original
+  /// file name, so an existing passive connection carries on after an update.
+  public static func cacheURL(provider: ProviderID = .anthropic) -> URL {
+    let name = provider.isDefault
+      ? "claude-statusline.json"
+      : "claude-statusline-\(provider.kind.rawValue)-\(provider.instance ?? "").json"
+    return FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Application Support/Reserve/\(name)")
   }
 
   public static func settingsURL(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
@@ -33,7 +38,9 @@ public enum ClaudeStatuslineBridge {
     return true
   }
 
-  public static func read(cacheURL: URL, now: Date = Date()) -> UsageSnapshot? {
+  public static func read(
+    cacheURL: URL, provider: ProviderID = .anthropic, now: Date = Date()
+  ) -> UsageSnapshot? {
     guard let data = BoundedFileReader.read(cacheURL, maximumBytes: 8_192),
       let record = try? JSONDecoder().decode(Record.self, from: data),
       record.observedAt <= now.addingTimeInterval(60),
@@ -41,7 +48,7 @@ public enum ClaudeStatuslineBridge {
     else { return nil }
     let windows = record.windows.filter { ($0.resetsAt ?? .distantPast) > now }
     guard !windows.isEmpty else { return nil }
-    return UsageSnapshot(provider: .anthropic, windows: windows, fetchedAt: record.observedAt,
+    return UsageSnapshot(provider: provider, windows: windows, fetchedAt: record.observedAt,
       source: "Claude Code status line", checkedAt: now)
   }
 

@@ -175,7 +175,7 @@ public enum UsageShareCardBuilder {
     let period = tokenPeriodDays.flatMap { $0 > 0 ? "last \($0) days" : nil } ?? "recorded period"
     let estimate = estimatedAPIEquivalentUSD.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
     return UsageShareModel(
-      providerName: provider.displayName,
+      providerName: provider.neutralDisplayName,
       planName: safePlan,
       windows: shareWindows,
       tokensUsed: tokens,

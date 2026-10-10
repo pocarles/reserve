@@ -216,7 +216,7 @@ enum LifecycleSelfTest {
       result.failures.append("popover window was not created")
       return result
     }
-    let enabled = ProviderID.allCases.filter { store.isEnabled($0) }
+    let enabled = store.accounts.filter { store.isEnabled($0) }
     let originalSelection = store.expandedProvider
     defer { store.expandedProvider = originalSelection }
 
@@ -324,7 +324,7 @@ enum LifecycleSelfTest {
       store.menuBarShowsRemaining = originalRemaining
       store.expandedProvider = originalSelection
     }
-    guard let target = ProviderID.allCases.first(where: {
+    guard let target = store.accounts.first(where: {
       store.isEnabled($0) && $0 != originalProvider
     }) else {
       result.failures.append("no alternate provider was available for the anchor check")
@@ -368,7 +368,7 @@ enum LifecycleSelfTest {
     toggle: (ProviderID) -> Void
   ) -> Result {
     var result = Result()
-    let enabled = ProviderID.allCases.filter { store.isEnabled($0) }
+    let enabled = store.accounts.filter { store.isEnabled($0) }
     guard let window = controller.dashboardWindowForTesting,
       let first = enabled.first,
       let second = enabled.first(where: { $0 != first })
@@ -413,7 +413,7 @@ enum LifecycleSelfTest {
       return result
     }
     let original = Dictionary(
-      uniqueKeysWithValues: ProviderID.allCases.map { ($0, store.isEnabled($0)) })
+      uniqueKeysWithValues: store.accounts.map { ($0, store.isEnabled($0)) })
     let originalSelection = store.expandedProvider
     defer {
       for (provider, value) in original {
@@ -422,12 +422,12 @@ enum LifecycleSelfTest {
       store.expandedProvider = originalSelection
     }
 
-    for target in ProviderID.allCases {
+    for target in store.accounts {
       store.setEnabled(target, enabled: false)
       self.settle()
       let present = Set(self.visibleTiles(in: window).map(self.providerIdentifier))
       let expected = Set(
-        ProviderID.allCases.filter { store.isEnabled($0) }.map {
+        store.accounts.filter { store.isEnabled($0) }.map {
           "provider-tile-\($0.rawValue)"
         })
       result.expect(
@@ -767,7 +767,7 @@ enum LifecycleSelfTest {
     result.expect((view("settings-refresh-interval") as? NSPopUpButton)?.indexOfSelectedItem == 4,
       "Settings refresh interval kept an old selection")
     result.expect((view("menu-bar-provider") as? NSPopUpButton)?.indexOfSelectedItem
-      == (ProviderID.allCases.firstIndex(of: .grok) ?? -1) + 1,
+      == (store.accounts.firstIndex(of: .grok) ?? -1) + 1,
       "Settings pin selection kept an old provider")
 
     let day = InsightHistoryRange.dayKeys(count: 1, now: Date())[0]

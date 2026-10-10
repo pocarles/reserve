@@ -7,7 +7,13 @@ import Foundation
 
 public struct AnthropicProvider: UsageProvider {
   public static let maximumRetryDelay: TimeInterval = 24 * 60 * 60
-  public let id: ProviderID = .anthropic
+  public let id: ProviderID
+  /// An added Claude account reads one configuration directory and nothing
+  /// else: that directory's own Keychain item and files, with no fallback to
+  /// the default home, so it can never show the default account. Nil on the
+  /// default account, which keeps Claude Code's default home.
+  private let configDirectory: ClaudeConfigDirectory?
+  private let keychainService: String
   private let environment: [String: String]
   private let allowKeychainRead: Bool
   private let allowKeychainInteraction: Bool
@@ -17,10 +23,15 @@ public struct AnthropicProvider: UsageProvider {
   private let renewer: ClaudeSessionRenewalHook
   private let ineffectiveRenewal: ClaudeIneffectiveRenewalHook
   private let keychainCandidateLoader: ClaudeKeychainCandidateLoader?
+  /// Test seam for the no-prompt Keychain probe, so a test never reaches the
+  /// real Keychain even for an item that does not exist.
+  private let keychainItemExists: (@Sendable () -> Bool)?
   private let credentialFileURLs: [URL]?
   private let accountProfileURLs: [URL]
 
   public init(
+    id: ProviderID = .anthropic,
+    configDirectory: ClaudeConfigDirectory? = nil,
     environment: [String: String] = ProcessInfo.processInfo.environment,
     allowKeychainRead: Bool = false,
     allowKeychainInteraction: Bool = false,
@@ -28,7 +39,11 @@ public struct AnthropicProvider: UsageProvider {
     session: URLSession? = nil
   ) {
     let session = session ?? ProviderHTTPSession.shared
-    self.environment = environment
+    self.id = id
+    self.configDirectory = configDirectory
+    self.environment = configDirectory?.environment(from: environment) ?? environment
+    self.keychainService =
+      configDirectory?.keychainService() ?? ClaudeConfigDirectory.defaultKeychainService
     self.allowKeychainRead = allowKeychainRead
     self.allowKeychainInteraction = allowKeychainInteraction
     self.passiveStatusline = passiveStatusline
@@ -36,12 +51,15 @@ public struct AnthropicProvider: UsageProvider {
       try await ProviderHTTPSession.boundedData(
         for: $0, using: session, maximumBytes: 1_048_576)
     }
-    self.rateLimitGate = .shared
-    self.renewer = ClaudeSessionRenewer.hook
-    self.ineffectiveRenewal = ClaudeSessionRenewer.ineffectiveRenewalHook
+    self.rateLimitGate = ClaudeRateLimitGate.gate(for: id)
+    self.renewer = ClaudeSessionRenewer.hook(for: id)
+    self.ineffectiveRenewal = ClaudeSessionRenewer.ineffectiveRenewalHook(for: id)
     self.keychainCandidateLoader = nil
-    self.credentialFileURLs = nil
-    self.accountProfileURLs = ClaudeAccountProfile.defaultURLs(environment: environment)
+    self.keychainItemExists = nil
+    self.credentialFileURLs = configDirectory.map { [$0.credentialFileURL] }
+    self.accountProfileURLs =
+      configDirectory.map { [$0.accountProfileURL] }
+      ?? ClaudeAccountProfile.defaultURLs(environment: environment)
   }
 
   /// The renewal and Keychain hooks exist so tests never launch Claude Code or
@@ -56,31 +74,66 @@ public struct AnthropicProvider: UsageProvider {
     ineffectiveRenewal: ClaudeIneffectiveRenewalHook? = nil,
     keychainCandidateLoader: ClaudeKeychainCandidateLoader? = nil,
     credentialFileURLs: [URL]? = nil,
-    accountProfileURLs: [URL] = []
+    accountProfileURLs: [URL] = [],
+    id: ProviderID = .anthropic,
+    configDirectory: ClaudeConfigDirectory? = nil,
+    keychainItemExists: (@Sendable () -> Bool)? = nil
   ) {
-    self.environment = environment
+    self.id = id
+    self.configDirectory = configDirectory
+    self.environment = configDirectory?.environment(from: environment) ?? environment
+    self.keychainService =
+      configDirectory?.keychainService() ?? ClaudeConfigDirectory.defaultKeychainService
     self.allowKeychainRead = allowKeychainRead
     self.allowKeychainInteraction = allowKeychainInteraction
     self.passiveStatusline = false
     self.requestHandler = requestHandler
     self.rateLimitGate = rateLimitGate
-    self.renewer = renewer ?? ClaudeSessionRenewer.hook
-    self.ineffectiveRenewal = ineffectiveRenewal ?? ClaudeSessionRenewer.ineffectiveRenewalHook
+    self.renewer = renewer ?? ClaudeSessionRenewer.hook(for: id)
+    self.ineffectiveRenewal = ineffectiveRenewal ?? ClaudeSessionRenewer.ineffectiveRenewalHook(for: id)
     self.keychainCandidateLoader = keychainCandidateLoader
-    self.credentialFileURLs = credentialFileURLs
-    self.accountProfileURLs = accountProfileURLs
+    self.keychainItemExists = keychainItemExists
+    self.credentialFileURLs = credentialFileURLs ?? configDirectory.map { [$0.credentialFileURL] }
+    self.accountProfileURLs =
+      accountProfileURLs.isEmpty ? (configDirectory.map { [$0.accountProfileURL] } ?? []) : accountProfileURLs
   }
 
+  /// A status-line reading this recent comes from a Claude Code session that
+  /// is running now, so it is preferred over a sign-in read.
+  static let statuslineFreshness: TimeInterval = 10 * 60
+
+  static let waitingForStatusline =
+    "Waiting for Claude Code in a terminal. The Claude desktop app does not send these updates; allow usage access to read limits directly."
+
+  /// An added account has nothing to read until its directory is chosen.
+  public static let configDirectoryMissing = UsageProviderError.credentialsNotFound(
+    "Choose this account's Claude Code configuration directory in Settings > Providers.")
+
   public func fetch() async throws -> UsageSnapshot {
-    if self.passiveStatusline {
-      guard let snapshot = ClaudeStatuslineBridge.read(
-        cacheURL: ClaudeStatuslineBridge.cacheURL(environment: self.environment))
-      else {
-        throw UsageProviderError.unavailable(
-          "Waiting for Claude Code. Your limits appear after its next response.")
-      }
-      return snapshot
+    if self.id.isAdded, self.configDirectory == nil {
+      throw Self.configDirectoryMissing
     }
+    if self.passiveStatusline {
+      let snapshot = ClaudeStatuslineBridge.read(
+        cacheURL: ClaudeStatuslineBridge.cacheURL(provider: self.id), provider: self.id)
+      // Status-line updates only come from Claude Code running in a terminal;
+      // the Claude desktop app never sends them. With usage access allowed
+      // they are an extra, faster source: a recent one wins, otherwise the
+      // sign-in is read as usual. Without access they are the only source.
+      if let snapshot,
+        !self.allowKeychainRead
+          || Date().timeIntervalSince(snapshot.fetchedAt) < Self.statuslineFreshness
+      {
+        return snapshot
+      }
+      if !self.allowKeychainRead {
+        throw UsageProviderError.unavailable(Self.waitingForStatusline)
+      }
+    }
+    // A block raised by this pass only counts if the gate was not cleared in
+    // the meantime: a folder change is a new sign-in, and a late answer to
+    // the old one must not hold it back.
+    let gateGeneration = await self.rateLimitGate.currentGeneration
     if let retryAt = await self.rateLimitGate.activeBlock(), retryAt > Date() {
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     }
@@ -89,20 +142,24 @@ public struct AnthropicProvider: UsageProvider {
     do {
       let stored = try await self.loadCredentials()
       do {
-        response = try await self.fetchUsage(accessToken: stored.accessToken)
+        response = try await self.fetchUsage(
+          accessToken: stored.accessToken, gateGeneration: gateGeneration)
         credentials = stored
       } catch UsageProviderError.unauthorized {
         // The stored token can be rejected before its recorded expiry, for
         // example after Claude Code rotated it elsewhere. Let Claude Code renew
         // its own session once, then retry exactly once.
         let renewed = try await self.renewedCredentials(after: stored)
-        response = try await self.fetchUsage(accessToken: renewed.accessToken)
+        response = try await self.fetchUsage(
+          accessToken: renewed.accessToken, gateGeneration: gateGeneration)
         credentials = renewed
       }
     } catch UsageProviderError.unauthorized where !self.allowKeychainRead {
       #if canImport(Security)
-        if ClaudeCredentialLoader.keychainItemExistsWithoutPrompt() {
-          throw UsageProviderError.keychainConsentRequired(.anthropic)
+        if self.keychainItemExists?()
+          ?? ClaudeCredentialLoader.keychainItemExistsWithoutPrompt(service: self.keychainService)
+        {
+          throw UsageProviderError.keychainConsentRequired(self.id)
         }
       #endif
       throw Self.signInExpired
@@ -113,7 +170,7 @@ public struct AnthropicProvider: UsageProvider {
       throw UsageProviderError.unavailable("Anthropic did not return subscription usage windows.")
     }
     return UsageSnapshot(
-      provider: .anthropic,
+      provider: self.id,
       planName: ClaudePlanFormatter.plan(from: credentials.subscriptionType)
         ?? ClaudePlanFormatter.plan(from: credentials.rateLimitTier),
       windows: windows,
@@ -176,9 +233,12 @@ public struct AnthropicProvider: UsageProvider {
       environment: self.environment, allowKeychainRead: self.allowKeychainRead,
       allowKeychainInteraction: self.allowKeychainInteraction,
       keychainCandidateLoader: self.keychainCandidateLoader,
+      keychainItemExists: self.keychainItemExists,
       credentialFileURLs: self.credentialFileURLs,
       renewer: self.renewer,
-      ineffectiveRenewal: self.ineffectiveRenewal)
+      ineffectiveRenewal: self.ineffectiveRenewal,
+      provider: self.id,
+      keychainService: self.keychainService)
   }
 
   /// Reserve never performs the refresh grant itself. Claude Code's documented
@@ -205,19 +265,43 @@ public struct AnthropicProvider: UsageProvider {
   /// backoff so one provider clock or corrupt defaults value cannot disable
   /// Claude checks indefinitely.
   public static func clearPersistedRateLimitBlock() async {
-    await ClaudeRateLimitGate.shared.clear()
+    for gate in ClaudeRateLimitGate.all { await gate.clear() }
   }
 
-  /// Detects the item without reading its secret or presenting a prompt.
-  public static func keychainCredentialIsAvailableWithoutPrompt() -> Bool {
+  /// One account's block only: a new folder for an added account is a new
+  /// sign-in, which the previous one's back-off must not hold back.
+  public static func clearPersistedRateLimitBlock(for provider: ProviderID) async {
+    await ClaudeRateLimitGate.gate(for: provider).clear()
+  }
+
+  /// Drops everything kept for an added account's sign-in: its rate-limit
+  /// block and its renewal cooldown. Called when the account's folder changes
+  /// or the account is removed, so the next sign-in starts with a clean clock.
+  /// The gate itself stays: clearing it moves its generation on, which is
+  /// what makes a late answer to the old sign-in harmless.
+  public static func forgetAccount(_ provider: ProviderID) async {
+    guard provider.isAdded else { return }
+    await ClaudeRateLimitGate.gate(for: provider).clear()
+    ClaudeSessionRenewer.forget(provider)
+  }
+
+  /// Detects the item without reading its secret or presenting a prompt. An
+  /// added account passes its directory so the probe names that directory's
+  /// own Keychain item.
+  public static func keychainCredentialIsAvailableWithoutPrompt(
+    configDirectory: ClaudeConfigDirectory? = nil
+  ) -> Bool {
     #if canImport(Security)
-      ClaudeCredentialLoader.keychainItemExistsWithoutPrompt()
+      ClaudeCredentialLoader.keychainItemExistsWithoutPrompt(
+        service: configDirectory?.keychainService() ?? ClaudeConfigDirectory.defaultKeychainService)
     #else
       false
     #endif
   }
 
-  private func fetchUsage(accessToken: String) async throws -> ClaudeUsageResponse {
+  private func fetchUsage(
+    accessToken: String, gateGeneration: Int? = nil
+  ) async throws -> ClaudeUsageResponse {
     guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
       throw UsageProviderError.invalidResponse("invalid Anthropic endpoint")
     }
@@ -254,7 +338,7 @@ public struct AnthropicProvider: UsageProvider {
     case 429:
       let retryAt = Self.conservativeRetryDate(
         retryAfter: http.value(forHTTPHeaderField: "Retry-After"))
-      await self.rateLimitGate.block(until: retryAt)
+      await self.rateLimitGate.block(until: retryAt, generation: gateGeneration)
       throw UsageProviderError.rateLimited(retryAt: retryAt)
     default:
       throw UsageProviderError.unavailable(
@@ -288,12 +372,38 @@ public struct AnthropicProvider: UsageProvider {
 
 actor ClaudeRateLimitGate {
   static let shared = ClaudeRateLimitGate()
+  /// Each added account holds its own token, so Anthropic rate limits it on
+  /// its own and one account's back-off never silences another.
+  private static let registryLock = NSLock()
+  nonisolated(unsafe) private static var registry: [String: ClaudeRateLimitGate] = [:]
+  static var all: [ClaudeRateLimitGate] {
+    self.registryLock.lock()
+    defer { self.registryLock.unlock() }
+    return [self.shared] + self.registry.values
+  }
   private let defaults: UserDefaults?
-  private let key = "anthropic.rateLimitBlockedUntil"
+  private let key: String
   private var memoryBlock: Date?
+  /// Moves on at every `clear()`. A block raised for an earlier generation
+  /// belongs to a sign-in that is gone and is dropped.
+  private(set) var currentGeneration = 0
 
-  init(defaults: UserDefaults? = UserDefaults(suiteName: "com.pocarles.reserve") ?? .standard) {
+  init(
+    defaults: UserDefaults? = UserDefaults(suiteName: "com.pocarles.reserve") ?? .standard,
+    key: String = "anthropic.rateLimitBlockedUntil"
+  ) {
     self.defaults = defaults
+    self.key = key
+  }
+
+  static func gate(for provider: ProviderID) -> ClaudeRateLimitGate {
+    guard provider.isAdded else { return self.shared }
+    self.registryLock.lock()
+    defer { self.registryLock.unlock() }
+    if let gate = self.registry[provider.rawValue] { return gate }
+    let gate = ClaudeRateLimitGate(key: "\(provider.rawValue).rateLimitBlockedUntil")
+    self.registry[provider.rawValue] = gate
+    return gate
   }
 
   func activeBlock(now: Date = Date()) -> Date? {
@@ -309,7 +419,8 @@ actor ClaudeRateLimitGate {
     return date
   }
 
-  func block(until date: Date) {
+  func block(until date: Date, generation: Int? = nil) {
+    if let generation, generation != self.currentGeneration { return }
     let now = Date()
     let capped = min(
       max(now, date), now.addingTimeInterval(AnthropicProvider.maximumRetryDelay))
@@ -320,6 +431,7 @@ actor ClaudeRateLimitGate {
   func clear() {
     self.memoryBlock = nil
     self.defaults?.removeObject(forKey: self.key)
+    self.currentGeneration += 1
   }
 }
 
@@ -404,13 +516,16 @@ enum ClaudeCredentialLoader {
     keychainItemExists: (@Sendable () -> Bool)? = nil,
     credentialFileURLs: [URL]? = nil,
     renewer: ClaudeSessionRenewalHook? = nil,
-    ineffectiveRenewal: ClaudeIneffectiveRenewalHook? = nil
+    ineffectiveRenewal: ClaudeIneffectiveRenewalHook? = nil,
+    provider: ProviderID = .anthropic,
+    keychainService: String = ClaudeConfigDirectory.defaultKeychainService
   ) async throws -> ClaudeCredentials {
     var collected = await self.candidates(
       environment: environment, allowKeychainRead: allowKeychainRead,
       allowKeychainInteraction: allowKeychainInteraction,
       keychainCandidateLoader: keychainCandidateLoader,
-      credentialFileURLs: credentialFileURLs)
+      credentialFileURLs: credentialFileURLs,
+      keychainService: keychainService)
     // Claude Code writes a completed browser sign-in to its protected store.
     // That store keeps precedence over legacy credential files left behind by
     // an earlier sign-in, which is why collection order decides here.
@@ -423,7 +538,8 @@ enum ClaudeCredentialLoader {
     let consentIsPending = self.keychainConsentIsPending(
       allowKeychainRead: allowKeychainRead,
       keychainCandidateFound: collected.keychainCandidateFound,
-      itemExists: keychainItemExists)
+      itemExists: keychainItemExists,
+      keychainService: keychainService)
 
     if !consentIsPending, let renewable = Self.renewalCandidate(in: collected.all, now: now),
       let refreshToken = renewable.refreshToken,
@@ -434,7 +550,8 @@ enum ClaudeCredentialLoader {
         environment: environment, allowKeychainRead: allowKeychainRead,
         allowKeychainInteraction: allowKeychainInteraction,
         keychainCandidateLoader: keychainCandidateLoader,
-        credentialFileURLs: credentialFileURLs)
+        credentialFileURLs: credentialFileURLs,
+        keychainService: keychainService)
       if let usable = collected.usableCredentials(now: now) { return usable }
       // The helper exited successfully and still no usable session appeared.
       // Without this the ordinary cooldown would relaunch it every refresh.
@@ -443,7 +560,7 @@ enum ClaudeCredentialLoader {
 
     #if canImport(Security)
       if let keychainError = collected.keychainError { throw keychainError }
-      if consentIsPending { throw UsageProviderError.keychainConsentRequired(.anthropic) }
+      if consentIsPending { throw UsageProviderError.keychainConsentRequired(provider) }
     #endif
     guard collected.all.isEmpty else { throw AnthropicProvider.signInExpiredCredentials }
     throw UsageProviderError.credentialsNotFound(
@@ -467,11 +584,12 @@ enum ClaudeCredentialLoader {
   private static func keychainConsentIsPending(
     allowKeychainRead: Bool,
     keychainCandidateFound: Bool,
-    itemExists: (@Sendable () -> Bool)? = nil
+    itemExists: (@Sendable () -> Bool)? = nil,
+    keychainService: String = ClaudeConfigDirectory.defaultKeychainService
   ) -> Bool {
     #if canImport(Security)
       guard !allowKeychainRead || !keychainCandidateFound else { return false }
-      return itemExists?() ?? self.keychainItemExistsWithoutPrompt()
+      return itemExists?() ?? self.keychainItemExistsWithoutPrompt(service: keychainService)
     #else
       return false
     #endif
@@ -483,13 +601,15 @@ enum ClaudeCredentialLoader {
     allowKeychainRead: Bool,
     allowKeychainInteraction: Bool,
     keychainCandidateLoader: ClaudeKeychainCandidateLoader?,
-    credentialFileURLs: [URL]?
+    credentialFileURLs: [URL]?,
+    keychainService: String = ClaudeConfigDirectory.defaultKeychainService
   ) async -> CollectedCandidates {
     var collected = CollectedCandidates()
     let keychainLoader: ClaudeKeychainCandidateLoader?
     #if canImport(Security)
       keychainLoader = keychainCandidateLoader ?? { allowInteraction in
-        try await self.keychainCredentials(allowInteraction: allowInteraction)
+        try await self.keychainCredentials(
+          service: keychainService, allowInteraction: allowInteraction)
       }
     #else
       keychainLoader = keychainCandidateLoader
@@ -596,8 +716,10 @@ enum ClaudeCredentialLoader {
   }
 
   #if canImport(Security)
-    static func keychainItemExistsWithoutPrompt() -> Bool {
-      switch self.keychainProbeStatus() {
+    static func keychainItemExistsWithoutPrompt(
+      service: String = ClaudeConfigDirectory.defaultKeychainService
+    ) -> Bool {
+      switch self.keychainProbeStatus(service: service) {
       case errSecSuccess, errSecInteractionNotAllowed, errSecInteractionRequired,
         errSecUserCanceled, errSecAuthFailed, errSecNoAccessForItem,
         errSecMissingEntitlement, errSecRestrictedAPI:
@@ -614,16 +736,16 @@ enum ClaudeCredentialLoader {
     /// itself succeeded without interaction. A locked item still counts as
     /// present for the consent UI but must not start `security -w` in a
     /// background refresh.
-    private static func keychainItemIsReadableWithoutPrompt() -> Bool {
-      self.keychainProbeStatus() == errSecSuccess
+    private static func keychainItemIsReadableWithoutPrompt(service: String) -> Bool {
+      self.keychainProbeStatus(service: service) == errSecSuccess
     }
 
-    private static func keychainProbeStatus() -> OSStatus {
+    private static func keychainProbeStatus(service: String) -> OSStatus {
       let context = LAContext()
       context.interactionNotAllowed = true
       let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "Claude Code-credentials",
+        kSecAttrService as String: service,
         kSecMatchLimit as String: kSecMatchLimitOne,
         kSecReturnAttributes as String: true,
         kSecUseAuthenticationContext as String: context,
@@ -638,6 +760,7 @@ enum ClaudeCredentialLoader {
     /// `security` executable remains on that access list. Reserve launches it
     /// without a shell and captures its bounded output through a private pipe.
     static func keychainCredentials(
+      service: String = ClaudeConfigDirectory.defaultKeychainService,
       allowInteraction: Bool = false,
       itemExists: (@Sendable () -> Bool)? = nil,
       securityToolRunner: @escaping @Sendable (
@@ -650,15 +773,15 @@ enum ClaudeCredentialLoader {
     ) async throws -> ClaudeCredentialCandidate? {
       let itemIsPresent = itemExists?()
         ?? (allowInteraction
-          ? self.keychainItemExistsWithoutPrompt()
-          : self.keychainItemIsReadableWithoutPrompt())
+          ? self.keychainItemExistsWithoutPrompt(service: service)
+          : self.keychainItemIsReadableWithoutPrompt(service: service))
       guard itemIsPresent else { return nil }
       let output: String
       do {
         let timeout: Duration = allowInteraction ? .seconds(120) : .seconds(3)
         output = try await securityToolRunner(
           "/usr/bin/security",
-          ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+          ["find-generic-password", "-s", service, "-w"],
           [:], timeout)
       } catch let error as UsageProviderError {
         if case .timedOut = error {
@@ -704,6 +827,10 @@ struct ClaudeOAuthCredential: Decodable {
 /// revoked session cannot turn every refresh into a helper launch.
 actor ClaudeSessionRenewer {
   static let shared = ClaudeSessionRenewer()
+  /// Each account renews on its own clock: the cooldown and back-off protect
+  /// one sign-in, and every directory holds its own.
+  private static let registryLock = NSLock()
+  nonisolated(unsafe) private static var registry: [String: ClaudeSessionRenewer] = [:]
   static let defaultScopes = [
     "user:file_upload", "user:inference", "user:mcp_servers", "user:profile",
     "user:sessions:claude_code",
@@ -722,6 +849,35 @@ actor ClaudeSessionRenewer {
 
   static let ineffectiveRenewalHook: ClaudeIneffectiveRenewalHook = {
     await ClaudeSessionRenewer.shared.noteIneffectiveRenewal()
+  }
+
+  static func instance(for provider: ProviderID) -> ClaudeSessionRenewer {
+    guard provider.isAdded else { return self.shared }
+    self.registryLock.lock()
+    defer { self.registryLock.unlock() }
+    if let renewer = self.registry[provider.rawValue] { return renewer }
+    let renewer = ClaudeSessionRenewer()
+    self.registry[provider.rawValue] = renewer
+    return renewer
+  }
+
+  /// The next `instance(for:)` starts a fresh clock.
+  static func forget(_ provider: ProviderID) {
+    self.registryLock.lock()
+    defer { self.registryLock.unlock() }
+    self.registry.removeValue(forKey: provider.rawValue)
+  }
+
+  static func hook(for provider: ProviderID) -> ClaudeSessionRenewalHook {
+    let renewer = self.instance(for: provider)
+    return { refreshToken, scopes, environment in
+      await renewer.renew(refreshToken: refreshToken, scopes: scopes, environment: environment)
+    }
+  }
+
+  static func ineffectiveRenewalHook(for provider: ProviderID) -> ClaudeIneffectiveRenewalHook {
+    let renewer = self.instance(for: provider)
+    return { await renewer.noteIneffectiveRenewal() }
   }
 
   /// Claude Code exiting zero is not proof that a usable session was stored.

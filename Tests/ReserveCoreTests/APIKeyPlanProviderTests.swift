@@ -297,7 +297,7 @@ struct APIKeyPlanProviderTests {
   // MARK: Beta providers
 
   @Test func exactlyTheUnverifiedPlanProvidersAreBeta() {
-    let beta = Set(ProviderID.allCases.filter { ProviderDescriptor.forProvider($0).isBeta })
+    let beta = Set(ProviderID.defaults.filter { ProviderDescriptor.forProvider($0).isBeta })
     #expect(beta == [.zai, .kimi, .gemini])
   }
 
@@ -456,8 +456,8 @@ struct APIKeyPlanProviderTests {
       #expect(!ProviderDescriptor.forProvider(provider).usesAPIKey)
       #expect(ProviderDescriptor.forProvider(provider).helper != nil)
     }
-    // New cases are appended, so earlier persisted raw values are unchanged.
-    #expect(ProviderID.allCases.map(\.rawValue)
+    // New kinds are appended, so earlier persisted raw values are unchanged.
+    #expect(ProviderID.defaults.map(\.rawValue)
       == ["openAI", "anthropic", "grok", "cursor", "copilot", "zai", "kimi", "gemini"])
   }
 
