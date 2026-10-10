@@ -540,6 +540,7 @@ final class UsageStore {
         ordinal = candidate
       }
       ProviderAccountLabels.setNeutralLabel("Account \(ordinal ?? 2)", for: account)
+      ProviderAccountLabels.setCustom(defaults.bool(forKey: "\(account.rawValue).labelIsCustom"), for: account)
       ProviderAccountLabels.set(
         defaults.string(forKey: "\(account.rawValue).label") ?? "Account \(ordinal ?? 2)", for: account)
     }
@@ -652,6 +653,7 @@ final class UsageStore {
     self.states.removeValue(forKey: account)
     ProviderAccountLabels.set(nil, for: account)
     ProviderAccountLabels.setNeutralLabel(nil, for: account)
+    ProviderAccountLabels.setCustom(false, for: account)
     if self.menuBarProvider == account { self.menuBarProvider = nil }
     if self.defaults.string(forKey: "dashboard.selectedProvider") == account.rawValue {
       self.expandedProvider = nil
@@ -672,7 +674,7 @@ final class UsageStore {
   /// personal information is hidden.
   func accountShownLabel(for account: ProviderID) -> String? {
     guard account.isAdded else { return nil }
-    return self.hidesPersonalInfo
+    return self.hidesPersonalInfo && !ProviderAccountLabels.isCustom(account)
       ? ProviderAccountLabels.neutralLabel(for: account)
       : ProviderAccountLabels.label(for: account) ?? ProviderAccountLabels.neutralLabel(for: account)
   }
@@ -683,10 +685,12 @@ final class UsageStore {
     let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed.isEmpty {
       self.defaults.set(false, forKey: "\(account.rawValue).labelIsCustom")
+      ProviderAccountLabels.setCustom(false, for: account)
       self.adoptAutomaticLabel(for: account, from: self.states[account]?.snapshot, force: true)
     } else {
       self.defaults.set(String(trimmed.prefix(64)), forKey: "\(account.rawValue).label")
       self.defaults.set(true, forKey: "\(account.rawValue).labelIsCustom")
+      ProviderAccountLabels.setCustom(true, for: account)
       ProviderAccountLabels.set(trimmed, for: account)
     }
     self.changed()

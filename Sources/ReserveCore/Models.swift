@@ -110,7 +110,10 @@ public struct ProviderID: Hashable, Codable, Sendable, Identifiable, RawRepresen
   /// the neutral one ("Account 2"): an organization name is personal.
   public var displayName: String {
     guard self.isAdded else { return self.kind.displayName }
-    let label = ProviderAccountLabels.masksPersonalLabels
+    // A name the person typed is theirs to show; only the automatic one,
+    // taken from the organization, is masked.
+    let masked = ProviderAccountLabels.masksPersonalLabels && !ProviderAccountLabels.isCustom(self)
+    let label = masked
       ? ProviderAccountLabels.neutralLabel(for: self)
       : ProviderAccountLabels.label(for: self) ?? ProviderAccountLabels.neutralLabel(for: self)
     return "\(self.kind.displayName) · \(label ?? "added account")"
@@ -134,6 +137,20 @@ public enum ProviderAccountLabels {
   nonisolated(unsafe) private static var labels: [String: String] = [:]
   nonisolated(unsafe) private static var neutralLabels: [String: String] = [:]
   nonisolated(unsafe) private static var masks = false
+  nonisolated(unsafe) private static var customs: Set<String> = []
+
+  /// True when the shown label is one the person typed.
+  public static func isCustom(_ provider: ProviderID) -> Bool {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    return self.customs.contains(provider.rawValue)
+  }
+
+  public static func setCustom(_ isCustom: Bool, for provider: ProviderID) {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    if isCustom { self.customs.insert(provider.rawValue) } else { self.customs.remove(provider.rawValue) }
+  }
 
   /// Mirrors the "Hide personal info" setting.
   public static var masksPersonalLabels: Bool {

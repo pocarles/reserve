@@ -19,9 +19,12 @@ five-hour and seven-day windows. It stores percentages, reset times, and the
 observation time only. The receiver preserves an existing status-line command
 and forwards its original input and output within size and time limits. Turning
 the option off restores the previous setting and respects later user edits.
-This is a passive source: it updates after Claude Code responds and becomes
-stale while Claude Code is idle. It does not fall back to reading credentials
-when the passive option is selected. The documented feed is limited to supported
+This is a passive source: it updates after Claude Code responds in a terminal
+and becomes stale while Claude Code is idle; the Claude desktop app does not
+run status lines. With usage access allowed, a reading less than ten minutes
+old is used and the direct connection covers the rest. Without usage access
+the status line is the only source and credentials are never read. The
+documented feed is limited to supported
 Pro/Max accounts. [Status-line documentation](https://code.claude.com/docs/en/statusline)
 
 The direct connection remains available. Reserve retains explicit consent when

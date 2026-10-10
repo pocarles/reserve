@@ -166,11 +166,15 @@ app-server JSON-RPC. Provider changes can temporarily break a refresh even when
 the local app is healthy; the last valid snapshot remains visible and is marked
 stale.
 
-Claude can also share the limits in its documented status-line output. Enable
-**Get updates from Claude Code** in its provider details. Reserve then reads a
-quota-only local file and does not read Claude’s sign-in. Updates arrive after
-Claude Code responds, so they pause while it is idle. The existing status line
-is preserved; turning the option off restores it. No conversation text is saved.
+Claude Code in a terminal can also share the limits in its documented
+status-line output. Enable **Also use Claude Code's status line in Terminal**
+in its provider details. Reserve then reads a quota-only local file that
+updates after each Claude Code response. The Claude desktop app does not send
+these updates. With usage access allowed, a reading from the last ten minutes
+wins and Reserve otherwise reads the sign-in as usual; without usage access,
+the status line is the only source and Reserve never reads the sign-in. The
+existing status line is preserved; turning the option off restores it. No
+conversation text is saved.
 Each added Claude account offers the same option; its status line is installed
 in that account's folder and feeds a cache file of its own.
 

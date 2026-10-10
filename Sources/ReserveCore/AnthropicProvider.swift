@@ -98,6 +98,13 @@ public struct AnthropicProvider: UsageProvider {
       accountProfileURLs.isEmpty ? (configDirectory.map { [$0.accountProfileURL] } ?? []) : accountProfileURLs
   }
 
+  /// A status-line reading this recent comes from a Claude Code session that
+  /// is running now, so it is preferred over a sign-in read.
+  static let statuslineFreshness: TimeInterval = 10 * 60
+
+  static let waitingForStatusline =
+    "Waiting for Claude Code in a terminal. The Claude desktop app does not send these updates; allow usage access to read limits directly."
+
   /// An added account has nothing to read until its directory is chosen.
   public static let configDirectoryMissing = UsageProviderError.credentialsNotFound(
     "Choose this account's Claude Code configuration directory in Settings > Providers.")
@@ -107,14 +114,21 @@ public struct AnthropicProvider: UsageProvider {
       throw Self.configDirectoryMissing
     }
     if self.passiveStatusline {
-      guard let snapshot = ClaudeStatuslineBridge.read(
-        cacheURL: ClaudeStatuslineBridge.cacheURL(provider: self.id),
-        provider: self.id)
-      else {
-        throw UsageProviderError.unavailable(
-          "Waiting for Claude Code. Your limits appear after its next response.")
+      let snapshot = ClaudeStatuslineBridge.read(
+        cacheURL: ClaudeStatuslineBridge.cacheURL(provider: self.id), provider: self.id)
+      // Status-line updates only come from Claude Code running in a terminal;
+      // the Claude desktop app never sends them. With usage access allowed
+      // they are an extra, faster source: a recent one wins, otherwise the
+      // sign-in is read as usual. Without access they are the only source.
+      if let snapshot,
+        !self.allowKeychainRead
+          || Date().timeIntervalSince(snapshot.fetchedAt) < Self.statuslineFreshness
+      {
+        return snapshot
       }
-      return snapshot
+      if !self.allowKeychainRead {
+        throw UsageProviderError.unavailable(Self.waitingForStatusline)
+      }
     }
     // A block raised by this pass only counts if the gate was not cleared in
     // the meantime: a folder change is a new sign-in, and a late answer to

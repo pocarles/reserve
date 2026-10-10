@@ -94,6 +94,9 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     window.toolbarStyle = .preference
     window.level = .floating
     window.hidesOnDeactivate = false
+    // Opening Settings from another Space brings the window to that Space
+    // instead of switching back to the one it was left on.
+    window.collectionBehavior.insert(.moveToActiveSpace)
     window.center()
     super.init(window: window)
     window.delegate = self
@@ -154,11 +157,31 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
 
   required init?(coder: NSCoder) { nil }
 
+  /// Settings opens on the screen the person is working on: the one with the
+  /// pointer, which is where the menu-bar window they just used is. A window
+  /// left on another display moves over, centred, keeping its size.
+  private func moveToPresentingScreen() {
+    guard let window = self.window else { return }
+    let mouse = NSEvent.mouseLocation
+    guard let target = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) })
+      ?? NSScreen.main,
+      window.screen != target
+    else { return }
+    let visible = target.visibleFrame
+    var frame = window.frame
+    frame.size.width = min(frame.width, visible.width)
+    frame.size.height = min(frame.height, visible.height)
+    frame.origin.x = visible.midX - frame.width / 2
+    frame.origin.y = visible.midY - frame.height / 2
+    window.setFrame(frame, display: false)
+  }
+
   override func showWindow(_ sender: Any?) {
     // The current pane is already live. Rebuilding it on every reopen retained
     // a complete control tree until the next AppKit autorelease drain.
     if self.window?.contentView == nil { self.applyPane(animated: false) }
     self.store.insightsVisible = self.pane == .insights
+    self.moveToPresentingScreen()
     super.showWindow(sender)
     self.window?.makeKeyAndOrderFront(nil)
     self.window?.orderFrontRegardless()
@@ -1048,22 +1071,22 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
       checkbox.identifier = NSUserInterfaceItemIdentifier(
         "settings-keychain-\(provider.rawValue)")
       checkbox.state = self.store.keychainReadAllowed(for: provider) ? .on : .off
-      checkbox.isEnabled = !provider.isAnthropic || !self.store.claudePassiveUpdatesEnabled(for: provider)
       checkbox.toolTip =
         "Uses \(provider.displayName)'s existing sign-in only to check usage. Reserve never stores it."
       rows.append(self.formRow("\(provider.displayName):", checkbox, labelWidth: 92))
     }
     if provider.isAnthropic {
-      let passive = NSButton(checkboxWithTitle: "Get updates from Claude Code", target: self,
+      let passive = NSButton(checkboxWithTitle: "Also use Claude Code's status line in Terminal", target: self,
         action: #selector(self.claudePassiveUpdatesChanged(_:)))
       passive.state = self.store.claudePassiveUpdatesEnabled(for: provider) ? .on : .off
       passive.identifier = NSUserInterfaceItemIdentifier(Self.passiveUpdatesIdentifier(provider))
       // The status line is installed in the account's own folder, so it
       // waits for that folder to be chosen.
       passive.isEnabled = !provider.isAdded || self.store.claudeConfigDirectory(for: provider) != nil
-      passive.toolTip = "Shares limits after Claude Code responds, without reading your sign-in. Preserves your existing status line. Updates pause when you are not using Claude Code."
+      passive.toolTip = "Claude Code in a terminal shares your limits after each response, which updates Reserve right away. Your existing status line is kept. The Claude desktop app does not send these updates."
       rows.append(self.formRow("Updates:", passive, labelWidth: 92))
-      rows.append(SettingsLabel("Updates after Claude Code responds. No sign-in access needed.",
+      rows.append(SettingsLabel(
+        "Faster updates while you use Claude Code in Terminal. Not sent by the desktop app.",
         size: 11, color: .secondaryLabelColor))
     }
     if let setupAction = AllowanceBuilder.setupAction(
@@ -1420,9 +1443,6 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     field.identifier = NSUserInterfaceItemIdentifier("account-name-\(provider.rawValue)")
     field.stringValue = self.store.accountShownLabel(for: provider) ?? ""
     field.placeholderString = "Team, personal, client…"
-    // The name is often an organization: while personal information is
-    // hidden, the field shows the neutral name and waits.
-    field.isEnabled = !self.store.hidesPersonalInfo
     field.isBezeled = true
     field.bezelStyle = .roundedBezel
     field.lineBreakMode = .byTruncatingTail
@@ -1432,7 +1452,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
     field.target = self
     field.delegate = self
     field.action = #selector(self.accountNameSubmitted(_:))
-    field.toolTip = "How this account is named in Reserve. Filled in from its organization until you change it."
+    field.toolTip = "Your name for this account, shown everywhere in Reserve. Leave empty to use its organization. Hide personal info masks only the automatic name."
     field.setAccessibilityLabel("\(provider.kind.displayName) account name")
     field.widthAnchor.constraint(equalToConstant: 220).isActive = true
     return field
@@ -1444,8 +1464,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
   }
 
   @objc private func accountNameSubmitted(_ sender: NSControl) {
-    guard let provider = self.accountNameProvider(for: sender), let field = sender as? NSTextField,
-      !self.store.hidesPersonalInfo
+    guard let provider = self.accountNameProvider(for: sender), let field = sender as? NSTextField
     else { return }
     self.store.setAccountLabel(field.stringValue, for: provider)
     field.stringValue = self.store.accountShownLabel(for: provider) ?? ""
@@ -2629,9 +2648,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate, N
         setText("renewal.\(provider.rawValue)", self.store.renewalDay(for: provider).map(String.init) ?? "")
         check("settings-keychain-\(provider.rawValue)", self.store.keychainReadAllowed(for: provider))
         if provider.isAnthropic {
-          let passive = self.store.claudePassiveUpdatesEnabled(for: provider)
-          check(Self.passiveUpdatesIdentifier(provider), passive)
-          button("settings-keychain-\(provider.rawValue)")?.isEnabled = !passive
+          check(Self.passiveUpdatesIdentifier(provider), self.store.claudePassiveUpdatesEnabled(for: provider))
         }
         if let button = views.compactMap({ $0 as? NSButton }).first(where: {
           $0.identifier?.rawValue == provider.rawValue
